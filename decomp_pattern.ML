@@ -1,0 +1,149 @@
+
+signature DECOMP_PATTERN =
+sig
+  val decompose_match: theory -> term * term -> Type.tyenv * Envir.tenv -> Type.tyenv * Envir.tenv
+end;
+
+structure DecompPattern: DECOMP_PATTERN =
+struct
+
+fun mapbnd f =
+    let fun mpb d (Bound(i))     = if i < d then Bound(i) else Bound(f(i-d)+d)
+          | mpb d (Abs(s,T,t))   = Abs(s,T,mpb(d+1) t)
+          | mpb d ((u1 $ u2))    = (mpb d u1)$(mpb d u2)
+          | mpb _ atom           = atom
+    in mpb 0 end;
+
+fun idx [] j     = raise Pattern.MATCH
+  | idx(i::is) j = if (i:int) =j then length is else idx is j;
+
+fun mkabs (binders,is,t)  =
+    let fun mk(i::is) = let val (x,T) = nth binders i
+                        in Abs(x,T,mk is) end
+          | mk []     = t
+    in mk is end;
+
+val incr = mapbnd (fn i => i+1);
+
+fun ints_of []             = []
+  | ints_of (Bound i ::bs) =
+      let val is = ints_of bs
+      in if member (op =) is i then raise Pattern.Pattern else i::is end
+  | ints_of _              = raise Pattern.Pattern;
+
+fun ints_of' env ts = ints_of (map (Envir.head_norm env) ts);
+
+
+fun app (s,(i::is)) = app (s$Bound(i),is)
+  | app (s,[])      = s;
+
+fun red (Abs(_,_,s)) (i::is) js = red s is (i::js)
+  | red t            []      [] = t
+  | red t            is      jn = app (mapbnd (nth jn) t,is);
+
+
+
+
+(*predicate: downto0 (is, n) <=> is = [n, n - 1, ..., 0]*)
+fun downto0 (i :: is, n) = i = n andalso downto0 (is, n - 1)
+  | downto0 ([], n) = n = ~1;
+
+
+(*** Matching ***)
+
+fun typ_match thy TU tyenv = Sign.typ_match thy TU tyenv
+  handle Type.TYPE_MATCH => raise Pattern.MATCH;
+
+
+
+(* Matching of higher-order patterns *)
+
+fun match_bind(itms,binders,ixn,T,is,t) =
+  let val js = loose_bnos t
+  in if null is
+     then if null js then Vartab.update_new (ixn, (T, t)) itms else raise Pattern.MATCH
+     else if subset (op =) (js, is)
+          then let val t' = if downto0(is,length binders - 1) then t
+                            else mapbnd (idx is) t
+               in Vartab.update_new (ixn, (T, mkabs (binders, is, t'))) itms end
+          else raise Pattern.MATCH
+  end;
+
+
+
+
+
+(* same as match, except: no eta expansion of Object !!!!
+   But pattern is on-the-fly eta-expanded, which corresponds
+   to eta-contraction of the object. So decompose_match corresponds to
+   higher-order pattern matching modulo beta, while eta-contracting
+   the object on the fly.
+   first_order_match also only eta-expands the pattern, so we can fallback on it
+   for non-patterns
+   
+   Why the name? We want to regard lambda as a syntactic construct which is
+   to be decomposed structurally instead of being introduced on-the-fly via
+   eta-expansion!
+     E.g.    f does not match (% x. ?t(x))
+             but (% x. f(x)) does via ?t:=f
+*)
+fun decompose_match thy (po as (pat,obj)) envir =
+let
+  (* Pre: pat and obj have same type *)
+  fun mtch binders (pat,obj) (env as (iTs,itms)) =
+    case pat of
+      Abs(ns,Ts,ts) =>
+        (case obj of
+           Abs(nt,Tt,tt) => mtch ((nt,Tt)::binders) (ts,tt) env
+         | _ => raise Pattern.MATCH)  (* THIS IS THE DIFF RESP. TO match *)
+    | _ => (case obj of
+              Abs(nt,Tt,tt) =>
+                mtch((nt,Tt)::binders) ((incr pat)$Bound(0),tt) env
+            | _ => cases(binders,env,pat,obj))
+
+  and cases(binders,env as (iTs,itms),pat,obj) =
+    let val (ph,pargs) = strip_comb pat
+        fun rigrig1(iTs,oargs) = fold (mtch binders) (pargs~~oargs) (iTs,itms)
+          handle ListPair.UnequalLengths => raise Pattern.MATCH
+        fun rigrig2((a:string,Ta),(b,Tb),oargs) =
+              if a <> b then raise Pattern.MATCH
+              else rigrig1(typ_match thy (Ta,Tb) iTs, oargs)
+    in case ph of
+         Var(ixn,T) =>
+           let val is = ints_of pargs
+           in case Envir.lookup' (itms, (ixn, T)) of
+                NONE => (iTs,match_bind(itms,binders,ixn,T,is,obj))
+              | SOME u => if Pattern.aeconv (obj, red u is []) then env
+                          else raise Pattern.MATCH
+           end
+             (* TODO(feature):
+                   wenn aus  ints_of pargs  Pattern geraised wird,
+                   hier strukturell weitermachen statt direkt
+                   zu first-order-matching zu degraden, dh
+
+                 handle Pattern =>
+                   let val (oh,oargs) = strip_comb obj
+                   in
+                     fold mtch binders ((ph :: pargs) ~~ (oh :: oargs))
+                   end
+             *)
+       | _ =>
+           let val (oh,oargs) = strip_comb obj
+           in case (ph,oh) of
+                (Const c,Const d) => rigrig2(c,d,oargs)
+              | (Free f,Free g)   => rigrig2(f,g,oargs)
+              | (Bound i,Bound j) => if i<>j then raise Pattern.MATCH
+                                     else rigrig1(iTs,oargs)
+              | (Abs _, _)        => raise Pattern.Pattern
+              | (_, Abs _)        => raise Pattern.Pattern
+              | _                 => raise Pattern.MATCH
+           end
+    end;
+
+  val pT = fastype_of pat
+  and oT = fastype_of obj
+  val envir' = apfst (typ_match thy (pT, oT)) envir;
+in mtch [] po envir' handle Pattern => Pattern.first_order_match thy po envir' end;
+
+
+end
