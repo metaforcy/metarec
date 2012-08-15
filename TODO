@@ -1,0 +1,752 @@
+
+(* TODO(feature):
+  lokalisieren: Judgements-Ids sind Seriennummern! (sonst ggf Ueberlappung von Namen in verschiedenen Targets)
+    und der Benutzer gibt immer head_terms statt judgement-ids an
+    also braucht man Netze/Tabellen
+      head_term -> judgement-id 
+      appl. head_term -> judgement-id
+      judgement-id -> matcher, maker, head_term, mode, Benutzername
+    zusaetzlich
+      Judgement-Graph
+*)
+
+(* TODO(refactor):
+     * nurnoch ein allgemeines Wohlgeformtheitsjudgement wf :: prop => prop => prop
+       mit 1 input, 1 output
+       Wohlgeformtheit von Judgementapplikationen wird dann ueber
+       angabe von Regeln fuer wf realisiert, die die Proposition synthetisieren.
+       zB    wf (x => A) (EX i. A => univ(i))
+             wf (easy x y) True
+*)
+
+
+  
+(* TODO(feature)
+     * Prioritaeten nicht numerisch angeben sondern ueber Constraints an
+       Prioritaetrgraph spezifizieren
+
+   TODO(opt)
+     * reine Netze statt Item-Netze nutzen damit auch einfuegen von
+       Regeln effizient; aber fraglich ob forward-rules soviele Regeln
+       generieren das das jemals lohnt
+     * statt gctxts, alles nurnoch auf Beweiskontexten (ggf aux Kontexten von lthys)
+       laufen lassen und Theorien temporaer in Beweiskontexte einbetten ???
+       FAIL: weil wir ja die Deklaration-Infrastruktur nutzen wollen
+       und man so staendig und nicht nur einmal diese Einbettung fahren muesste.
+*)
+
+
+
+
+
+
+
+
+
+
+(* TODO(opt):
+     * zu Input term in primaerer Position einen maximal-gesharetem Term-DAG verwalten
+       und parallel in ihn absteigen bei Anwendung von _strukturellen Regeln_
+       (primaere Objekte in Regel-Premissen sind
+       Subterme des primaeren Objekts der Regel-Konklusion oder Substitutionen 
+       mit frischen Variablen davon; die sind vermutlich sehr haeufig, ist ja quasi
+       die Definition von primaerem Objekt das die Regel strukturell darin ist)
+       Ableitungen dann auch maximal sharen indem man den Term-DAG annotiert.
+       Koennte sich gut lohnen fuer Wohlformnungschecks fuer Typannotationen weil
+       die Typen ja oft sehr aehnlich sind
+
+       Wichtig ist ggf auch Umstruktierungen (insbes rewrites) eines Terms in
+       primaerer Position auf dem Term-DAG nachzuvollziehen, unter Beruecksichtung
+       von sharing in der Regelanwendung. (ist das dann schon Skeleton-Opt?)
+
+     Einordnung: Term-DAG-Optimierung entspricht sharing bzgl Termstruktur,
+       Skeleton Optimierung entspricht sharing in Regeln?
+       Wird die Skeleton-Optimierung die ich unten beschreibe einfacher wenn
+       man die Term-DAGs Optimierung in Betracht zieht: nurnoch propagierung
+       von Resultaeten ueber lokales Backtracking hinweg?
+
+     * skeleton optimierung des simplifiers durchfaedeln
+       caching des Typisierungs-Theorems von Subtermen wenigstens innerhalb einer Ableitung
+       (und Subableitungen im Rewriting)
+       ueber skeletons die an Var-Positionen Referenzen die bestehenden
+       Ableitungen fuer diesen Subterm tragen
+       * vllt einfaacher als Skeleton-Optimierung f. sharing von Normalisierungen:
+         Tabelle mit "dieser Term schon normal" (vorallem fuer Judgements!)
+         kann man ueber simprocs f. Judgements vermutl in bestehenden
+         simplifier integrieren
+         Problematisch wg Fixing-Context?
+       * vllt einfacher als Skeleton-Opt f. sharing von Ableitungen:
+         discrimination tree als Ableitungs-Cache f (bestimmte?) Judgements verwalten
+       * Skeletons nur in primaeren Judgement-Pos verwalten?
+         Knoten enthalten dann durch Objekte an den anderen Pos indizierte
+         Ableitungen fuer das aktuelle Objekt an primaere Pos
+       * wichtig(!): Ableitungen haengen nicht nur von den Termen, sondern
+         auch von den Annahmen! Im allg sogar von Annahmen die nicht ueber Subterme sind!
+     * Thm-Kisten zumachen nach abgeschl. Inferenz mit Thm.name_derivation !!!
+       (vllt nur wenn Term/Ableitung gross genug war?)
+     * nurnoch normalisieren wenn nicht folgendes Schema Normalitaet fuer das
+       vorliegende Regelsystem garantiert:
+          (t1 t2) normal ==> t1 normal, t2 normal
+          (% x. t) normal ==> t normal
+       d.h. dann nurnoch normalisieren wenn man neue Terme (dann hauptsaechlich wohl Typen)
+       kombiniert
+     * wenn Patterns von extrem einfacher Struktur wie (c $ ?x), (c $ (% x. ?f x))
+       sind und die Terme direkt draufpassen gleich das allgemeinste Matching von
+       Hand konstruieren statt ueber Pattern.match zu gehen
+
+     * Compiler von metarec Klauseln zu Isabelle/ML Funktionen
+       von ctermen zu thmen
+       * Compilerlauf geht immer auf gewissen Metarec-Klauselmengen
+         wenn neue dazukommen (insbes lokale) werden die ueber
+         Continuations vor/nachgeschaltet falls die Ueberlappungs-
+         situation der Klauseln und ihre Priorisieerung das
+         zulaesst. Ansonsten zumindest die Klauselauswahl
+         dynamisch ausfuehren.
+       * partielle Applikationen von Judgements werden zu Closures
+         von Aufrufen an die zugehoerige kompilierte ML-Funktion
+       * Netze und higher-order (decomposing) pattern matching wegcompilen
+         indem man alle Klauseln fuer ein Judgement gemeinsam betrachtet
+         und splitting-Tree fuer die Matchings erstellt
+       * cterm-Primitive nutzen beim matchen von ctermen auf patterns
+       * kein decomposen und maken von Judgementapplikationen mehr,
+         die Komponenten werden direkt als cterm-Tupel mitgefuehrt
+       * Annahmen an fixes (ohne Premissen) speziell verwalten (in Symtab?),
+         nicht als Regeln auf die man matcht
+         
+*)
+
+
+
+(* TODO(features): 
+    * cycle detection (esp for switch rules; or just for any marked rules?)
+      (kann man vermutlich besser mit impliziten forward rules realisieren)
+    * Meta-Applikationen nur auseinandernehmen wenn es keine Regel existiert
+      bei dem der gleiche, rigide Head ueber ZF-Applikationen angewandt ist.
+      Meta-Applikationen nur auseinandernehmen wenn der Head (bzgl Meta-Appl)
+      des Objekts nicht die ZF-Applikation ist
+      Alternativ ne ordentlich abgegrenzte Warnung ausgeben falls mans doch macht.
+    * optional normales HO-pattern matching fuer Objekte in primaerer Position
+      statt decomposing HO-pattern matching (interessant zB wenn man in
+      ZF sowieso immer Markierungskonstanten hat koennte man auch wieder das
+      eta-contrahieren anfangen weil ehh alles Patterns sind und man
+      Syntax, insbesondere Lambdas, immer explizit auseinandernimmt)
+    * delay-Marker an Objekten um Matching auf non-HO-Patterns explizit zu
+      verzoegern. Variablen sind dann nicht-available bis zu spaeterem
+      Match mit ihnen.
+    * forward-Regeln aus Annahmen (oder allg nach add_rule?) inferieren
+      (ueber det. Regelsystem?) um Locale-style forward-propagation zu kriegen
+      * spezielles Registrierungsattribut dafuer, damit man sicher weiss ob
+        die Premissen des Fakts "echt" sind oder nicht
+      * einfachste Lsg: wenn neue Annahme registriert wird,
+        einfach Forward-Regeln mit passender Major-Premisse und dann
+        loesbaren Side-Conditions anwenden bis Fixpunkt erreicht.
+        Wenn man fuer Terminations-Fehlermeldung nur bis zu ner maximale Tiefe
+        gehen will muss man bedenken das Superklassen-Ketten schon mal Laenge 10 o.ae.
+        haben koennen.
+      * beachte: Major-Prem von Forward-Regeln auf Concl der gerade registrierten/gen.
+        Regel matchen, nicht umgekehrt (approximieren durch Unifbarkeit in Discrimination-Nets?)
+      * lokale Annahmen des Regelsystems unter forward-Regeln abschliessen ??
+      * Backward-Regelgenerierung durch Anwendung von forward-Regeln auf Conclusionen
+        gerade registrierten Backward-Regeln ("composing forward rules") i.A. sehr problematisch:
+          neue Conclusion kann viel weniger Variablen enthalten, man
+          muesste wieder raten
+        Vermutlich nur machen wenn die gerade registrierte Backward-Regel
+        keine "echten" Premissen hat (ausser Side-Conditions an Var in der Concl,
+        die man ja insbes f. Typisierung braucht), d.h. sowas wie ne ground-Instanz ist.
+        Macht man bei Locales ja auch nicht anders?
+        * einfaches Kriterium das zu approximieren??: Premissen in der Backward-Regel
+          die generiert wuerde haben Var die in der neuen Concl nicht vorkommen.
+          Was ist mit Strengthening? Premissen die nur Variablen enthalten die nicht
+          mehr vorkommen sind nutzlos, oder?
+      !!* kann man sogar verlangen das die nicht-"echten" Premissen in der Judgementapplikation
+          in der Conclusion internalisiert sind, dann also garkeine Premissen vorliegen
+          und man mit normalen forward rules auf Faktenmengen arbeiten kann.
+          Klingt fuer Typklassen sinnvoll.
+      * Auch fuer transitiven Abschluss von Coercions interessant?
+        Sowas wie Iteration um Cumulation (bis zu Grenze) von
+             A refines B~                          a : A <= B~ => f   ?????????
+          ------------------------------------   --------------------------------------------
+             (a : A <= B~) =>^cl (id ` a : A)           (a : A <= C~) =>^cl (g o f) ` a : C
+        QUARK!!! viel einfacher:
+          simple Coercion g : B <= C erzeugt forward-rules fuer Transitivitaetsabschluss
+              f : A <= B
+           -------------------------------         entsprechend nach in der Domain vorschalten
+             generalize (g o f : A <= C)
+          oder direkter
+                f : A <= B  &&&  g : B <= C
+           ----------------------------------------
+               generalize (g o f : A <= C)
+      * wenn man locales dann nicht mehr braucht vllt besser Coq-style sections
+        implementieren mit fuer mich passendem lambda-Lifting
+        (insbes auch von Regeln, insbes Typklassen-Kram!)
+    * Auch normalization by det. rule system als Option anbieten?
+      * Waere extrem coole Lsg um selektiv eta-long und normalization by evaluation
+        (via quotation) zu kriegen.
+      * Ist dann wohl zusaetzlich zu beta (und eta?), aber keine
+        computational rules?
+      * man gibt dann wohl fuer jedes Judgement an wie es normalisiert
+        werden soll mit passendem subject/type-reduction thm, zB
+           A ~> A' ==> (a : A) == (a : A')
+           (a:A) ~> (a':A) ==> (a : A) == (a' : A)
+        und um Thme zu normalisieren die der Worker erzeugt
+        steigt man mit Simplifier in die propositionale Struktur ab
+        und nutzt fuer das rewriten von Judgements entsprechende
+        cong-Regeln die eventuell det. Regelsysteme anwerfen
+    * Selektiv in Judgements doch eta-normalisieren und fuer matching
+      von Objekten in diesen Judgements dann decomposing pattern matching
+      module beta, eta (statt nur modulo beta) verwenden.
+      Die meisten Judgements haben ja keine Probeme mit eta, nur sowas
+      wie simpto das einzelne lambdas auseinandernimmt.
+    * Annahmen (von Premissen der Regeln) die selbst Regeln sind (dh insgesamt ist die
+      Regel >=3 stufige HHF) als lokale implizte frules auffassen
+      und lokale Faktenmenge verwalten, wobei lokale Fakten (ausgewaehlter Judgements?)
+      als brules ohne Premissen mit maximaler Prioritaet aufgefasst werden
+      * das ist also Hauptsaechlich ne Modifikation von add_assm
+      * die lokale Fakten -> brule Konvertierung einfach ueber entsprechende
+        globale implizite frules machen die brules mit max Prioritaet generieren:
+            J ts ==> maxpriobrule ( J ts )
+        Aber vllt besser nicht das gleiche Judgement J wiederverwenden?
+      * LAME weil fuer Annahmen ueber Atome quasi ja das Default sein soll direkt
+        eine lokale brule ohne Premissen zu generieren,
+        also besser Annahmen als lokale brules interpretieren und
+        in fact(...) bzw frule(...) gewrappte Annahmen entsprechend als Fakten
+        bzw implizite lokale frules 
+      * ACHTUNG: lokale implizite frules erfordern genaueres Tracking ob
+        man gerade expl. frules anwendet oder nicht sonst werden die lokalen
+        Resultate mit lthy declarations eingefuegt!!!
+      * ggf auch erlauben solche Annahmen als brules aufzufassen indem man sie
+        in brule(...) wrappt
+      * was ist wenn aus lokalen Fakten entstandene brules ueberlappen?
+        Fehler oder "dynamische Bindung", dh die letzthinzugefuegte brule hat
+        hoeherer Prio (was ja wohl bei meiner Impl direkt so sein wuerde)
+      * lokale brules brauchen schnelleres gen_add_rule ohne Checks,
+        was auch keine dependencies updatet (unnoetig weil nur implizite frules aktiv
+        die keine Premissen haben duerfen)
+      * statt lokalen schematische Variablen in lokalen brules werden lokale Quantoren genutzt,
+        und alle vorkommenden schematischen Variablen und Typvariablen muessen im Kontext 
+        der Regel available sein
+    * non-rigide Konklusionen in Regelpremissen (= goals in lambdaProlog) weniger
+      konservativ behandeln
+      * braucht dann hoeherstufiges mode-Checking von Regeln um availability
+        (= groundness) weniger konservativ zu berechnen
+        * insbesondere mode-Annahmen an Judgementvariablen in Regeln R die man 
+          in anderen Regeln R', bei Anwendungen von Judgements (in Goalpos, dh in Premissenkonklusionen) 
+          die auf Regelkonkl von R matchen, ueberprueft
+        * wie propagieren sich modes bei Kombinationen von Judgements mit Kombinatoren, 
+          oder sowas einfach verbieten? Ist in lambda-Prolog ja dadurch einfacher
+          das exakt der Head von Goal-Atome die potentiellen Regeln bestimmt.
+          Bei mir waere das komplizieter falls es computational rules auf die Kombinatoren gibt.
+          Vermutlich analog zu lambdaProlog die Kombinatoren selbst als (hoeherstufig) gemodete
+          Judgements mit entsprechenden kombinierenden Regeln ansehen, zB
+             map :: [-[-,+], -, +]
+          (Vereinfachung im Vgl zu lambdaProlog etc: eindeutiges moding)
+        * braucht man auch ordentliches Moding von generierten Judgements?
+          zB map gecurried ansehen als
+             map :: [-[-,+], +[-,+]]
+        * checking geht dann vermutlich konkret so:
+          * zu available Variablen auch einen Mode verwalten (der moeglicherweise
+            trivial ist) und wenn sie als Judgement benutzt werden, entsprechend checken
+          * danach checken ob die Outputpositionen der Regel-Konklusionen 
+            das entsprechende moding des Judgements erfuellen, d.h.:
+            sind ground (bzgl available Variablen) und haben
+            den richtigen Submode (triv wenn es selbst Variablen sind;
+            ansonsten braucht man Mode-Kombinationsregeln fuer
+            Judgement-Kombinatoren-Funktionen (zB map als Funktion :: [-,+] => [-,+]
+            mit Regel  [| J x y ; (map J) xs ys ==> (map J) (Cons x xs) (Cons y ys))
+            aber vermutlich sollte man sich auf Judgement-Kombinatoren-Judgements
+            beschraenken, was ja keine echte Einschraenkung ist, sonst muesste
+            man computational rules checken)
+          * am coolsten waere natuerlich fuer mode checking selbst wieder ne
+            metarec zu nutzen, wie bei rule-wellformedness.
+          * Warum nicht sogar ein eigenstaendiges "Typkonzept" (Inputs -> Outputs)
+            fuer Judgements statt nur modes? Das wuerde dann quasi die Zuordnung
+            Judgement -> Wohlgeformtheits-Judgement
+            als Typisierung des Judgements reifizieren
+            * das VeriML Paper suggeriert das die Soft-Typen von Judgements die
+              Semantik des Judgements beschreiben sollten, insbes bei
+              Judgement-Parametern
+            * Soft-Type-Checking von MetaRec-Klauseln geht dann wohl etwa so
+                * nehme die Soft-Wohlgetyptheit der Inputs des Judgements der Konklusion an
+                * checke (v.l.n.r.) das die Inputterme in Judgements in den Premissen (=Goals)
+                  zu den Judgement-softtypen passen, nehme an das die Outputs entsprechende
+                  Softtypen haben
+                * checke das die Outputs in im Judgement der Konklusions unter diesen
+                  ganzen Annahmen zum Softtyp des Judgements der Konklusion passem
+            * was ich mir mal mit den Wohlgeformtheitsjudgements gedacht habe
+              ist darin dann enthalten und wesentlich richtiger:
+                die Metainduktion passiert nicht einfach von Premissen zur Konklusion.
+                Man geht von intensionalen Annahmen an Inputs der Konklusion aus,
+                mit denen man die der Wohlgeformtheit der Inputs der ersten Premisse zeigt.
+                Dann wird die Wohlgeformtheit der Outputs (vor allem wenn dies Variablen
+                sind die noch nicht aufgetaucht sind, ggf auf distinct bounds angewandt)
+                der ersten Premisse angenommen (das ist die erste Induktionshypothese),
+                die weiteren Premissen entsprechend analysiert und letztendlich die Wohlgeformtheit
+                der Outputs der Konklusion gezeigt
+            * eine wesentliche Einsicht hierbei ist das das moding
+              essential ist um Metarec-Klauseln zu soft-typen, also wenn man moding
+              ueber metarec auf Judgementsofttypes simulieren will muss man es
+              wechselseitig-rekursiv machen (falls das ueberhaupt seperat geht)
+            * Implementierungsalternativen
+              * Meta-Telescopes (dh dependent pairs) nutzen um Judgment-Typisierungen,
+                ueber Input/Output Tupel (also bundled statt unbundled Darstellung)
+                zu beschreiben:
+                  pair :: [{}, {}] {}
+                  Pair :: 'a => 'b => pair 'a 'b
+                  PairSet :: ('a => prop) => ('a => 'b => prop) => pair 'a 'b => prop
+                    :== (% A F p. !! x y. p == Pair x y ==>  A x &&& F x y)
+                  [| x ::> A  ;   y ::> F x |] ==> Pair x y ::> PairSet A F
+                  sPairSet :: ('a => prop) => ('b => prop) => pair 'a 'b => prop
+                    :== (% A B. PairSet A (% _. B))  (infix "**")
+                  uSet :: unit => prop ::= (% _. True)
+                  judgement :: ('a => prop) => ('a => 'b => prop) => ('a => 'b => prop) => prop
+                    :== (% A F J. !! x y. A x ==> J x y  ==> F x y)
+                und als forward rules zum Verwalten von Annahmen an Inputs/Outputs:
+                    Pair x y ::> PairSet A F  ==>  x ::> A  &&&  y ::> F x
+                    J ins outs ::> judgement InT OutT  ==>  ins ::> InT  &&&  outs ::> OutT ins
+                Nicht schlimm weil rein syntaktisch ohne comp rules axiomatisiert?
+                proplists habe ich ja auch schon ...
+                Dann haetten wir sowas wie
+                  metamap A B ::> judgement (judgement A B ** list A) (% _. list B)
+                Aber was wenn man A, B nicht als Teil des Judgements sondern
+                auch als Inputs wahrnehmen will?
+                  metamap ::> judgement (PairSet Univ (% A. PairSet Univ (% B.
+                        judgement A B ** list A)))
+                      (% ins. list (snd (snd ins)))
+                   FFFFAAAAAAAIIIIIIILLLLLLLLL: braucht comp rule fuer snd!!!!!!
+
+                Ist bundled Darstellung schlimm? Eher nicht, man kann ja Syntax
+                  metamap' J x y == metamap (Pair J x) y
+                nutzen bzw sogar Definitions-Support der das ableitet anbieten.
+                Das decompose_judgement, maker, matcher muss man halt anpassen
+                und die Judgement-Terme sind etwas groesser.
+
+              * fuer jede simple moding Variante ein eigenes Judgement-Typisierungs-Judgement
+                bereitstellen (adaptiv automatisiert?) klingt lame
+
+
+
+
+
+              * Judgement-Typen als Meta-dependent-Products mit Spezialannotationen
+                   input, output :: 'a::{} => 'a  :== (% x. x)
+                   judgement :: prop => prop  :== (% P. P)
+                   jud :: 'a => 'a  jud :== (% x. x)
+                     !! jud und judgement braucht man eigentlich nicht wenn
+                     man konsequent immer AnyJud, TrueJud, BoolJud etc in der Codomain 
+                     von Praedikaten nutzt die Judgements sein sollen !!
+                   conjty :: ('a => prop) => ('a => prop) => ('a => prop)
+                     :== (% P Q x. P x &&& Q x)
+                   AnyJud :: prop => prop  :==  (% P. True)
+                     mit  P ::> AnyJud
+                   TrueJud :: 'a => prop  :==  (% x. True)
+                   BoolJud :: prop => prop  :==  (% P.  METAEX p. P == Trueprop p)
+                     wobei  METAEX :: ('a :: {} => prop) => prop
+                              ::= (% P. !! Q::prop. (!! x::'a. P x ==> Q) ==> Q)
+                   ConstrProp :: prop => (prop => prop)  :== (% P J. J ==> P)
+                   ConstrBoolJud :: prop => (prop => prop)  :== (% P J. J ==> P  &&&  BoolJud J)
+                   constraintedprop :: prop => prop => prop  :== (% P Q.  P &&& Q)
+                   derive_constraint :: prop => prop => prop  :== (% P Q.  Q ==> P) 
+                zB
+                   metamap ::> judgement (gmPI i :> input univ,  A :> input Univ(i),  B :> input Univ(i),
+                     J :> input (judgement (Pi x :> input A, y :> output B. BoolJud)),
+                     xs :> input (list A),  ys :> output (list B).  BoolJud)
+                ist aber recht haessliche Notation und man will den semantischen Teil
+                so einer Judgement-Typisierung ja auch in der Judgement-Semantik haben,
+                also will man eines von beiden inferieren. Vermutlich geht das sogar
+                einfach ueber lokale Typinferenz wenn man entsprechende Meta-Lambdas nutzt.
+                
+                Ansatz unten alles in der Semantik als speziell-interpretierte Konjunktion/Implikation
+                festzulegen klingt erstmal einfacher, allerdings ist dort die Charakterisierung von
+                Judgement-Parametern unschoen und "semantisches Currying" ist nicht-trivial.
+                Der Ansatz hier muss gebootstrappt werden mit den Soft-Typisierungs-Regeln
+                fuer gmPi etc.
+
+                Notation wird besser wenn man  statt input, output zu schreiben das Judgement
+                :> annotiert und ich nutze => Notation statt gmPI Notation.
+                   metamap ::> judgement (i :>i univlvl  =>  A :>i Univ i  =>  B :>i Univ i,
+                       =>  J ::>i (judgement (x :>i A  =>  y :>o B  =>  BoolJud))
+                       =>  xs :>i list A  =>   ys :>o list B  =>  BoolJud)
+                     ::= jud
+                      (% i :>i univ ,  A :>i Univ i ,  B:>i Univ i,
+                         J ::>i judgement (x :>i A  =>  y :>o B  =>  BoolJud),
+                         xs :>i list A,  ys :>o list B.
+                           metamap_i (THE p. !! x y. J x y == Trueprop p) xs ys)
+                     wobei metamap_i folgende induktive Def hat:
+                       metamap_i p [] []
+                       p x y  ==> metmap_i p xs ys ==> metamap_i p (Cons x xs) (Cons y ys)
+                     fuer metamap kann man also unter der Premisse
+                       J ::> judgement (x :>i A => y :>o B => BoolJud)
+                     folgende Regeln zeigen
+                       metamap J [] []
+                       [|  J x y  ;  metamap J xs ys  |] ==> metamap J (Cons x xs) (Cons y ys)
+                         
+                   bottomuprew ::> judgement ( i :>i univlvl  =>  A :>i Univ
+                       =>  rew ::>i  judgement (x :>i A  =>  y :>o A  =>  ConstrProp (Eq x y))
+                       =>  t :>i A  =>  t' :>o A  =>  ConstrProp (Eq t t') )
+                     ::= jud
+                       (% i:> univlvl,  A :>i Univ,  rew ::>i (x :>i A  =>  y :>o A =>  ConstrProp (Eq x y)),
+                          t :>i A,  t' :>o A.
+                            constrainedprop (Eq t t') True)
+                Etwas lame wird das wenn man nicht nur binaere infix-Judgements nutzt
+                um Judgement Positionen zu charakterisieren. Auch etwas lame wenn man
+                mehr als ein Judgement nutzt um eine Judgmentposition zu charakterisieren:
+                man braucht eine extra Konjunktion.
+                 
+
+                Killer-Argument fuer eine solche echt-seperate Judgement-Typisierung ist
+                das "semantisches Currying" sehr einfach zu beschreiben ist:
+                     [|  J ::> judgement (gmPI x with J2 x. A(x)) ;  J2 e  |] ==>
+                   J e ::> judgement (A(e))
+
+                   Folgende Regel hat keine hohe prio um triviales Discharge zu ermoeglichen
+                   wenn J ::> judgement (BoolJud) schon eine Annahme ist:
+                     try(  J ::> judgement (Trueprop(p))  )  ==>  
+                   J ::> judgement (BoolJud)
+
+                     J ::> judgement (P)  ==>
+                   J ::> judgement (AnyJud)
+
+                     [|  J ::> judgement (P)  ;  derive_constraint P' P  |] ==>  
+                   J ::> judgement (ConstrProp P')
+
+                   derive_constraint' P' P  nutzt eine Taktik die Meta-Konjunktionen
+                   in P auseinandernimmt (falls P die Form ConstrProp (... &&& ...) hat),
+                   prueft das die atomaren Propositionen
+                   Judgement-Applikationen sind, diese annimmt und dann die atomaren
+                   Meta-Konjunkte von P' ueber metarec herleitet
+                   (die auch alle Judgement-Applikationen sein muessen)
+                   Entspricht refinement-Types?
+
+
+                   damit gilt dann
+                     metamap i A B ::> judgement (xs :>i list A  =>  ys :>o list B  =>  BoolJud)
+                   man kann also ohne weiteres
+                     metamap i (list A) (list B) (metamap i A B)
+                       ::> judgement (mPi xss :>i list (list A)  =>  yss :>o list (list B)  =>  BoolJud)
+                   bilden
+
+
+                
+                Anwendungsbeispiel: reflexive Invarianzableitungen in SetoidIsotrans checken
+                Das klingt wesentlich nuetzlicher als das world-Checking der Unterwasserkreaturen
+                Technologie
+
+                  invariant ::> judgement ( AA :>i setoid  => t1 ::>i (conjty (set A) varsinv)
+                        =>  t2 :>i (conjty (set A) varsinv) => AnyJud)
+                      :== (% AA :>i Setoid,  t1 :>i A,  t2 :>i A.   eqOf AA t1 t2  )
+
+                  Etwas bloed ist das wir eigentlich AA als Output haben wollen
+                  der hinten stehen soll und primaere Objekte (t1, t2) sind auch noch
+                  nicht charakterisiert!
+                  Will man also vllt eher folgendes?
+                    invariant' ::> judgement ( t1 ::>i varsinv  =>  t2 ::>i varsinv
+                      =>  AA :>o (conjty setoid (conjty (contains t1) (contains t2))) =>  AnyJud )
+
+                      wobei
+                        contains :: judgement ( x ::> TrueJud  =>  J ::> judgement ( x ::> TrueJud => BoolJud )
+                            => BoolJud )
+                          :==  jud (% x, J. J x)
+                      
+
+
+                  varsinv ::> judgement ( t ::> TrueJud  =>  AnyJud  )
+                    :==  (% t ::> TrueJud.  True)
+
+                  frule:
+                    invariant AA t1 t2  ==>  varsinv t1  &&&  varsinv t2
+                    (beachte: die Subterme von t1, t2 sind damit nicht als varsinv
+                    getaggt, aber das will man auch nicht)
+
+                  triv-wf frule: :
+                      [| invariant AA x x  ;  variable x |]  ==>  varsinv x
+                    (wird ausgefuehrt nach assumen von Annahmen, aber vor ihrem wf-Check;
+                    charakterisiert somit insbesondere Annahmen die triviale wohlgeformt sind)
+                    variable ist ein extra-logisches Judgement, das prueft ob das Argument
+                    eine Variable (konkret eine fixed Variable) ist.
+
+                  brules:
+                    [|  varsinv t1  ;   varsinv t2  |] ==> varsinv (t1 t2)
+                    [| !! x.  varsinv x  ==>  varsinv (t x)  |] ==>  varsinv (% x. t x)
+
+                  Die Wohlgeformtheit von Premissen (!! x. A ==> J) von brules
+                  checkt man folgendermassen: fixiere x, checke A auf Wohlgeformtheit,
+                  nehme A an und checke J auf Wohlgeformtheit.
+                     
+
+
+
+
+
+
+              * Judgement-Typen nicht als Objekte der Logik bereitstellen,
+                sondern nur ein Mapping von Judgements auf ihre Komponenten-Typisierung
+                (und moding) als spezielle Regeln (wofuer man dem User schoene Syntax anbietet):
+                   (x : A |-> x' : A' via f) ==> input (x : A) &&& input (A : Univ)
+                      &&& output (x' : A') &&& output (A' : Univ)
+                   wobei  input, output :== (% P. P) 
+                     * input (J x ...)  sagt aus das das primaere Objekt x 
+                       in der Judgementapplikation (J x ...) in einer Inputposition steht
+                       und eine Typisierung gemaess (J x ...) erhalten soll
+                     * input (!! zs. J zs ==> input(J' z ...) &&& ...)  sagt das der
+                       Judgementparameter J input ist und sein Judgement-Typ
+                       ueber Sub-Judgements J'
+                       auf seinen inputs/outputs gegeben ist
+                   (vllt klarer als  input x (J x ...)  ??)
+
+                higher-order Judgement Typen werden dann als geschachtelte Horn-Klauseln
+                beschrieben:
+                   metamap J xs ys ==> 
+                     input (!! x y. J x y ==> input (x : A) &&& output (y : B))
+                     &&& input (xs : list(A)) &&& output (ys : list(B))
+
+                wenn man Teile der (intensionalen) Semantik von Judgement-Parametern
+                charakterisieren will macht man das zusaetzlich als Konsequenzen in
+                diese geschachtelten Horn-Klauseln:
+                   bottomuprew A rew t t' ==> 
+                     input (A : Univ) &&&
+                     input (!! x y. rew x y ==> input (x : A) &&& output (y : A) &&& Eq x y)
+                     &&& input (t : A) &&& output (t' : A)
+                     &&& Eq t t'
+
+                   wobei
+                     bottomuprew A rew t t'  :==  A : Univ  &  t : A  &  t' : A  &  t = t'
+                       &  (!! x y. rew x y ==> x : A & y : A & Eq x y)
+                     Eq x y  :== x = y
+                     [| x simpto t' ; y simpto t' |] ==> Eq x y
+
+                   man kann dann in metarec-Klauseln fuer  bottomuprew A rew t t'
+                   annehmen das rew Gleichheiten erzeugt und passende typisierte Terme
+                   erzeugt:
+                      [|  judassm (!! x y. rew x y ==> x : A & y : A & Eq x y)  ;
+                          judassm (atom : A)  ;
+                          judassm (A : Univ)  ;
+                          rew atom t  ;  bottomuprew A rew t t'  |] ==>
+                      bottomuprew A rew atom t'
+                   Diese Zusatzannahmen in  judassm := (% P. P)  werden automatisch
+                   discharged (und gecached). Man koennte auch ueberlegen ob man
+                   sie nicht implizit laesst (dh nach dem Parsen der Proposition 
+                   aus der Judgementtypisierung des Konklusionsjudgements generiert
+                   und davorpackt) und als MetaRec-Annahmen zur Benutzung im Beweis
+                   registriert.
+
+                   wenn man jetzt
+                     bottomuprew nat natrew t t' 
+                   in einer MetaRec Klausel nutzt wird insbes
+                     (!! x y. natrew x y ==> x : N  &  y : N  &  Eq x y)
+                   automatisch hergeleit, wobei man die Deklaration des Judgement-Typs von
+                   natrew als forward-rule nutzt:
+                      natrew x y ==> input (x : N) &&& output (y : N) &&& Eq x y
+
+                Ist es vllt interessant wenn man statt eine seperate Judgement-Typisierungs
+                -Regel zu staten direkt die Semantik-Definition des Judgements entsprechend
+                annotiert? Das gaebe dann zB
+                   (x : A |-> x' : A' via f) == input x (x : A) &&& input A (A : Univ)
+                      &&& output x' (x' : A') &&& output f (f : bij A A')
+                      &&& check (Eq (f x) x')
+                   metamap i A J xs ys == implinput i (i : univlvl)
+                      &&& implinput A (A : Univ(i))
+                      &&& input J (!! x y. J x y ==> input x (x : A) &&& output y (y : A))
+                      &&& input xs (xs : list A)  &&&  output ys (ys : list A)
+                      &&& (ALL (x,y) : xs ~~ ys.  J x y)
+                   metamapcomb i A J J' == implinput i (i : univlvl)
+                      &&& implinput A (A : Univ(i))
+                      &&& input J (!! x y. J x y ==> input x (x : A) &&& output y (y : A))
+                      &&& output J' (!! xs ys. J' xs ys ==>
+                            input xs (xs : list A)  &&&  output ys (ys : list B)
+                            &&& (ALL (x,y): xs ~~ ys. J x ))
+                Sieht ganz gut aus. Judgementparameter man nicht mit == ueberspezifizieren.
+                Etwas doof ist das alles prop-wertig ist, aber das ist ja bloss
+                ein Isabelle-Problem das man mit Behandlung von boolinput, booloutput
+                und & loesen kann.
+
+                Jetzt will man natuerlich noch Support fuer die Nutzung von
+                higher-order Judgementkombinatoren.
+                ZB will man  metamap i A J  schreiben
+                was die intensionale Semantik von  metamapcomb i A J  haben soll.
+                Wenn man das hat kann man automatisch schachteln:
+                  metamap i (list A) (metamap i A J) xxs yys
+                Also braucht man sowas wie "semantisches currying".
+                Vllt auch "over-application" wenn es einen Judgementwertigen Output
+                gibt? Aber das kann man ja einfach reparieren durch maximale
+                Judgementapplikation in der Def.
+                Gecurried higher-order Terme hat man ja sowieso schon,
+                nur die intensionale Semantik beim checken und die
+                judassm  Annahmen muss ich anpassen.
+
+
+                Will man vllt manchmal unterspezifizierte Judgements  J x y
+                die x, y nicht per se mit ueber ihrer Semantik einschraenken?
+                Vermutlich nicht so wichtig.
+                Man muesste dann zu
+                  J x y == input(x, x : A) ==> output (y, y : B)
+                uebergehen und im Beweis von Metarec-Klauseln tatsaechlich
+                die vorhandene  judassm (x : A)  nutzen.
+                Klingt etwas sauberer. Wir haetten dann:
+                   (x : A |-> x' : A' via f) == [|  input x (x : A) ;  input A (A : Univ) |]
+                      ==> output x' (x' : A') &&& output f (f : bij A A')
+                        &&& check (Eq (f x) x')
+                   metamap i A J xs ys == [|
+                        implinput i (i : univlvl)  ;
+                        implinput A (A : Univ(i))  ;
+                        input J (!! x y. J x y ==> input x (x : A) ==> output y (y : A)) ;
+                        input xs (xs : list A)  |]
+                      ==>  output ys (ys : list A)
+                        &&& (ALL (x,y) : xs ~~ ys.  J x y)
+                   metamapcomb i A J J' == [|
+                        implinput i (i : univlvl)  ;
+                        implinput A (A : Univ(i))  ;
+                        input J (!! x y. J x y ==> input x (x : A) ==> output y (y : A))  |]
+                      ==> output J' (!! xs ys. J' xs ys ==>
+                            input xs (xs : list A)  ==> output ys (ys : list B)
+                              &&& (ALL (x,y): xs ~~ ys. J x ))
+                 Vllt kann man dann sogar auf annotation mit input/output verzichten
+                 und alle Annahmen die Metarec Judgements sind zu inputs machen
+                 und alle Konklusionen die Metarec Judgements sind zu outputs.
+
+
+      * dependency analysis nutzt bereits das arbitrary-Judgement als
+        dependency von Regeln wenn eine Judgment-Variable benutzt wird
+      * exaktere hoeherstufige dependency analysis bei Anwendungen von Judgement-Kombinatoren:
+        man betrachtet solche Kombinatoranwendungen als Knoten im dependency graph, zB
+           Regel mit (map J xs) -> map J -> J    statt wie bisher   Regel -> map -> arbitrary
+        Vermutlich einfach allgemein als
+           Regel mit (F Js ts) -> F Js
+           F Js -> J_i
+           F Js -> J'   (falls J' konkret in einer Regel fuer F vorkommt)
+        approximieren, egal was der Kombinator F tatsaechlich
+        mit den J_i macht
+
+        Das ist also eine Art Kontrollflussanalyse mit parametrischen Variablen,
+        die ground-terms beachtet (ohne comp rules momentan).
+        Vllt auch interessant fuer die CFA im "perfekten Editor"?
+        
+        Ich habe ja momentan keine anonymen Judgements (was Closures entsprechen wuerde),
+        also ist eine Environment-Analyse unnoetig. Aber koennte man das kriegen
+        indem man die Lambdas einfach syntaktisch abstrakt mitnimmt und beta-reduziert?
+        Bzgl der Abhaengigkeiten werden Ausdruecke im Lambda, die Variablen
+        enthalten die im aktuellen Kontext unbekannt sind, zu Wildcards.
+        Fuer Compilerbauer moeglw interessant???
+        Normalisierung mit comp. rules entspricht dabei constant
+        folding bzw partial evaluation.
+
+
+
+        Implementierung vermutlich mit "Pattern-Graphen":
+          Knoten sind Patterns mit Variablen, Kanten entsprechen
+          parametrischen Abhaengigkeiten und sind mit Instantiierungen
+          der Variablen im Ausgangsknoten beschriftet die vorliegen
+          muessen wenn die Abhaaengigkeit bestehen soll (konkret also
+          das Pattern des Ausgangsknoten in dieser Instantiierung auf
+          ein Pattern einer Regel matcht die eine Abhaengigkeit zum Zielknoten
+          induziert).
+          Laufen auf Pfaden komponiert die Instantiiergen.
+          Wenn in einen Zyklus laeuft, hat man also ueber die Instantiirung
+          direkt einen Term (mit Variablen; allgemeinst falls Zyklus zum Startknoten)
+          auf alle Knoten matcht.
+
+          Bspgraph:   metamap ?J ?xs *   -- ?xs := (Cons ?x' ?xs')  -->  metamap ?J ?xs' *
+          Bsppfad:  metamap ?J ?xs *  -->  metamap ?J (Cons ?x' ?xs') *  -->  metamap ?J (Cons ?x' (Cons ?x'' ?xs'')) *
+
+          Vermutlich reichen mir first-order patterns um die
+          Stratifizierung von Abhaengigkeiten mit Markern zu erkennen.
+          Nicht-Triv Higher-Order Patterns werden dann als Wild-Cards
+          interpretiert. Alle Terme matchen auf Wildcards und Wildcards
+          matchen auf alle Patterns.
+          Vllt fuer Performance auch interessant wenn man deklarieren
+          kann das bestimmte Pos von Judgements immer als Wildcards
+          approximiert werden, egal ob in der Regel dort nicht-triv
+          higher-order Patterns vorliegen.
+          Vermutlich sogar ratsam fuer alle Patterns (und die Ausdruecke
+          die aus ihren Variablen gebaut werden) die keine Variablen
+          und keine ground-terme sind sind Wildcards einzusetzen.
+          Aber Applikationen von Marker-wertigen Funktionen werden
+          nicht zu Wildcards -> Marker ueber Typ/Soft-Typ charakterisieren.
+          Echte Behandlung von Higher-Order Patterns waere interessant
+          fuer Regeln (zB Applikationregel fuer gmPi) die ein Judgement
+          aus einem Term fischen.
+
+          Konkret sind hier *alle* Judgement-*Applikations*-patterns die in brules
+          und frules vorkommen die Knoten (modulo Umbenennung von Varianten) und die
+          Kanten sind die entsprechenden Abhaengigkeiten die sich durch
+          die brules und frules ergebenden.
+
+          Muss man aufpassen das man die Outputs nicht zum Judgement-Applikations-Pattern
+          rechnet? Waere wohl besser, aber wenn so eine Abhaengigkeit in
+          der Ausfuehrung vorliegt, gaebe es dann ja einen Fehlschlag.
+          Wenn man fuer die Outputs immer Wildcards einsetzt kann einem wohl
+          garnichts passieren!
+
+          Wenn Abhaengigkeiten entstehen die Variablen enthalten die
+          auf im lhs Judgement-Applikations-Pattern nicht vorkommen
+          macht man diese Variablen und Ausdruecke die sie enthalten
+          zu Wildcards.
+
+        Man "weiss" also garnicht explizit welche Positionen eines Judgements
+        zu seinem Dependency-Graph beitragen: ergibt sich dadurch welche andere
+        Judgementapplikationen von den aktuell existierenden Regeln genutzt werden.
+        Manche haben eben Judgementparameter als Kopf die in einer gewissen
+        Position der Regelkonklusion stehen...
+        zB
+           J 2 y  ==>  App2 J y  (y output)
+           erzeugt die Abhaengigkeit
+             App2 ?J * -> ?J 2 *
+
+           [|  J x y  ;  J2 y z  |]  ==> App3 J J2 x z  (z output)
+           erzeugt die Abhaengigkeiten  
+             App3 ?J ?J2 ?x *  ->  ?J ?x *,  ?J2 * *
+           (genauer: erst werden   App3 ?J ?J2 ?x *  ->  J ?x ?y,  J2 ?y *  
+           erzeugt und dann wird ?y zu Wildcard weil unconstrained durch lhs)
+
+           [|  J x y  ;  metamap J xs ys  |]  ==> metamap J (Cons x xs) (Cons y ys)
+           erzeugt die Abhaengigkeit
+             metamap ?J * *  ->  ?J * *
+             (reflexive Abhaengigkeiten wie  metamap ?J * * -> metamap ?J * *
+             werden direkt weggelassen)
+
+           [|  base_iso: A isoto B via f |] ==> (curry_iso base_iso): A isoto B via f
+           erzeugt die Abhaengigkeit
+             (curry_iso ?base_iso): ?A isoto ?B via ?f  ->  ?base_iso: ?A isoto ?B via ?f
+             BEACHTE: (curry_iso ?base_iso) wird hier nicht zu Wildcard, obwohl
+               ?base_iso Variable ist
+
+
+        Wenn man alles so genau trackt sollte man subsumption
+        auf Abhaengigkeiten machen, dh allgemeinere Kanten absorbieren
+        speziellere. Sonst wird der Graph u.U. riesig.
+
+
+        Bei partiellen Applikationen ergeben sich allgemeinere Abhaengigkeiten
+          Ueber  App J x  hat man also volle Abhaengigkeit
+          auf J statt nur auf J x ?? Bei obiger exakter Analyse
+          waere die Abhaengigkeit exakt auf  J x
+        Was ist mit Markern?
+          Ueber  App (J mark) x  hat man Abhaengigkeit auf  J mark x
+          mit konkretem mark. Passt also.
+        Was ist mit lokalen brules/frules (ueber Annahmen in brules)?
+          Vermutlich einfach statisch zum globalen Abhaengigkeitsgraph
+          beitragen lassen bzw. Fehler melden wenn er sich durch
+          lokale Regeln veraendert.
+
+        Kann man das dependency tracking  frule -> frule
+        jetzt mit dem dependency tracking  judgement -> judgement
+        verschmelzen?
+
+        BEACHTE: wenn ich comp. rules wieder anmache muss man die
+        Patterns im Abhaengigkeitsgraph auch entsprechend normalisieren
+        (ggf. voll neu checken bei neuer comp. rule)
+        
+    * ideen fuer hoeherstufige Judgements:
+      * bottomuprew [-[-,+], [-, +]] macht aus J mit Semantik J x y == (x = y)
+        eine bottom-up rewriting engine bottomuprew J
+      * term-traversierungs-strategien: map_atoms
+      * lookup von elementaren Fakten eines Judgements die konjunktiv in P stehen:  lookup J P
+          interessant waere hier auch mit Soft-Types zu etablieren das
+          P tatsaechlich nur eine Konjunktion darstellt. Aber ist wohl in
+          der Anwendung schwierig weil man gerne Quantoren-Unrolling per rewriting nutzt um
+          die Konjunktion zu erzeugen. Aber koennte man schon ueber Spezial-Rewrite
+          machen...
+    * dependency analyse nicht nur Judgements sondern konkrete Judgement-Applikationen 
+      bzw Judgement zusammen mit ausgewaehlte Argumente nutzen lassen, also einen Termgraph nutzen 
+*)
+
+
