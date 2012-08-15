@@ -1703,9 +1703,10 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                 die Metainduktion passiert nicht einfach von Premissen zur Konklusion.
                 Man geht von intensionalen Annahmen an Inputs der Konklusion aus,
                 mit denen man die der Wohlgeformtheit der Inputs der ersten Premisse zeigt.
-                Dann wird die Wohlgeformtheit der Outputs der ersten Premisse angenommen
-                (das ist die erste Induktionshypothese), die weiteren Premissen
-                entsprechend analysiert und letztendlich die Wohlgeformtheit
+                Dann wird die Wohlgeformtheit der Outputs (vor allem wenn dies Variablen
+                sind die noch nicht aufgetaucht sind, ggf auf distinct bounds angewandt)
+                der ersten Premisse angenommen (das ist die erste Induktionshypothese),
+                die weiteren Premissen entsprechend analysiert und letztendlich die Wohlgeformtheit
                 der Outputs der Konklusion gezeigt
             * eine wesentliche Einsicht hierbei ist das das moding
               essential ist um Metarec-Klauseln zu soft-typen, also wenn man moding
@@ -1858,7 +1859,7 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
 
                   invariant ::> judgement ( AA :>i setoid  => t1 ::>i (conjty (set A) varsinv)
                         =>  t2 :>i (conjty (set A) varsinv) => AnyJud)
-                      :== (% AA :>i Setoid,  t1 :>i A,  t2 :>i A.   eqOf AA t1 t2 
+                      :== (% AA :>i Setoid,  t1 :>i A,  t2 :>i A.   eqOf AA t1 t2  )
 
                   Etwas bloed ist das wir eigentlich AA als Output haben wollen
                   der hinten stehen soll und primaere Objekte (t1, t2) sind auch noch
@@ -2521,7 +2522,7 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
     val prem_concl = Logic.strip_assums_concl prem
     val prem_assms = Logic.strip_assums_hyp prem
 
-    fun no_additional_vars msg t = 
+    fun check_no_additional_vars msg t = 
        let
          val vars = Term.add_vars t []
          val tvars = Term.add_tvars t []
@@ -2544,7 +2545,7 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
      (* otherwise we could not assume them while recursively solving prems via metarec
         Fun: compare to ancient fixme in raw_simplifier.ML before rewrite_rule_extra_vars ^^ *)
     val _ = prem_assms
-      |> map (no_additional_vars "assumption of metarec premise has additional Vars or TVars")
+      |> map (check_no_additional_vars "assumption of metarec premise has additional Vars or TVars")
     fun collect_all_juds t =
       case decompose_judgement gctxt t of
         SOME (jud, (pobj, iobjs, _)) =>
@@ -2558,7 +2559,7 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
         SOME (jid_of_prem, (pobj_of_prem, iobjs_of_prem, oobjs_of_prem)) =>
           let
             val _ = (pobj_of_prem :: iobjs_of_prem)
-              |> map (no_additional_vars
+              |> map (check_no_additional_vars
                    ("metarec premise conclusion\n"
                    ^Syntax.string_of_term ctxt prem_concl
                      ^"\nhas additional Vars or TVars in input position"))
@@ -2627,7 +2628,7 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
                   ^" and try to find use the judgement dynamically for instantiations of the rule."
                   ^" Note that judgement dependency tracking is now very conservative, considering "
                   ^" every judgement in that position.")
-                val _ = no_additional_vars
+                val _ = check_no_additional_vars
                   ("premise conclusion of unknown judgement   "^Syntax.string_of_term ctxt prem_concl
                     ^"   has additional Vars or TVars (we are very conservative in the assumed mode of the"
                     ^" judgement: all arguments need to be ground)")
@@ -2705,18 +2706,28 @@ and gen_check_rule calc_juddeps check_groundness ctxt prop =
           (let
             (* TODO(functionality): diesen check weglassen? weil Pattern.match
                wird bei non-Patterns sowieso automatisch zu first-order-matching *)
-            val _ =
-              if Pattern.pattern pobj then ()
+            fun warn_in_ctxt warnmsg =
+              let val _ = warning warnmsg
+              in add_to_msg_trace (fn () => "WARNING: "^warnmsg) end
+            val ctxt2 =
+              if Pattern.pattern pobj then ctxt
               else
-                warning ("gen_check_rule: primary object in conclusion of rule \n"
+                ctxt |> warn_in_ctxt ("gen_check_rule: primary object in conclusion of rule \n"
                   ^Syntax.string_of_term ctxt prop
                   ^"\nnot a pattern so we use purely structural matching for it")
+            val ctxt3 =
+              case iobjs |> find_first (fn iobj => not (Pattern.pattern iobj)) of
+                SOME iobj => ctxt2
+                  |> warn_in_ctxt ("gen_check_rule: input object "
+                       ^Syntax.string_of_term ctxt2 iobj^" in non-primary position is not a pattren")
+              | NONE => ctxt2 
+
             val iobjs_are_patterns = forall Pattern.pattern iobjs
             val pobj_vars = Term.add_vars pobj []
             val pobj_tvars = Term.add_tvars pobj []
             val prems = Logic.strip_imp_prems prop
-            (* val _ = tracing ("gen_check_rule: primary object is "^Syntax.string_of_term ctxt pobj)
-            val _ = tracing ("gen_check_rule: pobj_vars are "^Library.commas (map (Syntax.string_of_term ctxt o Var) pobj_vars)) *)
+            (* val _ = tracing ("gen_check_rule: primary object is "^Syntax.string_of_term ctxt3 pobj)
+            val _ = tracing ("gen_check_rule: pobj_vars are "^Library.commas (map (Syntax.string_of_term ctxt3 o Var) pobj_vars)) *)
 
             val (avail_vars0, avail_tvars0) = 
                (pobj_vars, pobj_tvars)
@@ -2728,7 +2739,7 @@ and gen_check_rule calc_juddeps check_groundness ctxt prop =
                     iobjs
 
             val (avail_vars, avail_tvars, jud_deps) =
-              check_prems ctxt false check_groundness prems (avail_vars0, avail_tvars0)
+              check_prems ctxt3 false check_groundness prems (avail_vars0, avail_tvars0)
 
             val oobjs_abstrinst = oobjs |> map (abstr_inst (avail_vars, avail_tvars))
             val iobjs_abstrinst = iobjs |> map (abstr_inst (avail_vars, avail_tvars))
@@ -2737,20 +2748,20 @@ and gen_check_rule calc_juddeps check_groundness ctxt prop =
 
             val _ = 
               if not check_groundness orelse (null oobjs_abstrinst_vars andalso null oobjs_abstrinst_tvars) then ()
-              else err_with_trace ctxt ("gen_check_rule: additional vars or tvars\n"
-                ^(Library.commas (map (Syntax.string_of_term ctxt) oobjs_abstrinst_vars
-                    @ map (Syntax.string_of_typ ctxt) oobjs_abstrinst_tvars))
+              else err_with_trace ctxt3 ("gen_check_rule: additional vars or tvars\n"
+                ^(Library.commas (map (Syntax.string_of_term ctxt3) oobjs_abstrinst_vars
+                    @ map (Syntax.string_of_typ ctxt3) oobjs_abstrinst_tvars))
                 ^"\nin output objects\n"
-                ^cat_lines (map (Syntax.string_of_term ctxt) oobjs)
+                ^cat_lines (map (Syntax.string_of_term ctxt3) oobjs)
                 ^"\nof conclusion")
 
             val _ = iobjs_abstrinst |> map (fn iobj_abstrinst =>
               if not check_groundness orelse Pattern.pattern iobj_abstrinst then ()
               else if null (Term.add_vars iobj_abstrinst []) andalso null (Term.add_vars iobj_abstrinst []) then ()
-              else err_with_trace ctxt ("check_rule: input object in conclusion has additional vars "
+              else err_with_trace ctxt3 ("check_rule: input object in conclusion has additional vars "
                  ^"and is not a pattern when available vars are fixed"))
 
-            val _ = check_rule_wellformedness ctxt prop
+            val _ = check_rule_wellformedness ctxt3 prop
           in
             SOME (concl_jud, jud_deps)
           end)
