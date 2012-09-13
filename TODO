@@ -312,7 +312,8 @@
                   metamap ::> judgement (PairSet Univ (% A. PairSet Univ (% B.
                         judgement A B ** list A)))
                       (% ins. list (snd (snd ins)))
-                   FFFFAAAAAAAIIIIIIILLLLLLLLL: braucht comp rule fuer snd!!!!!!
+                   FFFFFFFAAAAAAAIIIIIIILLLLLLLLL: braucht comp rule fuer snd
+                     (aber die will man nicht axiomatisieren) !!!!!!
 
                 Ist bundled Darstellung schlimm? Eher nicht, man kann ja Syntax
                   metamap' J x y == metamap (Pair J x) y
@@ -360,6 +361,17 @@
                 Judgement-Parametern unschoen und "semantisches Currying" ist nicht-trivial.
                 Der Ansatz hier muss gebootstrappt werden mit den Soft-Typisierungs-Regeln
                 fuer gmPi etc.
+
+
+                FFFFAAAAAAAAAIIIIIIIIIIIIILLLLLLLLLLLLL:
+                  der Ansatz hier hat null Semantik weil
+                     J ::> (x :>i A => y :>o B => BoolJud)
+                  immer gilt und insbes daraus nicht folgt das
+                     x :> A  ==> (!! y.  J x y  ==>  y :> B)
+
+                man muss PiSigma Types nutzen um Outputs zu charakterisieren
+                  (PiSig_n x1 A1 ... xn An. B x1 .. xn) :=
+                    (% f. !! x1 .. xn. f x1 .. xn : B x1 .. xn ==> x1 : A1 &&& ... &&& xn : An)
 
                 Notation wird besser wenn man  statt input, output zu schreiben das Judgement
                 :> annotiert und ich nutze => Notation statt gmPI Notation.
@@ -554,7 +566,7 @@
                       &&& output J' (!! xs ys. J' xs ys ==>
                             input xs (xs : list A)  &&&  output ys (ys : list B)
                             &&& (ALL (x,y): xs ~~ ys. J x ))
-                Sieht ganz gut aus. Judgementparameter man nicht mit == ueberspezifizieren.
+                Sieht ganz gut aus. Judgementparameter darf man nicht mit == ueberspezifizieren.
                 Etwas doof ist das alles prop-wertig ist, aber das ist ja bloss
                 ein Isabelle-Problem das man mit Behandlung von boolinput, booloutput
                 und & loesen kann.
