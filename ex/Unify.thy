@@ -12,6 +12,10 @@ definition
   hasNoOcc where
   [MRjud 2 0]: "hasNoOcc t x \<equiv> True"
 
+definition (* has no clause, so this signifies error *)
+  occCheckFailed where
+  [MRjud 1 0]: "occCheckFailed x \<equiv> True"
+
 definition
   subst where
   [MRjud 1 1]: "subst t1 t2 \<equiv> (t1 = t2)"
@@ -49,7 +53,7 @@ lemma [MR]: "
   hasNoOcc (t1 t2) x "   by (simp add: hasNoOcc_def)
 
 lemma [MR]: "
-    errwith ''occurs check for'' 0 x \<Longrightarrow>
+    occCheckFailed x \<Longrightarrow>
   hasNoOcc x x"  by (simp add: hasNoOcc_def)
 
 
@@ -65,20 +69,22 @@ lemma [MR]: "
 
 
 
-lemma [MR]: "
-    \<lbrakk> var x ; hasNoOcc t x  ;  subst x x  \<rbrakk> \<Longrightarrow>
-  unify (x, t) { x = t }"    by (simp add: unify_def)
-  
 
 lemma [MR]: "
     [| try (var x) ; unify (x, t) C |] ==>
   unify (t, x) C"   by (simp add: unify_def)
 
+lemma [MR]: "
+    \<lbrakk>  try (var x)  ;  subst x t'  ;  unify (t', t) C \<rbrakk> \<Longrightarrow>
+  unify (x, t) C " by (simp add: unify_def subst_def)
 
+lemma [MR]: "
+    \<lbrakk>  try (var x) ;  try (subst x x)  ;  subst t t'  ;  hasNoOcc t' x \<rbrakk> \<Longrightarrow>
+  unify (x, t) { x = t' }"    by (simp add: unify_def subst_def)
+  
 lemma [MR]: "
     [|  subst t1 t'  ;  try (subst t2 t') |] ==>
   unify (t1, t2) {}"    by (simp add: unify_def try_const_def subst_def)
-
 
 lemma [MR]: "
    [| unify (t1, t1') C1  ;  addToCtxt C1 ==> unify (t2, t2') C2 |] ==>
@@ -97,6 +103,19 @@ schematic_lemma
   assumes [MRassm]: "var X"
   shows "unify (c X t, c t X) ?C"
   by (tactic {* MetaRec.metarec_tac @{context} 1 *})
+
+(* performance test *)
+schematic_lemma
+  assumes [MRassm]: "var A" "var B" "var C" "var D" "var E" "var F" "var G"
+  shows "unify (c A B C D E F G, c (f1 5 5) (f2 A A) (f3 B B) (f4 C C) (f5 D D) (f6 E E) (f7 F F)) ?C"
+  by (tactic {* MetaRec.metarec_tac @{context} 1 *})
+
+
+(* throws occurs check *)
+(* schematic_lemma
+  assumes [MRassm]: "var X" "var Y"
+  shows "unify (c Y X, c (f X) Y) ?C"
+  by (tactic {* MetaRec.metarec_tac @{context} 1 *}) *)
 
 
 (* throws occurs check *)
