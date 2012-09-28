@@ -938,11 +938,11 @@ definition
   simpto_const :: "'a::{} => 'a => prop" ("(_) simpto (_)" [10,10] 10)
 where
   [MRjud 1 1]: "simpto_const t1 t2 == (t1 == t2)"
-(* synth  t2  from  t1,   t1 is primary *)
 definition
-  irewto_const :: "'a::{} => 'a => prop" ("(_) irewto (_)" [10,10] 10)
+  powersimpto_const :: "'a::{} => 'a => prop" ("(_) powersimpto (_)" [10,10] 10)
 where
-  [MRjud 1 1]: "irewto_const t1 t2 == (t1 == t2)"
+  [MRjud 1 1]: "powersimpto_const t1 t2 == (t1 == t2)"
+
 (* used to register rewrite rules;  synth  t2  from  t1,   t1 is primary *)
 definition
   rewto_const :: "'a::{} => 'a => prop" ("(_) rewto (_)" [10,10] 10)
@@ -952,9 +952,12 @@ where
 
 lemma simptoI: "t1 == t2  ==>  t1 simpto t2"
   by (simp add: simpto_const_def)
+lemma powersimptoI: "t1 == t2  ==>  t1 powersimpto t2"
+  by (simp add: powersimpto_const_def)
 
 lemma rewtoD: "t1 rewto t2 ==> t1 == t2"
   by (simp add: rewto_const_def)
+
 
 (* TODO(feature): treat conditional simp rules properly with
      rewto in premises transformed to == *)
@@ -964,7 +967,7 @@ lemma rewtoD: "t1 rewto t2 ==> t1 == t2"
 (* TODO(opt):  nicht jedesmal neues simpset konstruieren,
      sondern nur beim adden von neuen rewto Regeln *)
 ML {*
-  fun simpto_proc ctxt (ct, [], _) =
+  fun simpto_proc power ctxt (ct, [], _) =
     let
       val {rules, ...} = MetaRec.get_current_ruledata (Context.Proof ctxt)
       val simprules =
@@ -972,20 +975,25 @@ ML {*
           SOME inet => Item_Net2.content inet
             |> map (fn (th, _) => @{thm rewtoD} OF [th])
         | NONE => []
-      val thy = ProofContext.theory_of ctxt
-      val ss = empty_ss addsimps simprules
-        |> Raw_Simplifier.context ctxt
+      val ss = empty_ss addsimps simprules |> Raw_Simplifier.context ctxt
 
-      fun prover ss = SINGLE (ALLGOALS (K all_tac)) (* Simplifier.full_simp_tac ss)) *)
+      val prover =
+        if power then MetaRec.metarec_simp_prover
+        else (fn ss => SINGLE (ALLGOALS (K all_tac)))
       val th0 = Raw_Simplifier.rewrite_cterm (true, true, false) prover ss ct
 
-      val th = @{thm simptoI} OF [th0]
+      val th = (if power then @{thm powersimptoI} else @{thm simptoI}) OF [th0]
     in (th, [Thm.rhs_of th0]) end
 *}
 
 setup {*
  Context.theory_map (
-   MetaRec.add_syn_proc "HOLMetaRec.simpto_const_jud" "simpto_proc" simpto_proc)
+   MetaRec.add_syn_proc "HOLMetaRec.simpto_const_jud" "simpto_proc" (simpto_proc false))
+*}
+
+setup {*
+ Context.theory_map (
+   MetaRec.add_syn_proc "HOLMetaRec.powersimpto_const_jud" "powersimpto_proc" (simpto_proc true))
 *}
 
 

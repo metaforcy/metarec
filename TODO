@@ -658,6 +658,7 @@
 
           Bspgraph:   metamap ?J ?xs *   -- ?xs := (Cons ?x' ?xs')  -->  metamap ?J ?xs' *
           Bsppfad:  metamap ?J ?xs *  -->  metamap ?J (Cons ?x' ?xs') *  -->  metamap ?J (Cons ?x' (Cons ?x'' ?xs'')) *
+                hier muss Zykluserkennung sofort anschlagen!
 
           Vermutlich reichen mir first-order patterns um die
           Stratifizierung von Abhaengigkeiten mit Markern zu erkennen.
@@ -689,7 +690,7 @@
           garnichts passieren!
 
           Wenn Abhaengigkeiten entstehen die Variablen enthalten die
-          auf im lhs Judgement-Applikations-Pattern nicht vorkommen
+          im lhs Judgement-Applikations-Pattern der Regelkonklusion nicht vorkommen
           macht man diese Variablen und Ausdruecke die sie enthalten
           zu Wildcards.
 
