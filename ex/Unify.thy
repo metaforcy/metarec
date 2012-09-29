@@ -81,16 +81,11 @@ lemma [MR]: "
 lemma [MR]: "
     \<lbrakk>  try (var x) ;  try (subst x x)  ;  subst t t'  ;  hasNoOcc t' x \<rbrakk> \<Longrightarrow>
   unify (x, t) { x = t' }"    by (simp add: unify_def subst_def)
-  
-lemma [MR]: "
-    [|  subst t1 t'  ;  try (subst t2 t') |] ==>
-  unify (t1, t2) {}"    by (simp add: unify_def try_const_def subst_def)
 
 lemma [MR]: "
    [| unify (t1, t1') C1  ;  addToCtxt C1 ==> unify (t2, t2') C2 |] ==>
  unify (t1 t2, t1' t2') (C1 Un C2)"     by (auto simp add: unify_def addToCtxt_def)
 
-(* the reflexivity rule is contained in the subst rule above, so this is just for performance *)
 lemma [MR]: "
   unify (t, t) {}"  by (simp add: unify_def)
 
