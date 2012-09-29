@@ -1532,6 +1532,26 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
             (Drule.implies_elim_list rule'' solved_prems, oobjs_of_rule'')
           end
 
+
+          (* TODO(feature)
+               * structural matching und higher-order pattern matching
+                 verschraenken, so das auch matching mit non-Patterns
+                 flexibler ist und Dinge wie  (gmlam x:A. t_1(x)) $ t_2
+                 funktionieren (ist aber ziemlich selten!)
+               * auf primaeren Objekten wahlweise auch normales statt
+                 decompose higher-oder pattern matching erlauben
+          *)
+          (*     decompose higher-oder pattern matching auf primaeren Objekten
+                 ist wie higher-order pattern matching nur das Objekte nicht
+                 on-the-fly eta-expandiert werden, um Termination bei sowas wie
+                    (!! x. t(x) subsimpto t'(x)) ==> (% x. t(x)) subsimpto (%x. t'(x))
+                 zu kriegen. Was man braucht wenn zusaetzlich ne Regel wie
+                     ... ==> (t1 t2) subsimpto t'
+                 da ist die nur first-order-matching betreibt.
+                 Dabei ist dann sehr wichtig das Regel nicht eta-kontrahiert wird, 
+                 vllt also besser mit nem Spezial-Lambda schreiben?
+                 Aktivieren ueber DECOMPOSE marker vor den Patterns gegen die man
+                 nur decompose-matchen will *)
         fun first_succ [] failed_rules = no_match failed_rules
           | first_succ (rule :: rem_rules) failed_rules = 
               let
@@ -1556,29 +1576,9 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                              und probiert somit auch die anderen matchenden Regeln *)
                           match_iter rem_iobj_pats rem_iobjs succ_cont inst
                       end
-                 (* TODO(feature)
-                      * structural matching und higher-order pattern matching
-                        verschraenken, so das auch matching mit non-Patterns
-                        flexibler ist und Dinge wie  (gmlam x:A. t_1(x)) $ t_2
-                        funktionieren (ist aber ziemlich selten!)
-                      * auf primaeren Objekten wahlweise auch normales statt
-                        decompose higher-oder pattern matching erlauben
-                 *)
-                 (*     decompose higher-oder pattern matching auf primaeren Objekten
-                        ist wie higher-order pattern matching nur das Objekte nicht
-                        on-the-fly eta-expandiert werden, um Termination bei sowas wie
-                           (!! x. t(x) subsimpto t'(x)) ==> (% x. t(x)) subsimpto (%x. t'(x))
-                        zu kriegen. Was man braucht wenn zusaetzlich ne Regel wie
-                            ... ==> (t1 t2) subsimpto t'
-                        da ist die nur first-order-matching betreibt.
-                        Dabei ist dann sehr wichtig das Regel nicht eta-kontrahiert wird, 
-                        vllt also besser mit nem Spezial-Lambda schreiben?
-                        Aktivieren ueber DECOMPOSE marker vor den Patterns gegen die man
-                        nur decompose-matchen will
-                 
-                    Implicitly degrades to structural first-order matching (which is also
-                    decompose in this sense) if pobj_pat is not a pattern. *)
               in
+                (* Implicitly degrades to structural first-order matching (which is also
+                   decompose in this sense) if pobj_pat is not a pattern. *)
                 case cdecompose_pattern_match_opt thy (pobj_pat, pobj) of
                   NONE => first_succ rem_rules failed_rules
                 | SOME inst0 =>
