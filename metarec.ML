@@ -99,25 +99,6 @@ fun pack_pobj_iobjs pobj iobjs = Term.list_comb (Free("packed_pobj_iobjs", Term.
 fun dummy_comb ts = Term.list_comb (Free("dummy", Term.dummyT), ts)
 
 
-fun gen_decompose_judgement term_to_jud judgements string_of_term prop =
-  (* TODO(opt): eta normalisierung immer unnoetig weil Judgementapplikationen rigide Atome sind? *)
-  case Net.match_term term_to_jud (Envir.eta_contract prop) of
-    [jid] =>
-      (case Symtab.lookup judgements jid of
-        SOME ((matcher, _, _), _, _, _, _, _) =>
-          (case matcher prop of
-            SOME args => SOME (jid, args)
-          | NONE => error ("decompose_judgement: matcher failed on "^string_of_term prop))
-      | NONE => error ("decompose_judgement: jid "^quote jid^" is not valid"))
-  | _ => NONE
-
-fun rule_net_index judgements term_to_jud (thm, prior) =
-  thm |> Thm.concl_of |> gen_decompose_judgement term_to_jud judgements (fn _ => "<term (no term printer)>")
-  |> Option.map (fn (_, (pobj, iobjs, oobjs)) => pack_pobj_iobjs pobj iobjs)
-  |> the_list
-fun eq_for_net ((thm1, _), (thm2, _)) = Thm.eq_thm_prop (thm1, thm2)
-
-
 
 
 
@@ -154,9 +135,10 @@ fun synth_objs_from_sec_objs mode sec_objs = drop (fst mode) sec_objs
 
 (* TODO(semantics): besser NormalJud in FactJud, RecJud aufteilen? *)
 datatype judgement_kind = NormalJud | CollJud | ProcJud | LthyTransfJud
+datatype allow_inconsis = AllowInconsis | DisallowInconsis
 (* head_term has to be in most general form *)
 type judgements_type = (analyzer_ty * term * mode * judgement_kind *
-  (thm * string * string option) option * string option) Symtab.table
+  (thm * string * string option) option * string option * allow_inconsis) Symtab.table
   (* running_expl_frules,   running_on_thy_lvl *)
 type run_info_ty = bool * int 
 
@@ -173,7 +155,7 @@ val note_jud = "note_jud"
 val concat_names_jud = "concat_names_jud"
 
 (* define, note, concat_names are added in setup *)
-val judgements_start  =
+val judgements_start : judgements_type =
   let
     val head = Free(arb_judgement^"_DUMMY_POBJ", Term.dummyT)
     val chead = cterm_of @{theory} head
@@ -192,7 +174,7 @@ val judgements_start  =
     val mode = (0, 0)
   in
     Symtab.empty
-    |> Symtab.update (arb_judgement, ((matcher, maker, cmatcher), arb_head_term, mode, NormalJud, NONE, NONE))
+    |> Symtab.update (arb_judgement, ((matcher, maker, cmatcher), arb_head_term, mode, NormalJud, NONE, NONE, DisallowInconsis))
   end
 val depgraph_start = Graph.empty
   |> Graph.new_node (arb_judgement, Judgement)
@@ -207,6 +189,31 @@ fun get_frule frules id =
   case Inttab.lookup frules id of
     SOME (frule, _, _, _, _) => frule
   | NONE => error "get_frule"
+
+
+
+
+
+fun gen_decompose_judgement term_to_jud (judgements : judgements_type) string_of_term prop =
+  (* TODO(opt): eta normalisierung immer unnoetig weil Judgementapplikationen rigide Atome sind? *)
+  case Net.match_term term_to_jud (Envir.eta_contract prop) of
+    [jid] =>
+      (case Symtab.lookup judgements jid of
+        SOME ((matcher, _, _), _, _, _, _, _, _) =>
+          (case matcher prop of
+            SOME args => SOME (jid, args)
+          | NONE => error ("decompose_judgement: matcher failed on "^string_of_term prop))
+      | NONE => error ("decompose_judgement: jid "^quote jid^" is not valid"))
+  | _ => NONE
+
+fun rule_net_index (judgements : judgements_type) term_to_jud (thm, prior) =
+  thm |> Thm.concl_of |> gen_decompose_judgement term_to_jud judgements (fn _ => "<term (no term printer)>")
+  |> Option.map (fn (_, (pobj, iobjs, oobjs)) => pack_pobj_iobjs pobj iobjs)
+  |> the_list
+fun eq_for_net ((thm1, _), (thm2, _)) = Thm.eq_thm_prop (thm1, thm2)
+
+
+
 
 local
   fun scc_err string_of_thm scc_frules victim_frule mod_jud evil_frules badpath =
@@ -308,7 +315,7 @@ type ruledata_type = {
     new_facts: thm list Symtab.table
   }
 
-val empty_ruledata = {
+val empty_ruledata : ruledata_type = {
      rules = Symtab.empty, judgements = judgements_start,
      term_to_jud = Net.empty, assms = [],
      syn_procs = Symtab.empty,
@@ -350,7 +357,7 @@ structure RuleData = Generic_Data(
             facts=facts2, facts_lhs_idx=facts_lhs_idx2, depgraph=depgraph2, frules=frules2, frules_hdidx=frules_hdidx2,
             frules_factgen=frules_factgen2, gen_brule_concls=gen_brule_concls2, lthy_transforms=lthy_transforms2,
             lthy_transform_log=lthy_transform_log2, new_facts=new_facts2} = data2
-          val judgements' = Symtab.merge (K true) (judgements1, judgements2)
+          val judgements' : judgements_type = Symtab.merge (K true) (judgements1, judgements2)
           val term_to_jud' = Net.merge (op =) (term_to_jud1, term_to_jud2)
           val frules' = frules1 |> Inttab.fold (fn (id, (th, kind, headjuds, applied_to_facts, traced)) =>
               Inttab.map_default (id, (th, kind, headjuds, applied_to_facts, traced)) (fn (th2, kind2, headjuds2, applied_to_facts2, traced2) =>
@@ -692,27 +699,31 @@ fun get_judgements (gctxt : Context.generic) : judgements_type =
   in judgements end
 fun get_judgement_head_term gctxt jud = 
   case Symtab.lookup (get_judgements gctxt) jud of
-    SOME (_, head_term, _, _, _, _) => head_term
+    SOME (_, head_term, _, _, _, _, _) => head_term
   | NONE => error ("get_judgement_head_term: "^quote jud^" is not a judgement")
 fun get_judgement_kind gctxt jud : judgement_kind =
   case Symtab.lookup (get_judgements gctxt) jud of
-    SOME (_, _, _, kind, _, _) => kind
+    SOME (_, _, _, kind, _, _, _) => kind
   | NONE => error ("get_judgement_kind: "^quote jud^" is not a judgement")
 fun get_judgement_mode gctxt jud : mode =
   case Symtab.lookup (get_judgements gctxt) jud of
-    SOME (_, _, mode, _, _, _) => mode
+    SOME (_, _, mode, _, _, _, _) => mode
   | NONE => error ("get_judgements_mode: "^quote jud^" is not a judgement")
 fun get_judgement_higherjud gctxt jud =
   case Symtab.lookup (get_judgements gctxt) jud of
-    SOME (_, _, _, _, _, higherjud_opt) => higherjud_opt
+    SOME (_, _, _, _, _, higherjud_opt, _) => higherjud_opt
   | NONE => error ("get_judgements_higherjud: "^quote jud^" is not a judgement")
 fun get_judgement_coll_info gctxt jud = 
   case Symtab.lookup (get_judgements gctxt) jud of
-    SOME (_, _, _, _, SOME coll_info, _) => coll_info
-  | _ => error ("get_judgements_coll_info: CollectorJud "^quote jud^" not a collector judgement")
+    SOME (_, _, _, _, SOME coll_info, _, _) => coll_info
+  | _ => error ("get_judgements_coll_info: "^quote jud^" not a collector judgement")
+fun get_judgement_inconsis_allowed gctxt jud = 
+  case Symtab.lookup (get_judgements gctxt) jud of
+    SOME (_, _, _, _, _, _, allow_inconsis) => (allow_inconsis = AllowInconsis)
+  | _ => error ("get_judgements_coll_info: "^quote jud^" not a judgement")
 
 fun get_judgement_for_headterm gctxt head_term' =
- Symtab.get_first (fn (jud, (_, head_term, _, _, _, _)) =>
+ Symtab.get_first (fn (jud, (_, head_term, _, _, _, _, _)) =>
      if Pattern.matches (Context.theory_of gctxt) (head_term, head_term') then
        SOME jud
      else NONE)
@@ -731,7 +742,7 @@ fun decompose_judgement_cterm gctxt cprop =
   case Net.match_term (#term_to_jud (get_current_ruledata gctxt)) (Envir.eta_contract (Thm.term_of cprop)) of
     [jid] =>
       (case Symtab.lookup (get_judgements gctxt) jid of
-        SOME ((_, _, cmatcher), _, _, _, _, _) =>
+        SOME ((_, _, cmatcher), _, _, _, _, _, _) =>
           (case cmatcher cprop of
             SOME cargs => SOME (jid, cargs)
           | NONE => error ("decompose_judgement: matcher failed on "^
@@ -859,7 +870,7 @@ fun trace_with_facts ctxt msg = tracing (gen_msg_with_facts ctxt msg)
     anwendet mit Moding als Attribut-Parameter und die
     definierte Konstante dann als entsprechendes Judgement hinzufuegt *)
 (* schmeisst Symtab.DUP wenn es das Judgement schon gab *)
-fun gen_add_judgement opt_colljud_info extradeps jud head_term analyzer_data mode jud_kind
+fun gen_add_judgement opt_colljud_info extradeps allow_inconsis jud head_term analyzer_data mode jud_kind
     higher_jud_opt gctxt =
   let
     val {judgements, term_to_jud, depgraph, ...} = get_current_ruledata gctxt
@@ -888,7 +899,7 @@ fun gen_add_judgement opt_colljud_info extradeps jud head_term analyzer_data mod
       (hd head_args, take (fst mode) (tl head_args), drop (fst mode + 1) head_args)
 
     val judgements' = judgements
-      |> Symtab.update_new (jud, (analyzer_data, head_term, mode, jud_kind, opt_colljud_info, higher_jud_opt))
+      |> Symtab.update_new (jud, (analyzer_data, head_term, mode, jud_kind, opt_colljud_info, higher_jud_opt, allow_inconsis))
     val term_to_jud' = term_to_jud |> Net.insert_term (op =) (jud_term, jud)
     val depgraph' = depgraph
       |> Graph.new_node (jud, Judgement)
@@ -901,7 +912,7 @@ fun gen_add_judgement opt_colljud_info extradeps jud head_term analyzer_data mod
 val add_judgement = gen_add_judgement NONE []
  (* colljudI proves "jud ?proplist" *)
 fun add_coll_jud basejud colljudI triggerjud_opt =
-  gen_add_judgement (SOME (colljudI, basejud, triggerjud_opt)) (basejud :: the_list triggerjud_opt)
+  gen_add_judgement (SOME (colljudI, basejud, triggerjud_opt)) (basejud :: the_list triggerjud_opt) DisallowInconsis
 
 
 fun add_syn_proc jud proc_id proc = map_syn_procs (Symtab.update (jud, (proc_id, proc)))
@@ -1782,9 +1793,12 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
       if Drule.is_norm_hhf prem then ()
       else err_with_trace ctxt ("check_prem: premise   "^Syntax.string_of_term ctxt prem
         ^"   not in hhf normal form")
-    val params = Logic.strip_params prem
-    val prem_concl = Logic.strip_assums_concl prem
-    val prem_assms = Logic.strip_assums_hyp prem
+
+    val params0 = Logic.strip_params prem
+    val (freshns, ctxt2) = Variable.variant_fixes (map fst params0) ctxt
+    val params = freshns ~~ (map snd params0) |> map Free
+    val prem_concl = Term.subst_bounds (rev params, Logic.strip_assums_concl prem)
+    val prem_assms = Logic.strip_assums_hyp prem |> map (curry Term.subst_bounds (rev params))
 
     fun check_no_additional_vars msg t = 
        let
@@ -1795,16 +1809,16 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
        in
          if not check_groundness orelse (null bad_vars andalso null bad_tvars) then
            ()
-         else err_with_trace ctxt ("check_prem: "^msg
-            ^"\ninput argument is "^Syntax.string_of_term ctxt t
+         else err_with_trace ctxt2 ("check_prem: "^msg
+            ^"\ninput argument is "^Syntax.string_of_term ctxt2 t
             ^"\nvars are "^Library.commas (vars
-                 |> map (fn (ixn,T) => Syntax.string_of_term ctxt (Var(ixn,T))))
+                 |> map (fn (ixn,T) => Syntax.string_of_term ctxt2 (Var(ixn,T))))
             ^"\ntvars are "^Library.commas (tvars
-                 |> map (fn (ixn,S) => Syntax.string_of_typ ctxt (TVar(ixn,S))))
+                 |> map (fn (ixn,S) => Syntax.string_of_typ ctxt2 (TVar(ixn,S))))
             ^"\nbad_vars are "^Library.commas (bad_vars
-                 |> map (fn (ixn,T) => Syntax.string_of_term ctxt (Var(ixn,T))))
+                 |> map (fn (ixn,T) => Syntax.string_of_term ctxt2 (Var(ixn,T))))
             ^"\nbad_tvars are "^Library.commas (bad_tvars
-                 |> map (fn (ixn,S) => Syntax.string_of_typ ctxt (TVar(ixn,S)))))
+                 |> map (fn (ixn,S) => Syntax.string_of_typ ctxt2 (TVar(ixn,S)))))
        end
      (* otherwise we could not assume them while recursively solving prems via metarec
         Fun: compare to ancient fixme in raw_simplifier.ML before rewrite_rule_extra_vars ^^ *)
@@ -1815,6 +1829,8 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
         SOME (jud, (pobj, iobjs, _)) =>
            insert (op =) jud #> fold collect_all_juds (pobj :: iobjs)
       | NONE =>
+            (* note: this t may not contain loose bounds, this is why we
+                fixed them earlier *)
           (case get_judgement_for_headterm gctxt t of
             SOME jud => insert (op =) jud
           | NONE => I)
@@ -1825,24 +1841,30 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
             val _ = (pobj_of_prem :: iobjs_of_prem)
               |> map (check_no_additional_vars
                    ("metarec premise conclusion\n"
-                   ^Syntax.string_of_term ctxt prem_concl
+                   ^Syntax.string_of_term ctxt2 prem_concl
                      ^"\nhas additional Vars or TVars in input position"))
             val seen_lthy_transf' =
               if not (Symtab.defined lthy_transforms jid_of_prem) then
                 seen_lthy_transf
               else if not may_have_lthy_transforms then
-                err_with_trace ctxt ("check_prem: premise with lthy transformation not allowed here   "
-                  ^Syntax.string_of_term ctxt prem_concl)
+                err_with_trace ctxt2 ("check_prem: premise with lthy transformation not allowed here   "
+                  ^Syntax.string_of_term ctxt2 prem_concl)
               else if null params andalso null prem_assms then
                 true
               else
-                err_with_trace ctxt ("check_prem: premise with lthy transformation under fixes or assumes:  "
-                  ^Syntax.string_of_term ctxt prem)
+                err_with_trace ctxt2 ("check_prem: premise with lthy transformation under fixes or assumes:  "
+                  ^Syntax.string_of_term ctxt2 prem)
             val _ =
-              if oobjs_of_prem |> forall (Pattern.pattern o abstr_inst (avail_vars, avail_tvars)) then ()
+              if oobjs_of_prem |> map (Term.map_aterms
+                   (fn t as Free _ =>
+                       (case find_index (fn t2 => t = t2) params of
+                         ~1 => t
+                       | i => Bound (length params - i))
+                     | t => t))
+                 |> forall (Pattern.pattern o abstr_inst (avail_vars, avail_tvars)) then ()
               else
-                err_with_trace ctxt ("check_prem: synthesized output object in premise conclusion   "
-                  ^Syntax.string_of_term ctxt prem_concl
+                err_with_trace ctxt2 ("check_prem: synthesized output object in premise conclusion   "
+                  ^Syntax.string_of_term ctxt2 prem_concl
                   ^"   not a pattern when available vars are fixed")
 
             (* TODO(correctness): tracks only ground judgement dependencies instead
@@ -1852,7 +1874,7 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
             val _ =
               if null further_juddeps then ()
               else tracing ("check_prem: found further judgement dependencies\n    "^Library.commas further_juddeps
-                ^"\nin premise conclusion   "^Syntax.string_of_term ctxt prem_concl)
+                ^"\nin premise conclusion   "^Syntax.string_of_term ctxt2 prem_concl)
           in
             (seen_lthy_transf',
              (avail_vars |> fold Term.add_vars oobjs_of_prem,
@@ -1865,19 +1887,19 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
                (* so einfach weil prem_assms schon vollstaendig gecheckt
                   NB: local theory transformations in or before try premises not allowed *)
               if seen_lthy_transf then
-                err_with_trace ctxt ("check_prem: premise with try not allowed after an lthy transformation here   "
-                  ^Syntax.string_of_term ctxt prem_concl)
+                err_with_trace ctxt2 ("check_prem: premise with try not allowed after an lthy transformation here   "
+                  ^Syntax.string_of_term ctxt2 prem_concl)
               else
                 (let
                   fun cont () = 
-                    check_prem ctxt may_have_lthy_transforms check_groundness
+                    check_prem ctxt2 may_have_lthy_transforms check_groundness
                       prem' (seen_lthy_transf, (avail_vars, avail_tvars, juds))
                 in
                   case decompose_judgement gctxt prem' of
                     SOME (jid', _) =>
                       if Symtab.defined lthy_transforms jid' then
-                        err_with_trace ctxt ("check_prem: lthy transformation not allowed in a try   "
-                          ^Syntax.string_of_term ctxt prem_concl)
+                        err_with_trace ctxt2 ("check_prem: lthy transformation not allowed in a try   "
+                          ^Syntax.string_of_term ctxt2 prem_concl)
                       else
                         cont ()
                   | NONE =>
@@ -1887,13 +1909,13 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
               (* entspricht in lambdaProlog non-rigid Atomen in Goals
                  das ist wichtig fuer hoeherstufige Programmiertechnik, zB fuer map F xs *)
               let
-                val _ = warning ("check_prem: premise conclusion   "^Syntax.string_of_term ctxt prem_concl
+                val _ = warning ("check_prem: premise conclusion   "^Syntax.string_of_term ctxt2 prem_concl
                   ^"   is not a known judgement and no solver matches. We will accept this now"
                   ^" and try to find use the judgement dynamically for instantiations of the rule."
                   ^" Note that judgement dependency tracking is now very conservative, considering "
                   ^" every judgement in that position.")
                 val _ = check_no_additional_vars
-                  ("premise conclusion of unknown judgement   "^Syntax.string_of_term ctxt prem_concl
+                  ("premise conclusion of unknown judgement   "^Syntax.string_of_term ctxt2 prem_concl
                     ^"   has additional Vars or TVars (we are very conservative in the assumed mode of the"
                     ^" judgement: all arguments need to be ground)")
                   prem_concl
@@ -2390,6 +2412,7 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
                     case decompose_judgement gctxt (prop_of fact') of
                       SOME (jud', (pobj', iobjs', oobjs')) =>
                         if jud <> jud'
+                          orelse (get_judgement_inconsis_allowed gctxt jud)
                           orelse exists (not o aconv) ((pobj, pobj') :: (iobjs ~~ iobjs'))
                           orelse forall (op aconv) (oobjs ~~ oobjs')
                         then true
@@ -2870,13 +2893,13 @@ fun gen_add_nplace_jud add_jud judkind higherjud_opt nins nouts judname head_ter
     add_jud judname head_term (matcher, maker, cmatcher) mode judkind higherjud_opt gctxt
   end
 
-val gen_add_nplace_synth_jud = gen_add_nplace_jud add_judgement
-val add_nplace_synth_jud = gen_add_nplace_synth_jud NormalJud
+fun gen_add_nplace_synth_jud allow_inconsis = gen_add_nplace_jud (add_judgement allow_inconsis)
+fun add_nplace_synth_jud allow_inconsis = gen_add_nplace_synth_jud allow_inconsis NormalJud
 fun add_nplace_coll_jud colljud head_term basejud triggerjud_opt colljudI =
   gen_add_nplace_jud (add_coll_jud basejud colljudI triggerjud_opt) CollJud NONE 0 1 colljud head_term
 
 fun add_tactic_proc_nplace_jud nins nouts judname head_term tac =
-  gen_add_nplace_synth_jud ProcJud NONE nins nouts judname head_term
+  gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE nins nouts judname head_term
   #> add_tactic_proc judname tac
 
 
@@ -3008,12 +3031,15 @@ val impl_frule_uncheckedgrnd_del = Thm.declaration_attribute (K I)
 (* TODO(feature): localize, dh head_term ist das was bleibt
      wenn man num_ins+num_outs Argumente wegstrippt und
      nicht wirklich der Head *)
-val judgement_decl_attr = Scan.lift (Parse.nat -- Parse.nat -- Scan.option Parse.string
-  >> (fn ((num_ins, num_outs), wf_jud_opt) => fn (gctxt, defth) =>
+val judgement_decl_attr = Scan.lift
+    (Parse.nat -- Parse.nat -- Scan.option (Args.$$$ "allowinconsis")
+     -- Scan.option ((Args.$$$ "wfjud" -- Args.colon) |-- Parse.string)
+  >> (fn (((num_ins, num_outs), allow_inconsis_opt), wf_jud_opt) => fn (gctxt, defth) =>
        let
          val head_term = prop_of defth |> Logic.dest_equals |> fst |> Term.head_of
            |> singleton (Variable.polymorphic (Context.proof_of gctxt))
          val jud_name = name_from_const_or_free head_term ^ "_jud"
+         val allow_inconsis = if is_some allow_inconsis_opt then AllowInconsis else DisallowInconsis
        in
          (* TODO(hackish): judgements sind noch nicht lokalisiert worden und wir verlassen
               uns hier darauf das das Attribut zuerst in der Theorie ausgefuehrt wird *)
@@ -3022,7 +3048,7 @@ val judgement_decl_attr = Scan.lift (Parse.nat -- Parse.nat -- Scan.option Parse
          | NONE =>
               (* -1 weil prim object ja nicht zaehlt hier aber
                  zu verwirrend fuer user *)
-             (add_nplace_synth_jud wf_jud_opt (num_ins - 1) num_outs jud_name head_term gctxt, defth)
+             (add_nplace_synth_jud allow_inconsis wf_jud_opt (num_ins - 1) num_outs jud_name head_term gctxt, defth)
        end))
 
 val coll_jud_decl_attr = Scan.lift
@@ -3144,9 +3170,9 @@ val setup =
   #> Attrib.setup (Binding.name "comp_rule") (Attrib.add_del add_comp_rule_att del_comp_rule_att)
       "Declaration of computational rules for Soft Type Checking"
   #> Context.theory_map (
-       gen_add_nplace_synth_jud LthyTransfJud NONE 1 1 define_jud Data.define_headterm
-       #> gen_add_nplace_synth_jud NormalJud NONE 1 0 note_jud Data.note_headterm
-       #> gen_add_nplace_synth_jud ProcJud NONE 1 1 concat_names_jud Data.concat_names_headterm)
+       gen_add_nplace_synth_jud DisallowInconsis LthyTransfJud NONE 1 1 define_jud Data.define_headterm
+       #> gen_add_nplace_synth_jud DisallowInconsis NormalJud NONE 1 0 note_jud Data.note_headterm
+       #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 1 1 concat_names_jud Data.concat_names_headterm)
   #> Context.theory_map (
        add_syn_proc concat_names_jud "concat_names_proc" concat_names_proc
        #> add_lthy_transform define_jud  "define" define_lthy_transf)
