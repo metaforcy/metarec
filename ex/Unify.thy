@@ -1,4 +1,4 @@
-theory Unify
+ theory Unify
 imports "../HOLMetaRec"
 begin
 
@@ -21,6 +21,10 @@ definition
   [MRjud 1 1]: "subst t1 t2 \<equiv> (t1 = t2)"
 
 definition
+  varsubst where
+  [MRjud 1 1]: "varsubst t1 t2 \<equiv> (t1 = t2)"
+
+definition
   addToCtxt :: "bool set \<Rightarrow> bool" where
   [MRjud 1 0]: "addToCtxt C \<equiv> (\<forall> P\<in>C. P)"
 
@@ -33,7 +37,7 @@ definition
 
 lemma [impl_frule]: "
   addToCtxt { x = t }
-  \<Longrightarrow>  subst x t"    by (simp add: subst_def addToCtxt_def)
+  \<Longrightarrow>  varsubst x t"    by (simp add: varsubst_def addToCtxt_def)
 
 lemma [impl_frule]: "
   addToCtxt (C1 Un C2)
@@ -60,6 +64,14 @@ lemma [MR]: "
 
 lemma [MR]: "
     subst t t "   by (simp add: subst_def)
+
+(* important because the rhs of varsubst clauses is not normalized on-the-fly
+   when new var instantiations are found
+   (which is contrary to many formulations of unification) *)
+lemma [MR]: "
+    \<lbrakk>  try (varsubst x t)  ;  subst t t'  \<rbrakk> \<Longrightarrow>
+  subst x t'"
+      by (simp add: subst_def try_const_def varsubst_def)
 
 lemma [MR]: "
       [| subst t1 t1'  ;  subst t2 t2' |] ==>
