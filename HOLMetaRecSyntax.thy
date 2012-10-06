@@ -419,6 +419,19 @@ lemma [MR]: "
 
 
 
+definition
+  gen_fresh_int :: "unit \<Rightarrow> 'a \<Rightarrow> bool" where
+  [MRjud 1 1]: "gen_fresh_int u x \<equiv> True"
+lemma gen_fresh_intI: "gen_fresh_int () x"  by (simp add: gen_fresh_int_def)
+definition
+  gen_fresh :: "unit \<Rightarrow> 'a \<Rightarrow> bool" where
+  [MRjud 1 1]: "gen_fresh u x \<equiv> True"
+
+lemma [MR]: "
+    gen_fresh_int () x \<Longrightarrow>
+  gen_fresh () x"  by (simp add: gen_fresh_def)
+
+
 
 method_setup sorry2 =
   {* Scan.succeed (Method.cheating true) *}

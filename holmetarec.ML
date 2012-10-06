@@ -440,6 +440,22 @@ structure HOLMetaRec = struct
 
 
 
+local
+  val freshcounter = Unsynchronized.ref 0
+in
+  fun gen_fresh_proc ctxt (_, [], [coutpat]) =
+    let
+      val ([n], _) = ctxt |>
+        Variable.variant_fixes ["genfresh" ^ string_of_int (!freshcounter)]
+      val T = Thm.ctyp_of_term coutpat |> Thm.typ_of
+      val free = Free(n, T)
+      val cfree = free |> cterm_of (ProofContext.theory_of ctxt)
+      val th = @{thm gen_fresh_intI}
+        |> Drule.instantiate' [SOME (Thm.ctyp_of_term cfree)] [SOME cfree]
+      val _ = Unsynchronized.inc freshcounter
+    in (th, [cfree]) end
+end
+
 
 
   fun collectHOLfacts_proc ctxt (pat0_ct, [], _) =
@@ -531,6 +547,7 @@ structure HOLMetaRec = struct
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.simpto_const_jud" "simpto_proc" (simpto_proc false)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.powersimpto_const_jud" "powersimpto_proc" (simpto_proc true)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.collectHOLfacts_int_jud" "collectHOLfacts_internal_proc" collectHOLfacts_proc
-      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.scopify_name_jud" "scopify_name_proc" scopify_name_proc)
+      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.scopify_name_jud" "scopify_name_proc" scopify_name_proc
+      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.gen_fresh_int_jud" "gen_fresh_proc" gen_fresh_proc)
 
 end
