@@ -440,6 +440,11 @@ structure HOLMetaRec = struct
 
 
 
+(* gen_fresh is only possible because Isabelle/Pure has no typing contexts
+   (this is consistent because types are always non-empty),
+   so we can just introduce a fresh Free variable with a given type.
+   Very useful for variables whose constraints are discovered only later
+   (esp. unification variables) *)
 local
   val freshcounter = Unsynchronized.ref 0
 in

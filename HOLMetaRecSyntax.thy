@@ -423,9 +423,10 @@ definition
   gen_fresh_int :: "unit \<Rightarrow> 'a \<Rightarrow> bool" where
   [MRjud 1 1]: "gen_fresh_int u x \<equiv> True"
 lemma gen_fresh_intI: "gen_fresh_int () x"  by (simp add: gen_fresh_int_def)
+
 definition
   gen_fresh :: "unit \<Rightarrow> 'a \<Rightarrow> bool" where
-  [MRjud 1 1]: "gen_fresh u x \<equiv> True"
+  [MRjud 1 1 allowinconsis]: "gen_fresh u x \<equiv> True"
 
 lemma [MR]: "
     gen_fresh_int () x \<Longrightarrow>
