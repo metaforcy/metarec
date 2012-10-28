@@ -448,6 +448,8 @@ structure HOLMetaRec = struct
 local
   val freshcounter = Unsynchronized.ref 0
 in
+  (* NB: uses output pattern for its type, so this synproc cannot be
+     hidden in an internal judgement. *)
   fun gen_fresh_proc ctxt (_, [], [coutpat]) =
     let
       val ([n], _) = ctxt |>
@@ -455,7 +457,7 @@ in
       val T = Thm.ctyp_of_term coutpat |> Thm.typ_of
       val free = Free(n, T)
       val cfree = free |> cterm_of (ProofContext.theory_of ctxt)
-      val th = @{thm gen_fresh_intI}
+      val th = @{thm gen_freshI}
         |> Drule.instantiate' [SOME (Thm.ctyp_of_term cfree)] [SOME cfree]
       val _ = Unsynchronized.inc freshcounter
     in (th, [cfree]) end
@@ -553,6 +555,6 @@ end
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.powersimpto_const_jud" "powersimpto_proc" (simpto_proc true)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.collectHOLfacts_int_jud" "collectHOLfacts_internal_proc" collectHOLfacts_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.scopify_name_jud" "scopify_name_proc" scopify_name_proc
-      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.gen_fresh_int_jud" "gen_fresh_proc" gen_fresh_proc)
+      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.gen_fresh_jud" "gen_fresh_proc" gen_fresh_proc)
 
 end
