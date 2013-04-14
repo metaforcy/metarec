@@ -78,8 +78,8 @@ structure HOLMetaRec = struct
         |> Variable.variant_fixes (map fst tfrees)
       val tfree_renaming = tfrees ~~ ren_tfrees
 
-      val thy2 = ProofContext.theory_of lthy2
-      val global_ctxt2 = ProofContext.init_global thy2
+      val thy2 = Proof_Context.theory_of lthy2
+      val global_ctxt2 = Proof_Context.init_global thy2
       (* globalisieren damit Typvar-Umbennenung funktioniert *)
       val set_exp =
         Local_Defs.export_cterm lthy2 global_ctxt2
@@ -88,6 +88,7 @@ structure HOLMetaRec = struct
         (fn (n, S) => TFree (AList.lookup (op =) tfree_renaming (n, S) |> the, S))
       val (exp_rews, nonempty_fact_exp_ren) = nonempty_fact
         |> Local_Defs.export lthy2 global_ctxt2
+        |>> fst
         ||> Thm.generalize (map fst tfrees, []) 0
         ||> Thm.instantiate (map (fn ((n, S), n') =>
                 (TVar((n,0), S), TFree(n',S)) |> pairself (ctyp_of thy2))
@@ -103,7 +104,7 @@ structure HOLMetaRec = struct
       val kappa = MetaRec.name_from_const_or_free_unsuffix name_t
         |> Long_Name.base_name |> Binding.name
       val ((tyco_name, _), lthy3) = lthy2
-        |> Typedef.add_typedef false NONE
+        |> Typedef.add_typedef
              (kappa, ren_tfrees |> map (fn n => (n, HOLogic.typeS)), NoSyn)
              set_exp_ren NONE ne_tac
 
@@ -111,7 +112,7 @@ structure HOLMetaRec = struct
        (* TODO(hack): nur noetig weil alte declaration Semantik den aux context vernachlaessigt *)
       val target = Local_Theory.target_of lthy3
       val infos = Typedef.get_info target full_name
-      val thy3 = ProofContext.theory_of lthy3
+      val thy3 = Proof_Context.theory_of lthy3
       val type_definition_exp =
         case infos of
           (info :: _) => info |> snd |> #type_definition
@@ -139,7 +140,7 @@ structure HOLMetaRec = struct
         ^Syntax.string_of_term lthy3 set_t
         ^"\n   type_definition_reinst is "^Display.string_of_thm lthy3 type_definition_reinst
       val lthy4 = lthy3 |> MetaRec.map_lthy_transforms_log (cons msg)
-      val cert = cterm_of (ProofContext.theory_of lthy4)
+      val cert = cterm_of (Proof_Context.theory_of lthy4)
       (* val _ = tracing msg *)
     in ((th, [Logic.mk_type abs_type, rep, abs] |> map cert), lthy4) end
 
@@ -163,13 +164,13 @@ structure HOLMetaRec = struct
       val constr_names = map_range (fn i => tyco_name^"_Constr"^string_of_int i) num_constrs
       val ([tyco_name], lthy2) = lthy
         |> Local_Theory.raw_theory_result (Datatype.add_datatype Datatype_Aux.default_config
-             [tyco_name] [(tyargs, tyco_bnd, NoSyn, constr_names |> (map (fn C => (Binding.name C, [], NoSyn))))])
+             [((tyco_bnd, tyargs, NoSyn), constr_names |> (map (fn C => (Binding.name C, [], NoSyn))))])
          handle ERROR str =>
            MetaRec.err_with_trace_and_facts lthy
              ("enum_datatype_lthytransf: error in datatype package:\n"^str)
       val T = Type(tyco_name, [])
 
-      val thy2 = ProofContext.theory_of lthy2
+      val thy2 = Proof_Context.theory_of lthy2
       val cert = cterm_of thy2
       val certT = ctyp_of thy2
       val ctyp_from = fastype_of #> ctyp_of thy2
@@ -185,7 +186,7 @@ structure HOLMetaRec = struct
 
       val free_P = Free("P", T --> HOLogic.boolT)
       val quant_unroll_t = HOLogic.mk_eq (HOLogic.all_const T $ Abs("x", T, free_P $ Bound 0),
-          fold (fn constr => fn rest => HOLogic.mk_conj (free_P $ constr, rest)) constrs HOLogic.true_const)
+          fold (fn constr => fn rest => HOLogic.mk_conj (free_P $ constr, rest)) constrs @{term "True"})
         |> HOLogic.mk_Trueprop
       val quant_unroll_th = Goal.prove lthy2 ["P"] [] quant_unroll_t (fn _ =>
           rtac @{thm iffI} 1 
@@ -229,11 +230,11 @@ structure HOLMetaRec = struct
         |> MetaRec.add_non_pervasive_declaration (fn _ =>
              Simplifier.map_ss (fn ss =>
                ss addsimps (case_rewrites @ distinct @ rec_rewrites)
-               addcongs [weak_case_cong])
-             #> fold (fn th => fn gctxt => Classical.safe_elim NONE (gctxt, th RS notE) |> fst)
+               |> Raw_Simplifier.add_cong weak_case_cong)
+             #> fold (fn th => fn gctxt => Classical.safe_elim NONE (gctxt, th RS notE) |> fst |> the)
                   distinct
-             #> fold (fn th => fn gctxt => Clasimp.iff_add' (gctxt, th) |> fst) inject)
-      val cert = cterm_of (ProofContext.theory_of lthy3)
+             #> fold (fn th => fn gctxt => Clasimp.iff_add' (gctxt, th) |> fst |> the) inject)
+      val cert = cterm_of (Proof_Context.theory_of lthy3)
     in
       ((th, [Logic.mk_type T, constrs_t] |> map cert), lthy3)
     end
@@ -249,7 +250,7 @@ structure HOLMetaRec = struct
       val fun_bnd = Binding.name fun_name
       val triv_bnd = Binding.name ""
 
-      val thy2 = ProofContext.theory_of lthy2
+      val thy2 = Proof_Context.theory_of lthy2
       val ty = Logic.dest_type tyco_t
       val tyco = case ty of
           Type(tyco, _) => tyco
@@ -295,7 +296,7 @@ structure HOLMetaRec = struct
         |> Local_Theory.define ((fun_bnd, NoSyn), ((Thm.def_binding fun_bnd, []), case_expr))
 
 
-      val thy3 = ProofContext.theory_of lthy3
+      val thy3 = Proof_Context.theory_of lthy3
       val cert = cterm_of thy3
       val certT = ctyp_of thy3
       val name_t_cty = fastype_of name_t |> certT
@@ -346,7 +347,7 @@ structure HOLMetaRec = struct
 
   fun tracing_proc ctxt (str_ct, [ct], _) =
     let
-      val thy = ProofContext.theory_of ctxt
+      val thy = Proof_Context.theory_of ctxt
       val str = HOLogic.dest_string (Thm.term_of str_ct)
       val _ = tracing (str^"\n  "^Syntax.string_of_term ctxt (Thm.term_of ct))
       val th = @{thm tracingI} |> Drule.instantiate' [SOME (Thm.ctyp_of_term ct)]
@@ -371,7 +372,7 @@ structure HOLMetaRec = struct
 
   fun onfailerr_proc ctxt (P_ct, [msg_ct, errcode_ct, bad_ct], _) =
     let
-      val thy = ProofContext.theory_of ctxt
+      val thy = Proof_Context.theory_of ctxt
 
       val msg = HOLogic.dest_string (Thm.term_of msg_ct)
       val errcode = metaize_nat (Thm.term_of errcode_ct)
@@ -429,7 +430,7 @@ structure HOLMetaRec = struct
   fun scopify_name_proc ctxt (ct, [], _) =
     let
       val (scope, _, _) = MetaRec.RuleData.get (Context.Proof ctxt)
-      val cert = cterm_of (ProofContext.theory_of ctxt)
+      val cert = cterm_of (Proof_Context.theory_of ctxt)
       val n' = MetaRec.name_from_const_or_free_perhaps_unsuffix (Thm.term_of ct)
         |> Long_Name.base_name
         |> suffix (string_of_int scope)
@@ -456,7 +457,7 @@ in
         Variable.variant_fixes ["genfresh" ^ string_of_int (!freshcounter)]
       val T = Thm.ctyp_of_term coutpat |> Thm.typ_of
       val free = Free(n, T)
-      val cfree = free |> cterm_of (ProofContext.theory_of ctxt)
+      val cfree = free |> cterm_of (Proof_Context.theory_of ctxt)
       val th = @{thm gen_freshI}
         |> Drule.instantiate' [SOME (Thm.ctyp_of_term cfree)] [SOME cfree]
       val _ = Unsynchronized.inc freshcounter
@@ -467,7 +468,7 @@ end
 
   fun collectHOLfacts_proc ctxt (pat0_ct, [], _) =
     let
-      val thy = ProofContext.theory_of ctxt
+      val thy = Proof_Context.theory_of ctxt
       val pat0 = pat0_ct |> Thm.term_of |> Envir.beta_norm
       val vars0 = Term.strip_all_vars pat0
 

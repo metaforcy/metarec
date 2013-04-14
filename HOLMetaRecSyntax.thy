@@ -1,12 +1,12 @@
 theory HOLMetaRecSyntax
 imports Main
-uses
-  "item_net2.ML"
-  "impconv.ML"
-  "decomp_pattern.ML"
-  "metarec.ML"
 begin
 
+
+ML_file "item_net2.ML"
+ML_file "impconv.ML"
+ML_file "decomp_pattern.ML"
+ML_file "metarec.ML"
 
 
 
@@ -384,12 +384,10 @@ declare metamap_cons[MR_unchecked]
 
 (* hack: use a,b,c,d type constructors instead of type variables in
    judgement patterns in collectHOLfacts judgement *)
-(* open typedefs because we don't want sets named a,b,c,d to
-  clutter the namespace *)
-typedef (open) a = "UNIV :: bool set"   by simp
-typedef (open) b = "UNIV :: bool set"   by simp
-typedef (open) c = "UNIV :: bool set"   by simp
-typedef (open) d = "UNIV :: bool set"   by simp
+typedef a = "UNIV :: bool set"   by simp
+typedef b = "UNIV :: bool set"   by simp
+typedef c = "UNIV :: bool set"   by simp
+typedef d = "UNIV :: bool set"   by simp
 
 
 definition  (* judgement for the synthesis proc *)

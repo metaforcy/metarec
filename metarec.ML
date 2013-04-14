@@ -278,7 +278,7 @@ in
                         else 
                           let
                             val fstinter = hd inter
-                            val badpath = Graph.all_paths depgraph (key', fstinter)
+                            val badpath = Graph.irreducible_paths depgraph (key', fstinter)
                               |> hd |> map (fn key2 =>
                                 case get_frule_id depgraph key2 of
                                   SOME rid => "frule   "^string_of_thm (get_frule frules rid)
@@ -657,7 +657,7 @@ fun set_running_expl_frules running_expl_frules =
        (running_expl_frules, running_on_thy_lvl))))))
  
 fun get_running_expl_frules ctxt =
-  if can Local_Theory.affirm ctxt then
+  if can Local_Theory.assert ctxt then
      let val (_, _, (running_expl_frules, _)) =
        RuleData.get (Context.Proof (Local_Theory.target_of ctxt))
      in running_expl_frules end
@@ -682,7 +682,7 @@ val pop_running_on_thy = update_running_on_thy false
 
 fun is_running_on_thy ctxt =
   let val (_, _, (_, running_on_thy_lvl)) =
-    RuleData.get (Context.Theory (ProofContext.theory_of ctxt))
+    RuleData.get (Context.Theory (Proof_Context.theory_of ctxt))
   in running_on_thy_lvl > 0 end
 
 
@@ -690,19 +690,20 @@ fun is_running_on_thy ctxt =
 
 (* with new semantics, e.g. as in 11d9c2768729 *)
 fun add_non_pervasive_declaration decl lthy =
-  let
+  Local_Theory.declaration {syntax=false, pervasive=false} decl lthy
+  (* let
     val lthy2 = lthy
       |> Local_Theory.declaration false decl
           (* decl on identity morphism applied to aux ctxt of lthy *)
       |> Context.proof_map (Morphism.form decl)
-  in lthy2 end
+  in lthy2 end *)
 
 fun map_pot_lthy decl ctxt =
   if is_running_on_thy ctxt then
-    ctxt |> ProofContext.theory_of
+    ctxt |> Proof_Context.theory_of
     |> Context.theory_map (Morphism.form decl)
     (* TODO(opt): init_global teuer  *)
-    |> ProofContext.init_global
+    |> Proof_Context.init_global
   else if get_running_expl_frules ctxt then (* ctxt is a lthy *)
     ctxt |> add_non_pervasive_declaration decl
   else
@@ -713,8 +714,8 @@ fun run_on_ctxt run gctxt =
     Context.Proof ctxt => ctxt |> run |> Context.Proof
   | Context.Theory thy =>
      thy 
-     |> push_running_on_thy |> ProofContext.init_global
-     |> run |> ProofContext.theory_of
+     |> push_running_on_thy |> Proof_Context.init_global
+     |> run |> Proof_Context.theory_of
      |> pop_running_on_thy |> Context.Theory
 
 
@@ -946,7 +947,7 @@ fun add_tactic_proc jid tac =
     val proc_id = "tactic_for_"^jid
     fun proc ctxt (pobj, iobjs, oobj_pats) =
       let
-        val thy = ProofContext.theory_of ctxt
+        val thy = Proof_Context.theory_of ctxt
         val {judgements, ...} = get_current_ruledata (Context.Proof ctxt)
         val maker = lookup_judgement_analyzer judgements jid |> the |> #2
 
@@ -1004,7 +1005,7 @@ fun higher_judgement ctxt t =
                 | NONE =>  error ("higher_judgement_outfixes: higher jud "^quote jud'^" not a judgement?!")
               val iobjs' = iobjs @ oobjs
             in
-              ((jud', (pobj, iobjs')), maker (ProofContext.theory_of ctxt) (pobj, iobjs', []))
+              ((jud', (pobj, iobjs')), maker (Proof_Context.theory_of ctxt) (pobj, iobjs', []))
               |> SOME
             end
         | NONE => NONE)
@@ -1346,7 +1347,7 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
 
     fun solve_prem prem (inst, ctxt) =
       let
-        val thy = ProofContext.theory_of ctxt
+        val thy = Proof_Context.theory_of ctxt
         val gctxt = Context.Proof ctxt
         val {judgements, syn_procs, lthy_transforms, ...} = get_current_ruledata gctxt
         (* TODO(feature): ctxt um vorige Premissen (ohne Bounds?) der Regel
@@ -1373,7 +1374,7 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
         val (param_names, ctxt_rec0) = Variable.variant_fixes (map fst params_raw) ctxt 
         val (params, prem2_body) = prem2 |> strip_alls_cterm param_names 
           (* noetig weil durch Parameterfixierung non-Patterns entstehen *)
-        val lam_abs = fold_rev Thm.cabs params
+        val lam_abs = fold_rev Thm.lambda params
         val (prem2_assms, prem2_concl) = strip_horn_cterm prem2_body 
         val (prem2_assm_ths, ctxt_rec1) = ctxt_rec0 |> Assumption.add_assumes prem2_assms
         val ctxt_rec = ctxt_rec1 |> fold (add_assm false) prem2_assm_ths
@@ -1445,12 +1446,12 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                          nicht exporten! *)
                      ((discharge ctxt2 th, map (normalize_cterm ctxt2) oobjs), (* discharge_ctxt *) ctxt2))
               val new_inst =
-                case cpattern_matches_opt (ProofContext.theory_of ctxt2) (map lam_abs oobj_pats_of_prem, map lam_abs oobjs) of
+                case cpattern_matches_opt (Proof_Context.theory_of ctxt2) (map lam_abs oobj_pats_of_prem, map lam_abs oobjs) of
                   SOME x => x
                 | NONE =>
                     let
                       val maker' = lookup_judgement_analyzer judgements jid |> the |> #2
-                      val t = maker' (ProofContext.theory_of ctxt2)
+                      val t = maker' (Proof_Context.theory_of ctxt2)
                         (Thm.term_of pobj_of_prem, map Thm.term_of iobjs_of_prem, map Thm.term_of oobjs)
                     in
                       raise fail_ex (ctxt2, "solve_prems: recursive synthesized judgement "  
@@ -1504,7 +1505,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
       else err_with_trace ctxt ("metarec_worker: judgement "^quote jid
          ^" has wrong number of input objects "^Library.commas (map (Syntax.string_of_term ctxt o Thm.term_of) iobjs))
 
-    val thy = ProofContext.theory_of ctxt
+    val thy = Proof_Context.theory_of ctxt
     val jud_cmatcher =
       case lookup_judgement_analyzer judgements jid of
         SOME (_, _, jud_cmatcher) => jud_cmatcher
@@ -1687,7 +1688,7 @@ and comp_rules_in_ctxt ctxt =
       | SOME comp_rules' => comp_rules'
   in 
      Raw_Simplifier.context ctxt comp_rules'
-     setmksimps (fn ss => fn th => [])
+     |> Raw_Simplifier.set_mksimps (fn ss => fn th => [])
   end
   
 and metarec_simp_prover ss =
@@ -1773,7 +1774,7 @@ and normalize_term_conv ctxt t =
   let val ctxt' = ctxt |> add_to_msg_trace (fn () =>
     "normalize_term_conv on "^Syntax.string_of_term ctxt t)
   in
-    t |> cterm_of (ProofContext.theory_of ctxt')
+    t |> cterm_of (Proof_Context.theory_of ctxt')
     |> rewrite_cterm ctxt'
   end
 and normalize_term ctxt t = normalize_term_conv ctxt t
@@ -1789,7 +1790,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
   find beta,comp_rule-normal  oobjs  with  J pobj iobjs oobjs *)
 and metarec ctxt0 jid (pobj, iobjs) =
   let
-    val thy = ProofContext.theory_of ctxt0
+    val thy = Proof_Context.theory_of ctxt0
     val ctxt = ctxt0 |> add_to_msg_trace (fn () =>
       "metarec: on judgement "^quote jid^" with input ("
         ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])")
@@ -1806,7 +1807,7 @@ and metarec ctxt0 jid (pobj, iobjs) =
 
     val (th, coobjs)= metarec_worker true ctxt NONE jid (cert pobj', map cert iobjs')
     val oobjs = map Thm.term_of coobjs
-    val orig_jud = jud_maker (ProofContext.theory_of ctxt) (pobj, iobjs, oobjs)
+    val orig_jud = jud_maker (Proof_Context.theory_of ctxt) (pobj, iobjs, oobjs)
       (* TODO(opt): nur close_derivation machen wenn die Ableitung gross genug war ?! *)
     (* un-normalize to original judgement *)
     val res = (Drule.equal_elim_rule2 OF [normalize_term_conv ctxt orig_jud, th])
@@ -2016,8 +2017,8 @@ and check_rule_wellformedness ctxt prop0 =
                val params = param_names ~~ (map snd params_raw)
                val prem_fixed_concl = Logic.strip_assums_concl prem
                  |> curry Term.subst_bounds (rev params |> map Free)
-               val all_abs = curry Term.list_all_free params
-               val cert = cterm_of (ProofContext.theory_of ctxt2'')
+               val all_abs = fold_rev (Logic.all o Free) params
+               val cert = cterm_of (Proof_Context.theory_of ctxt2'')
                val assms =
                  (case higher_judgement ctxt2'' prem_fixed_concl of
                    SOME (_, wfprem) => [prem_fixed_concl, wfprem]
@@ -2196,7 +2197,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
         val maj_cprem = Drule.cprems_of frule |> hd
         val heads = Conjunction.dest_conjunctions maj_cprem
           |> map Thm.term_of
-        val thy = ProofContext.theory_of ctxt
+        val thy = Proof_Context.theory_of ctxt
 
         fun lookup head = 
           let
@@ -2245,7 +2246,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
 
     and do_inst_frule ((frule_id, frule', facts_for_heads), inst_frule_wo_heads) ctxt =
       let
-        val thy = ProofContext.theory_of ctxt
+        val thy = Proof_Context.theory_of ctxt
         val {frules, ...} = get_current_ruledata (Context.Proof ctxt)
         val (applied_facts, traced) =
           case Inttab.lookup frules frule_id of
@@ -2290,7 +2291,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
 
         fun succ_cont (solved_prems, (inst', ctxt')) =
             let
-              val thy' = ProofContext.theory_of ctxt'
+              val thy' = Proof_Context.theory_of ctxt'
               val frule'' = Thm.instantiate inst' inst_frule_wo_heads |> normalize ctxt'
                 (* TODO(correctness): wer ist der eta-Uebeltaeter? *)
               val res = Drule.implies_elim_list (eta_convert frule'') (map eta_convert solved_prems)
@@ -2321,7 +2322,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                      let
                        val {gen_brule_concls, ...} = get_current_ruledata (Context.Proof ctxt2)
                        val concl = Thm.concl_of brule
-                       val thy2 = ProofContext.theory_of ctxt2
+                       val thy2 = Proof_Context.theory_of ctxt2
                        val already_there = Net.unify_term gen_brule_concls (Envir.eta_contract concl)
                          |> map (fn brule2 =>
                               if unifies thy2 (Thm.concl_of brule2, concl) then
@@ -2968,7 +2969,7 @@ fun print_depgraph gctxt =
     val pot_frule_to_str = get_frule_id depgraph
       #> Option.map (get_frule frules #> Display.string_of_thm ctxt)
     val _ = Output.writeln "printing depgraph\n\n"
-    val _ = Graph.dest depgraph |> map (fn (k, ks) =>
+    val _ = Graph.dest depgraph |> map (fn ((k, _), ks) =>
       let
         val k' = perhaps pot_frule_to_str k
         val ks' = map (perhaps pot_frule_to_str) ks
@@ -3042,22 +3043,22 @@ val _ = Outer_Syntax.local_theory "declare_ffact" "declare forward fact" Keyword
 *)
 
 
-
+(* TODO: should we give back a result with  snd res = NONE  instead of  SOME rule  ?? *)
 val MR_decl_attr = Scan.lift (Scan.option Parse.int
   >> (fn prio_opt => fn (gctxt, rule) =>
        let val prio = the_default 0 prio_opt
-       in (add_rule prio rule gctxt, rule) end))
+       in (SOME (add_rule prio rule gctxt), SOME rule) end))
 val MR_unchecked_grnd_decl_attr = Scan.lift (Scan.option Parse.int
   >> (fn prio_opt => fn (gctxt, rule) =>
        let val prio = the_default 0 prio_opt
-       in (add_rule_unchecked_grnd prio rule gctxt, rule) end))
+       in (SOME (add_rule_unchecked_grnd prio rule gctxt), SOME rule) end))
 val MR_unchecked_decl_attr = Scan.lift (Scan.option Parse.int
   >> (fn prio_opt => fn (gctxt, rule) =>
        let val prio = the_default 0 prio_opt
-       in (add_rule_unchecked prio rule gctxt, rule) end))
+       in (SOME (add_rule_unchecked prio rule gctxt), SOME rule) end))
 val MRassm_decl_attr = Scan.lift (Scan.succeed (fn (gctxt, th) =>
   case gctxt of
-    Context.Proof _ => (Context.map_proof (add_assm true th) gctxt, th)
+    Context.Proof _ => (SOME (Context.map_proof (add_assm true th) gctxt), SOME th)
   | _ => error "MRassm attribute: not in a proof context"))
 
 val add_comp_rule_att = Thm.declaration_attribute add_comp_rule
@@ -3099,11 +3100,13 @@ val judgement_decl_attr = Scan.lift
          (* TODO(hackish): judgements sind noch nicht lokalisiert worden und wir verlassen
               uns hier darauf das das Attribut zuerst in der Theorie ausgefuehrt wird *)
          case try (get_judgement_kind gctxt) jud_name of
-           SOME _ => (gctxt, defth)
+           SOME _ => (SOME gctxt, SOME defth)
          | NONE =>
               (* -1 weil prim object ja nicht zaehlt hier aber
                  zu verwirrend fuer user *)
-             (add_nplace_synth_jud allow_inconsis wf_jud_opt (num_ins - 1) num_outs jud_name head_term gctxt, defth)
+             (add_nplace_synth_jud allow_inconsis wf_jud_opt (num_ins - 1)
+                num_outs jud_name head_term gctxt |> SOME,
+              SOME defth)
        end))
 
 val coll_jud_decl_attr = Scan.lift
@@ -3148,7 +3151,8 @@ val coll_jud_decl_attr = Scan.lift
          val colljud = name_from_const_or_free head_term ^ "_jud"
          val colljudI = Data.gen_colljudI OF [defth]
        in
-         (add_nplace_coll_jud colljud head_term basejud triggerjud_opt colljudI gctxt, defth)
+         (add_nplace_coll_jud colljud head_term basejud triggerjud_opt colljudI gctxt |> SOME,
+          SOME defth)
        end))
 
 fun define_lthy_transf (name_ct, [rhs_ct]) lthy =
@@ -3166,7 +3170,7 @@ fun define_lthy_transf (name_ct, [rhs_ct]) lthy =
     val ((lhs, (n, def_th)), lthy2) = lthy
       |> Local_Theory.define ((bnd, NoSyn), ((Thm.def_binding bnd, []), Thm.term_of rhs_ct))
 
-    val thy2 = ProofContext.theory_of lthy2
+    val thy2 = Proof_Context.theory_of lthy2
     val lhs_ct = lhs |> cterm_of thy2
 
     val defmsg = "definition "^Syntax.string_of_term lthy2 (prop_of def_th)
@@ -3186,7 +3190,7 @@ fun define_lthy_transf (name_ct, [rhs_ct]) lthy =
 
 fun concat_names_proc ctxt (ct1, [ct2], _) =
   let
-    val thy = ProofContext.theory_of ctxt
+    val thy = Proof_Context.theory_of ctxt
     val (t1, t2) = pairself Thm.term_of (ct1, ct2)
     val (cT1, cT2) = pairself ctyp_of_term (ct1, ct2)
 
