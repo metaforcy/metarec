@@ -411,7 +411,7 @@ structure HOLMetaRec = struct
     let
       val {rules, ...} = MetaRec.get_current_ruledata (Context.Proof ctxt)
       val simprules =
-        case Symtab.lookup rules "HOLMetaRec.rewto_const_jud" of
+        case Symtab.lookup rules "HOLMetaRecSyntax.rewto_const_jud" of
           SOME inet => Item_Net2.content inet
             |> map (fn (th, _) => @{thm rewtoD} OF [th])
         | NONE => []
