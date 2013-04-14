@@ -75,6 +75,30 @@ fun term_diff (t1 $ t2) (t1' $ t2') =
       else apfst (cons (t1, t2))
 
 
+val mark_eta_redexes = 
+ let
+   fun mark_eta_redexes_hlp Ts (t1 $ t2) = mark_eta_redexes_hlp Ts t1 $ mark_eta_redexes_hlp Ts t2
+     | mark_eta_redexes_hlp Ts (Abs(x, T, t)) =
+         (case mark_eta_redexes_hlp (T :: Ts) t of
+           (t' as (t'' $ Bound 0)) =>
+             if Term.is_dependent t'' then Abs(x, T, t')
+             else
+               (let
+                  val T2 = fastype_of1 (T :: Ts, t')
+                  (* NB: subst_bound decreases loose bnos because it is assumed we drop the lambda,
+                      so we take the indirect route via reabstracting a fresh Free instead *)
+                  val freshX = Free("x_"^string_of_int (serial ()), T)
+                in
+                  Const("etaredex", T --> T2)
+                  $ Term.lambda_name (x, freshX) (Term.incr_boundvars 1
+                      (subst_bound (Const("etavar", T --> T) $ freshX, t')))
+                end)
+         | t' => Abs(x, T, t'))
+     | mark_eta_redexes_hlp Ts x = x
+ in
+   mark_eta_redexes_hlp []
+ end
+
 
 val beta_eta_convert = Conv.fconv_rule Drule.beta_eta_conversion
 val beta_convert = Conv.fconv_rule (Thm.beta_conversion true)
@@ -1343,7 +1367,8 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
 
         (* TODO(tuning): use Subgoal.focus to prove prem
              but how to deal with implicit normalization?
-               normalize prem2 instead! *)
+               normalize prem2 instead!
+             (will probably degrade performance, so not really a good idea?) *)
         val params_raw = Logic.strip_params (Thm.term_of prem2)
         val (param_names, ctxt_rec0) = Variable.variant_fixes (map fst params_raw) ctxt 
         val (params, prem2_body) = prem2 |> strip_alls_cterm param_names 
@@ -1361,13 +1386,26 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
           th |> pot_wrap_try
           |> Assumption.export false ctxt_rec ctxt
           |> Drule.forall_intr_list params
+        (* TODO: drop local fixes, assumptions, frule generated facts, but retain
+             the state (lifted out from the extended context)
+             (esp. remaining non-pattern unification problems), which is
+             implemented as a special field of the rule_data record.
+           metarec_worker then also has to return an output context, which only
+             differs in the state from the input context*)
+        (* fun discharge_ctxt ctxt2 =
+          ctxt |> update_lifted_state_from ctxt2 *)
         fun extend_inst inst new_inst = inst
           |> apfst (append (fst new_inst))
           |> apsnd (append (snd new_inst))
+
+        (* val _ = tracing ("solve_prems: prem2_concl' is "^
+          Syntax.string_of_term ctxt_rec (mark_eta_redexes (Thm.term_of prem2_concl'))) *)
       in
         case decompose_judgement_cterm gctxt prem2_concl' of
           SOME (jid, (pobj_of_prem, iobjs_of_prem, oobj_pats_of_prem)) => 
             let
+              (* val _ = tracing ("solve_prems: pobj_of_prem is "^
+                Syntax.string_of_term ctxt_rec (mark_eta_redexes (Thm.term_of pobj_of_prem))) *)
               val ctxt_rec' = add_to_rule_trace act_rule ctxt_rec
               val ((discharged_th, oobjs), ctxt2) =
                 (case Symtab.lookup syn_procs jid of
@@ -1405,7 +1443,7 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                 |> (fn ((th, oobjs), ctxt2) =>
                      (* FIXME: wenn lthy transformation Local_Defs nutzt will man diese Assumptions
                          nicht exporten! *)
-                     ((discharge ctxt2 th, map (normalize_cterm ctxt2) oobjs), ctxt2))
+                     ((discharge ctxt2 th, map (normalize_cterm ctxt2) oobjs), (* discharge_ctxt *) ctxt2))
               val new_inst =
                 case cpattern_matches_opt (ProofContext.theory_of ctxt2) (map lam_abs oobj_pats_of_prem, map lam_abs oobjs) of
                   SOME x => x
@@ -1483,7 +1521,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
       let val no_match_msg =
         "metarec_worker: no matching rule for animation of judgement "
         ^quote jid^" for primary object\n"^Syntax.string_of_term ctxt (Thm.term_of pobj)
-         ^"\nand inputs\n"^cat_lines (map (Syntax.string_of_term ctxt o Thm.term_of) iobjs)
+         ^"\nand further inputs\n"^cat_lines (map (Syntax.string_of_term ctxt o Thm.term_of) iobjs)
          ^(if null failed_rules then
              ""
            else
@@ -1494,10 +1532,12 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
       end
 
 
+
     fun rulematch () =
       let
         fun rename_and_inst_rule rule inst = 
           let
+            (* val _ = tracing ("before renaming and inst: "^Syntax.string_of_term ctxt (mark_eta_redexes (prop_of rule))) *)
               (* rename bound variables for better error messages *)
               (* use uninstantiated rule to avoid confusion with var:=abstraction instantiations *)
               (* pobj_of_rule, iobjs_of_rule  und  obj, iobjs  beta-normal wg add_rule *)
@@ -1505,8 +1545,10 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
             val rule1 = rule
               |> Thm.rename_boundvars (pack_pobj_iobjs (Thm.term_of pobj_of_rule) (map Thm.term_of iobjs_of_rule))
                    (pack_pobj_iobjs (Thm.term_of pobj) (map Thm.term_of iobjs))
+            val res = Thm.instantiate inst rule1 |> normalize_withvars ctxt
+            (* val _ = tracing ("after renaming and inst: "^Syntax.string_of_term ctxt (mark_eta_redexes (prop_of res))) *)
           in
-            Thm.instantiate inst rule1 |> normalize_withvars ctxt
+            res
           end
         fun app_rule rule' = 
           let
@@ -1517,9 +1559,18 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                 (fn _ => fn _ => raise LocalFail)
                 rule' prems' ctxt
 
+            (* val _ = tracing ("solved prems are: "^commas
+              (solved_prems |> map (Syntax.string_of_term ctxt o mark_eta_redexes o prop_of)))
+
+            val _ = tracing ("concl-matching-instantiated rule is: "
+              ^Syntax.string_of_term ctxt (prop_of rule' |> mark_eta_redexes)) *)
+
             (* TODO(correctness): normalize_withvars nutzen weil nichtinst Vars
                  im Typ von Refinement-Regeln uebrigbleiben duerfen? oder verbieten? *)
             val rule'' = Thm.instantiate inst' rule' |> normalize ctxt
+
+            (* val _ = tracing ("premise-solving-instantiated and normalized rule is: "
+              ^Syntax.string_of_term ctxt (prop_of rule'' |> mark_eta_redexes)) *)
 
 
             val (pobj_of_rule'', iobjs_of_rule'', oobjs_of_rule'') =
@@ -1539,8 +1590,12 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                   err_with_trace ctxt ("metarec_worker: refinement not a pattern after"
                     ^" instantiation with synthesized information"))
               iobjs iobjs_of_rule''
+            
+            val res = Drule.implies_elim_list rule'' solved_prems
+            (* val _ = tracing ("discharged rule assumptions gave "
+              ^Syntax.string_of_term ctxt (prop_of res |> mark_eta_redexes)) *)
           in
-            (Drule.implies_elim_list rule'' solved_prems, oobjs_of_rule'')
+            (res, oobjs_of_rule'')
           end
 
 

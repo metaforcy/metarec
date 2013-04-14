@@ -271,11 +271,11 @@
                   zu den Judgement-softtypen passen, nehme an das die Outputs entsprechende
                   Softtypen haben
                 * checke das die Outputs in im Judgement der Konklusions unter diesen
-                  ganzen Annahmen zum Softtyp des Judgements der Konklusion passem
+                  ganzen Annahmen zum Softtyp des Judgements der Konklusion passen
             * was ich mir mal mit den Wohlgeformtheitsjudgements gedacht habe
               ist darin dann enthalten und wesentlich richtiger:
                 die Metainduktion passiert nicht einfach von Premissen zur Konklusion.
-                Man geht von intensionalen Annahmen an Inputs der Konklusion aus,
+                Man geht von intensionalen Annahmen ueber Inputs der Konklusion aus,
                 mit denen man die der Wohlgeformtheit der Inputs der ersten Premisse zeigt.
                 Dann wird die Wohlgeformtheit der Outputs (vor allem wenn dies Variablen
                 sind die noch nicht aufgetaucht sind, ggf auf distinct bounds angewandt)
@@ -363,15 +363,16 @@
                 fuer gmPi etc.
 
 
-                FFFFAAAAAAAAAIIIIIIIIIIIIILLLLLLLLLLLLL:
-                  der Ansatz hier hat null Semantik weil
-                     J ::> (x :>i A => y :>o B => BoolJud)
+                FAIL mit gmPi:
+                  dann haette der Ansatz hier hat null Semantik weil
+                     J ::> (gmPi x :>i A, y :>o B. BoolJud)
                   immer gilt und insbes daraus nicht folgt das
                      x :> A  ==> (!! y.  J x y  ==>  y :> B)
 
-                man muss PiSigma Types nutzen um Outputs zu charakterisieren
+                Loesung: statt gmPi muss man PiSigma Types nutzen um Outputs zu charakterisieren
                   (PiSig_n x1 A1 ... xn An. B x1 .. xn) :=
                     (% f. !! x1 .. xn. f x1 .. xn : B x1 .. xn ==> x1 : A1 &&& ... &&& xn : An)
+                  das unten folgende muss man noch mutatis mutandis auf PiSig_n Typen umstellen
 
                 Notation wird besser wenn man  statt input, output zu schreiben das Judgement
                 :> annotiert und ich nutze => Notation statt gmPI Notation.
@@ -760,6 +761,21 @@
           machen...
     * dependency analyse nicht nur Judgements sondern konkrete Judgement-Applikationen 
       bzw Judgement zusammen mit ausgewaehlte Argumente nutzen lassen, also einen Termgraph nutzen 
+
+
+
+
+
+
+
+
+  * soft-typisierte hoeherstufige Unifikationsvariablen (mit delay von non-pattern unifications)
+    um Typinferenz a la Twelf in alg. Regelsystemen nachbilden zu koennen.
+    Vermutlich ist es besser ein Judgment  unifvar A X  zu haben mit input A, output X das
+    X als Unifikationsvariable des Typs A deklariert.
+    Die Unifikationen wohl auch besser erstmal ganz explizit als  unify t1 t2  judgement
+    das zunaechst mal die synthetisierten Typen von t1, t2 unifiziert, dann t1 und t2 selbst. Vermutlich
+    sollte man auch das Typsynthesejudgement fuer Terme mit Unifikationvariablen vorgeben.
 *)
 
 
