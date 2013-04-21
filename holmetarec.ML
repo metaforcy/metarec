@@ -26,7 +26,8 @@ structure HOLMetaRec = struct
      Const (@{const_name "insert"}, Sign.const_instance thy (@{const_name "insert"}, [T]))
        $ x $ setize_list thy T xs
     | setize_list thy T [] =
-        Const (@{const_name "bot"}, Sign.const_instance thy (@{const_name "bot"}, [T --> @{typ "bool"}]))
+        Const (@{const_name "bot"}, Sign.const_instance thy
+          (@{const_name "bot"}, [HOLogic.mk_setT T]))
 
 
 
@@ -207,7 +208,7 @@ structure HOLMetaRec = struct
             COMP @{thm eq_to_rew} COMP @{thm enum_datatype_constreq_rewI})
             |> Drule.instantiate' [SOME (ctyp_from name_t)] [SOME (cert name_t)]))
 
-      val univ_t = Const(@{const_name "top"}, Sign.const_instance thy2 (@{const_name "top"}, [T --> @{typ "bool"}]))
+      val univ_t = HOLogic.mk_UNIV T
       val univ_rewr_t = HOLogic.mk_eq (univ_t, setize_list thy2 T constrs)  |> HOLogic.mk_Trueprop
       val univ_rewr = Goal.prove lthy2 [] [] univ_rewr_t (fn _ =>
         rtac @{thm univeqI} 1 THEN
@@ -466,6 +467,7 @@ end
 
 
 
+  (* TODO: did this survive the porting, esp. the 'a set change? not tested yet? *)
   fun collectHOLfacts_proc ctxt (pat0_ct, [], _) =
     let
       val thy = Proof_Context.theory_of ctxt

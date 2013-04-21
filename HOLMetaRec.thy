@@ -1,9 +1,11 @@
 theory HOLMetaRec
 imports HOLMetaRecSyntax
-uses  "holmetarec.ML"
 begin
 
+ML_file "holmetarec.ML"
+
 setup {* HOLMetaRec.setup *}
+
 
 
 end
