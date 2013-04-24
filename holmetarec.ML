@@ -106,7 +106,7 @@ structure HOLMetaRec = struct
         |> Long_Name.base_name |> Binding.name
       val ((tyco_name, _), lthy3) = lthy2
         |> Typedef.add_typedef
-             (kappa, ren_tfrees |> map (fn n => (n, HOLogic.typeS)), NoSyn)
+             (kappa, ren_tfrees ~~ tfrees |> map (fn (n, (_, S)) => (n, S)), NoSyn)
              set_exp_ren NONE ne_tac
 
       val full_name = (Local_Theory.full_name lthy3 kappa)
