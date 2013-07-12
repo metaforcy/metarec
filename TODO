@@ -45,6 +45,48 @@
 
 
 (* TODO(opt):
+
+     * kann man die Metarec Ausfuehrung vllt doch als sehr spezielle resolutionsbasierte
+       Taktik auffassen? Das koennte ordentlich Performance bringen weil
+       die Term-Zertifizierungen praktisch ganz wegfaellt (bis auf procs etc).
+       * Wir brauchen dann rewriting von non-patterns in Input-Termen und
+         Regeln zu kuenstlichen Patterns die einen expliziten Applikationsoperator nutzen.
+       * Higher-order pattern matching gegen Regelkonklusion koennte man bimatch_tac
+         simulieren wenn die Outputs in der Regelkonklusion nur Variablen sind.
+         Ansonsten nutzen wir biresolve_tac, verlassen uns drauf das Instantiierungen
+         von Variablen in der Regel bevorzugt werden und ueberpruefen dann das
+         es keine Instantiierung von Variablen in den Inputs gab.
+       * Higher-order pattern matching gegen Premissen-output-patterns von Regeln
+         ist komplizierter. Vermutlich muessen wir zu HO-pattern Unifikation
+         uebergehen und das Matchen gegen die Outputs wird dann Teil der neuen Subgoals.
+       * Unifikationsvariablen einfach als nicht-instantiierte Matchingvariablen
+       * verzoegerte hoeherstufige Pattern-Unifikationen verwaltet man als gesonderte
+         Goals der Form  unify t1 t2  die man erst mit der Regel  unify t t  resolviert
+         wenn beide Terme Patterns sind
+       * Constraints als Goals die man nicht gleich loest
+       * procs wie gehabt, dann Resolution mit dem resultierenden Theorem
+       * lthy Transformationen sind nur erlaubt wenn keine fixes da, also ist nur
+         lineare Kontextpropagierung das novum hier
+       * forward rules [| P1 &&& P2 &&& ... &&& Pn ; ... |] ==> C1 &&& ... &&& Cn
+         * Seperat auf konstruierten Annahmen ausfuehren (das harmoniert auch besser
+           mit expliziten frule Ausfuehrungen)
+         * In den Subgoals nur die tatsaechlich getaetigten Annahmen als Premissen
+           halten und ihre Vervollstaendigung ueber forward rules extra verwalten
+           als Fakten (!! fixes. assms ==> fact(fixes)) die man nur nach Bedarf
+           als Regeln anwendet.
+           Weil sonst Skalierungsproblem bei einfacher Anwendung als elim-Regeln
+             P1 ==> P2 ==> ... ==> Pn ==> (P1 ==> C1 ==> ... ==> Cn ==> R) ==> R
+           die die Eliminationspremisse P1 replizieren, wobei
+           die neuen subgoals P2, .., Pn per Annahme geloest werden.
+
+
+     * kann man vllt drum herum kommen die zertifizierten Instantiierungen immer
+       voll auszurollen und stattdessen mit Thm.instantiate_cterm arbeiten?
+       Aber letzten Endes brauchen wir ja fuer die voll ausgerollte Instantiierung
+       der angewandten Regel. Vllt sowieso nicht so schlimm weil die Patterns
+       beim matchen selten gross sind? Und wenn sie gross sind dann sind das nur
+       syntaktische Gleichheitsueberpruefungen?
+
      * zu Input term in primaerer Position einen maximal-gesharetem Term-DAG verwalten
        und parallel in ihn absteigen bei Anwendung von _strukturellen Regeln_
        (primaere Objekte in Regel-Premissen sind
@@ -58,6 +100,9 @@
        Wichtig ist ggf auch Umstruktierungen (insbes rewrites) eines Terms in
        primaerer Position auf dem Term-DAG nachzuvollziehen, unter Beruecksichtung
        von sharing in der Regelanwendung. (ist das dann schon Skeleton-Opt?)
+
+       Pure/term_sharing.ML stellt maximales sharing syntaktisch
+       gleicher Subterme her.
 
      Einordnung: Term-DAG-Optimierung entspricht sharing bzgl Termstruktur,
        Skeleton Optimierung entspricht sharing in Regeln?
@@ -197,34 +242,6 @@
       module beta, eta (statt nur modulo beta) verwenden.
       Die meisten Judgements haben ja keine Probeme mit eta, nur sowas
       wie simpto das einzelne lambdas auseinandernimmt.
-    * Annahmen (von Premissen der Regeln) die selbst Regeln sind (dh insgesamt ist die
-      Regel >=3 stufige HHF) als lokale implizte frules auffassen
-      und lokale Faktenmenge verwalten, wobei lokale Fakten (ausgewaehlter Judgements?)
-      als brules ohne Premissen mit maximaler Prioritaet aufgefasst werden
-      * das ist also Hauptsaechlich ne Modifikation von add_assm
-      * die lokale Fakten -> brule Konvertierung einfach ueber entsprechende
-        globale implizite frules machen die brules mit max Prioritaet generieren:
-            J ts ==> maxpriobrule ( J ts )
-        Aber vllt besser nicht das gleiche Judgement J wiederverwenden?
-      * LAME weil fuer Annahmen ueber Atome quasi ja das Default sein soll direkt
-        eine lokale brule ohne Premissen zu generieren,
-        also besser Annahmen als lokale brules interpretieren und
-        in fact(...) bzw frule(...) gewrappte Annahmen entsprechend als Fakten
-        bzw implizite lokale frules 
-      * ACHTUNG: lokale implizite frules erfordern genaueres Tracking ob
-        man gerade expl. frules anwendet oder nicht sonst werden die lokalen
-        Resultate mit lthy declarations eingefuegt!!!
-      * ggf auch erlauben solche Annahmen als brules aufzufassen indem man sie
-        in brule(...) wrappt
-      * was ist wenn aus lokalen Fakten entstandene brules ueberlappen?
-        Fehler oder "dynamische Bindung", dh die letzthinzugefuegte brule hat
-        hoeherer Prio (was ja wohl bei meiner Impl direkt so sein wuerde)
-      * lokale brules brauchen schnelleres gen_add_rule ohne Checks,
-        was auch keine dependencies updatet (unnoetig weil nur implizite frules aktiv
-        die keine Premissen haben duerfen)
-      * statt lokalen schematische Variablen in lokalen brules werden lokale Quantoren genutzt,
-        und alle vorkommenden schematischen Variablen und Typvariablen muessen im Kontext 
-        der Regel available sein
     * non-rigide Konklusionen in Regelpremissen (= goals in lambdaProlog) weniger
       konservativ behandeln
       * braucht dann hoeherstufiges mode-Checking von Regeln um availability
@@ -282,6 +299,12 @@
                 der ersten Premisse angenommen (das ist die erste Induktionshypothese),
                 die weiteren Premissen entsprechend analysiert und letztendlich die Wohlgeformtheit
                 der Outputs der Konklusion gezeigt
+            * IMPORTANT TODO:
+              muessen die Softtype-Annahmen an die Inputs der Konklusion von Regeln tatsaechlich
+              als Annahmen in der Regel vorkommen, oder reicht ihre intensionale Annahme und
+              die Semantik des Judgements soll den Rest uebernehmen? Vermutlich letzteres?
+              Falls diese Annahmen tatsaechlich in der Regel vorkommen sollen, wie verwaltet
+              man effizient ihre Ableitung??
             * eine wesentliche Einsicht hierbei ist das das moding
               essential ist um Metarec-Klauseln zu soft-typen, also wenn man moding
               ueber metarec auf Judgementsofttypes simulieren will muss man es
@@ -646,7 +669,7 @@
 
         Implementierung vermutlich mit "Pattern-Graphen":
           Knoten sind Patterns mit Variablen, Kanten entsprechen
-          parametrischen Abhaengigkeiten und sind mit Instantiierungen
+          parametrischen Abhaengigkeiten und sind mit (partiellen) Instantiierungen
           der Variablen im Ausgangsknoten beschriftet die vorliegen
           muessen wenn die Abhaaengigkeit bestehen soll (konkret also
           das Pattern des Ausgangsknoten in dieser Instantiierung auf
@@ -724,6 +747,25 @@
                ?base_iso Variable ist
 
 
+           Etwas komplizierter bei sowas wie:
+              zipApp [] [] []
+              [| J x y  ;  zipApp Js xs ys |]  ==> zipApp (Cons J Js) (Cons x xs) (Cons y ys)
+           Man wuerde eigentlich
+              zipApp [J_1, .., J_n] * * -> J_i    fuer alle i:{1,..,n}
+           wollen, aber das wirkt zu kompliziert und das generische Prinzip "Abhaengigkeit zu 
+           Judgments an Positionen nach einem regulaeren Schema in einer Termstruktur" dahinter
+           ist wohl nicht ohne Spezialbehandlung zu kriegen.
+           Vermutlich einfach die Abhaengigkeitsbeziehungen fuer jede Klausel zu einem Judgement
+           erstmal unabhaengig generieren und dann lhs-Unifizierbarkeit unter 
+           Nutzung von Wildcards fordern. Wenn das nicht moeglich ist ohne das die rhs ein Wildcard
+           enthaelt, wie das bei zipApp der Fall waere, dann Fehlschlag
+           "non-uniform dependency across clauses".
+           Aber diese Marker-Pattern sind hier dann wohl eine Ausnahme weil man die Klauseln mit
+           nicht unifbaren Marker-Pattern als exklusiv ansieht und bei endgueltigen
+           Benutzung eines Judgements mit Markern-Pattern immer eine vollstaendige Instantiierung
+           des Marker-Patterns vorliegt also die Klauselmenge klar ist.
+
+
         Wenn man alles so genau trackt sollte man subsumption
         auf Abhaengigkeiten machen, dh allgemeinere Kanten absorbieren
         speziellere. Sonst wird der Graph u.U. riesig.
@@ -748,6 +790,37 @@
         BEACHTE: wenn ich comp. rules wieder anmache muss man die
         Patterns im Abhaengigkeitsgraph auch entsprechend normalisieren
         (ggf. voll neu checken bei neuer comp. rule)
+
+
+
+    * !!!!!! RADIKALE VEREINFACHUNG:
+      Dependency Analyse einfach rauswerfen und der
+      Benutzer soll explizite Phaseneinteilung und Reihenfolge angeben ????
+      Mindestens mal ausprobieren wie nervig das waere bei der Animation der
+      nonfree datatype Metatheory.
+
+      Letztendlich muss man sich ja sowieso explizite Gedanken ueber die Phaseneinteilung
+      machen (zB verschiedene Marker paramisoto, curry_iso, curry_iso_with_iter),
+      also ist das vllt doch die richtige Idee das komplett extra-logisch zu machen.
+
+      Zusaetzlich zur Reihenfolge der Phasen sollte auch das verzoegerte Triggern
+      ueber Praesenz von Fakten eines Judgements, wie bei Collector-Judgements, moeglich sein.
+      Dann braucht man keine Trigger fuer Collector-Judgements mehr.
+
+      Ein bisschen Komfort: benannte Phase, Regeln nutzen Phasennamen zur Zuordnung in ihre Phase,
+        seperate Vergabe der Reihenfolge der benannten Phasen
+
+      Etwas bloed ist vllt das man jetzt tatsaechlich selber sicherstellen muss das die
+      relevanten Fakten eines Judgements in einer Phase vor der Phase des zugehoerigen
+      Collector-Judgements generiert werden.
+        Weiterhin ist Wiederverwendung von forward rules dann weniger einfach moeglich
+      als was mit hoeherstufigem dependency tracking moeglich gewesent waere. Aber 
+      die wiederverwendbare Funktionalitaet laesst sich sowieso besser in algorithmische
+      Regelsysteme packen, ggf mit lokalen impliziten forward rules.
+
+      Gut ist das solche Ueberlegungen wie "Regel erst aktiv wenn die
+      Hornklauseln-Interpretation bewiesen wurde" jetzt in einer Phasenannotation
+      explizit gemacht sind.
         
     * ideen fuer hoeherstufige Judgements:
       * bottomuprew [-[-,+], [-, +]] macht aus J mit Semantik J x y == (x = y)
@@ -779,3 +852,38 @@
 *)
 
 
+
+(* DONE
+
+
+
+    * lokale forward rules (ALREADY DONE, aber ein bisschen anders?)
+      Annahmen (von Premissen der Regeln) die selbst Regeln sind (dh insgesamt ist die
+      Regel >=3 stufige HHF) als lokale implizte frules auffassen
+      und lokale Faktenmenge verwalten, wobei lokale Fakten (ausgewaehlter Judgements?)
+      als brules ohne Premissen mit maximaler Prioritaet aufgefasst werden
+      * das ist also Hauptsaechlich ne Modifikation von add_assm
+      * die lokale Fakten -> brule Konvertierung einfach ueber entsprechende
+        globale implizite frules machen die brules mit max Prioritaet generieren:
+            J ts ==> maxpriobrule ( J ts )
+        Aber vllt besser nicht das gleiche Judgement J wiederverwenden?
+      * LAME weil fuer Annahmen ueber Atome quasi ja das Default sein soll direkt
+        eine lokale brule ohne Premissen zu generieren,
+        also besser Annahmen als lokale brules interpretieren und
+        in fact(...) bzw frule(...) gewrappte Annahmen entsprechend als Fakten
+        bzw implizite lokale frules 
+      * ACHTUNG: lokale implizite frules erfordern genaueres Tracking ob
+        man gerade expl. frules anwendet oder nicht sonst werden die lokalen
+        Resultate mit lthy declarations eingefuegt!!!
+      * ggf auch erlauben solche Annahmen als brules aufzufassen indem man sie
+        in brule(...) wrappt
+      * was ist wenn aus lokalen Fakten entstandene brules ueberlappen?
+        Fehler oder "dynamische Bindung", dh die letzthinzugefuegte brule hat
+        hoeherer Prio (was ja wohl bei meiner Impl direkt so sein wuerde)
+      * lokale brules brauchen schnelleres gen_add_rule ohne Checks,
+        was auch keine dependencies updatet (unnoetig weil nur implizite frules aktiv
+        die keine Premissen haben duerfen)
+      * statt lokalen schematische Variablen in lokalen brules werden lokale Quantoren genutzt,
+        und alle vorkommenden schematischen Variablen und Typvariablen muessen im Kontext 
+        der Regel available sein
+*)

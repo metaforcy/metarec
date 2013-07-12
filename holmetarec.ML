@@ -61,7 +61,7 @@ structure HOLMetaRec = struct
       val tyvarinter_jud = MetaRec.name_from_const_or_free (Thm.term_of tyvarinter_jud_ct)
         |> suffix "_jud"
       val tfrees = tyvar_ts |> map (fn tyvar_t =>
-        MetaRec.metarec lthy tyvarinter_jud (tyvar_t, [])
+        MetaRec.metarec_no_constraints lthy tyvarinter_jud (tyvar_t, [])
         |> snd |> the_single |> Logic.dest_type |> Term.dest_TFree)
       val tfrees_setord = Term.add_tfrees set_t [] |> rev
       val bad_tfrees = tfrees_setord |> subtract (op =) tfrees
@@ -371,7 +371,7 @@ structure HOLMetaRec = struct
       raise distinguished_metarec_error (errcode, bad_ct, ctxt, msg2)
     end
 
-  fun onfailerr_proc ctxt (P_ct, [msg_ct, errcode_ct, bad_ct], _) =
+  fun onfailerr_proc ctxt fail_cont (P_ct, [msg_ct, errcode_ct, bad_ct], _) =
     let
       val thy = Proof_Context.theory_of ctxt
 
@@ -391,12 +391,12 @@ structure HOLMetaRec = struct
           NONE => error ("onfailerr_proc: term of unknown judgement\n"
             ^Syntax.string_of_term ctxt (Thm.term_of P_ct))
         | SOME (jud, (pobj, iobjs, _)) => (jud, pobj, iobjs)
-      val (res, _) = MetaRec.metarec_worker true ctxt (SOME failcont) jud (pobj, iobjs)
+      val ((res, _), ctxt2) = MetaRec.metarec_worker true ctxt (SOME failcont) jud (pobj, iobjs)
       val th = (@{thm onfailerrI} OF [res])
         |> Drule.instantiate' [SOME (Thm.ctyp_of_term bad_ct)]
              (map SOME [msg_ct, errcode_ct, bad_ct])
     in
-      (th, [])
+      ((th, []), MetaRec.get_run_state (Context.Proof ctxt2))
     end
 
 
@@ -522,11 +522,11 @@ end
                      MetaRec.err_with_trace ctxt ("collectHOLfacts proc: internal error: not a fact in fact table")
                    else ()
               in
-                case MetaRec.decompose_pattern_match_opt thy (pat, factconcl) of
+                case MetaRec.decompose_pattern_match_opt ctxt (pat, factconcl) of
                   SOME inst =>
                     (iobjs_pat @ oobjs_pat, iobjs2 @ oobjs2)
                     |> pairself (map (Term_Subst.instantiate inst #> Envir.beta_norm))
-                    |> MetaRec.pattern_matches_opt thy |> is_some
+                    |> MetaRec.pattern_matches_opt ctxt |> is_some
                 | NONE => false
               end)
       
@@ -553,7 +553,7 @@ end
       #> MetaRec.add_lthy_transform "HOLMetaRecSyntax.enumfun_const_jud" "enum_fun_lthytransf" enum_fun_lthytransf
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.tracing_jud" "tracing" tracing_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.errwith_jud" "errwith_proc" errwith_proc
-      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.onfailerr_const_jud" "onfailerr_proc" onfailerr_proc
+      #> MetaRec.add_general_syn_proc "HOLMetaRecSyntax.onfailerr_const_jud" "onfailerr_proc" onfailerr_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.simpto_const_jud" "simpto_proc" (simpto_proc false)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.powersimpto_const_jud" "powersimpto_proc" (simpto_proc true)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.collectHOLfacts_int_jud" "collectHOLfacts_internal_proc" collectHOLfacts_proc

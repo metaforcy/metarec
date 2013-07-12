@@ -3,6 +3,7 @@ imports Main
 begin
 
 
+
 ML_file "item_net2.ML"
 ML_file "impconv.ML"
 ML_file "decomp_pattern.ML"
@@ -90,6 +91,33 @@ lemma gen_colljudI: "PROP P == Trueprop True ==> PROP P" by simp
 
 
 
+definition
+  constraint :: "prop => prop"
+where
+  "constraint P == P"
+
+lemma constraintI: "PROP P ==> PROP constraint P"
+  by (simp add: constraint_def)
+
+
+
+definition
+  unify :: "'a :: {} => 'a => prop"
+where
+  "unify t1 t2 == (t1 == t2)"
+
+lemma unifyI: "t1 == t2 ==> PROP unify t1 t2"
+  by (simp add: unify_def)
+
+definition
+  fresh_unifvar:: "unit => 'a :: {} => prop"
+where
+  "fresh_unifvar u x == (Trueprop True)"
+
+lemma fresh_unifvarI: "PROP fresh_unifvar () x"
+  by (simp add: fresh_unifvar_def)
+
+
 
 ML {*
   val max_polym = singleton (Variable.polymorphic @{context});
@@ -104,6 +132,13 @@ ML {*
     val brule_const_def = @{thm brule_const_def}
     val frule_const_name = @{const_name frule_const}
     val frule_const_def = @{thm frule_const_def}
+
+    val constraint_headterm = @{term constraint} |> max_polym
+    val constraintI = @{thm constraintI}
+    val unify_headterm = @{term unify} |> max_polym
+    val unifyI = @{thm unifyI}
+    val fresh_unifvar_headterm = @{term fresh_unifvar} |> max_polym
+    val fresh_unifvarI = @{thm fresh_unifvarI}
 
     val note_headterm = @{term note_const} |> max_polym
     val note_const_def = @{thm note_const_def}
@@ -421,6 +456,9 @@ definition
   gen_fresh :: "unit \<Rightarrow> 'a \<Rightarrow> bool" where
   [MRjud 1 1 allowinconsis]: "gen_fresh u x \<equiv> True"
 lemma gen_freshI: "gen_fresh () x"  by (simp add: gen_fresh_def)
+
+
+
 
 
 

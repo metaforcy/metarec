@@ -1,4 +1,7 @@
- theory Unify
+
+(* first-order unification with explicit constraint (= instantiation) propagation by forward rules *) 
+
+theory Unify
 imports "../HOLMetaRec"
 begin
 
