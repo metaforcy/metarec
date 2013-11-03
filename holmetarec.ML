@@ -371,7 +371,7 @@ structure HOLMetaRec = struct
       raise distinguished_metarec_error (errcode, bad_ct, ctxt, msg2)
     end
 
-  fun onfailerr_proc ctxt fail_cont (P_ct, [msg_ct, errcode_ct, bad_ct], _) =
+  fun onfailerr_proc ctxt (P_ct, [msg_ct, errcode_ct, bad_ct], _) =
     let
       val thy = Proof_Context.theory_of ctxt
 
@@ -387,16 +387,16 @@ structure HOLMetaRec = struct
         end
 
       val (jud, pobj, iobjs) =
-        case MetaRec.decompose_judgement_cterm (Context.Proof ctxt) P_ct of
+        case MetaRec.decompose_judgement (Context.Proof ctxt) (Thm.term_of P_ct) of
           NONE => error ("onfailerr_proc: term of unknown judgement\n"
             ^Syntax.string_of_term ctxt (Thm.term_of P_ct))
         | SOME (jud, (pobj, iobjs, _)) => (jud, pobj, iobjs)
-      val ((res, _), ctxt2) = MetaRec.metarec_worker true ctxt (SOME failcont) jud (pobj, iobjs)
+      val ((res, _), ctxt2) = MetaRec.metarec_with_failcont failcont ctxt jud (pobj, iobjs)
       val th = (@{thm onfailerrI} OF [res])
         |> Drule.instantiate' [SOME (Thm.ctyp_of_term bad_ct)]
              (map SOME [msg_ct, errcode_ct, bad_ct])
     in
-      ((th, []), MetaRec.get_run_state (Context.Proof ctxt2))
+      (th, [])
     end
 
 
@@ -412,11 +412,25 @@ structure HOLMetaRec = struct
   fun simpto_proc power ctxt (ct, [], _) =
     let
       val {rules, ...} = MetaRec.get_current_ruledata (Context.Proof ctxt)
-      val simprules =
-        case Symtab.lookup rules "HOLMetaRecSyntax.rewto_const_jud" of
-          SOME inet => Item_Net2.content inet
-            |> map (fn (th, _) => @{thm rewtoD} OF [th])
-        | NONE => []
+      val inet_content = Symtab.lookup rules "HOLMetaRecSyntax.rewto_const_jud"
+        |> Option.map (Item_Net2.content) |> these
+      val simprules = inet_content
+        |> map_filter (fn (ruleref, _) =>
+             (* NB: we use here that synprocs are executed in a context with the *ground*
+                  assumptions as direct rules *)
+             case ruleref of
+               MetaRec.DirectRule th => SOME (@{thm rewtoD} OF [th])
+             | MetaRec.LocalRule prfp =>
+                 MetaRec.err_with_trace ctxt ("simpto_proc: encountered LocalRule "
+                   ^MetaRec.str_of_normed_term ctxt (MetaRec.prop_of_proofp prfp)))
+      (* val _ = tracing ("simpto_proc: found simprules\n"
+        ^cat_lines (map (Display.string_of_thm ctxt #> curry (op ^) "  ") simprules)
+        ^"\nbased on net content\n"
+        ^cat_lines (inet_content |> map (fn (rl, _) =>
+          case rl of
+            MetaRec.DirectRule th => "  "^Display.string_of_thm ctxt th
+          | MetaRec.LocalRule prfp =>
+              "  "^MetaRec.str_of_normed_term ctxt (MetaRec.prop_of_proofp prfp)))) *)
       val ss = empty_ss addsimps simprules |> Raw_Simplifier.context ctxt
 
       val prover =
@@ -553,7 +567,7 @@ end
       #> MetaRec.add_lthy_transform "HOLMetaRecSyntax.enumfun_const_jud" "enum_fun_lthytransf" enum_fun_lthytransf
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.tracing_jud" "tracing" tracing_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.errwith_jud" "errwith_proc" errwith_proc
-      #> MetaRec.add_general_syn_proc "HOLMetaRecSyntax.onfailerr_const_jud" "onfailerr_proc" onfailerr_proc
+      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.onfailerr_const_jud" "onfailerr_proc" onfailerr_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.simpto_const_jud" "simpto_proc" (simpto_proc false)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.powersimpto_const_jud" "powersimpto_proc" (simpto_proc true)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.collectHOLfacts_int_jud" "collectHOLfacts_internal_proc" collectHOLfacts_proc

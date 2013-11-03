@@ -1,0 +1,354 @@
+
+
+this approach FAILs due to software complexity, esp. of lifting of local rules
+
+
+     * kann man die Metarec Ausfuehrung vllt doch als sehr spezielle resolutionsbasierte
+       Taktik auffassen? Das koennte ordentlich Performance bringen weil
+       die Term-Zertifizierungen praktisch ganz wegfaellt (bis auf procs etc).
+       * ist sogar noetig wenn wir Unifikationsvariablen (insbes. in Annahmen) wollen
+         und nicht den local paradise trick mit Axiomen statt Annahmen und
+         ihrer anschliessenden Elimination aus dem Beweisterm spielen wollen.
+       * Wir brauchen dann rewriting von non-patterns in Input-Termen und
+         Inputs in der Regel-Konklusion zu kuenstlichen Patterns die einen
+         expliziten Applikationsoperator nutzen.
+
+           Non-Patterns in Input-Positionen von Judgements in Regelpremissen
+           sind in Ausfuehrungen tatsaechlich immer ground (aufgrund des Modings), also
+           ist hier nur dann die Nutzung des expliziten Applikationsoperators notwendig
+           wenn Regeln dies fuer solche Inputs erwarten. Sehr schwammig => FAIL?
+           Besser pauschal keine expliziten Applikationsoperatoren im Input
+           einfuegen, sondern nur nach Bedarf, den man erkennt wenn die anzuwendende
+           Regel ein non-pattern in einer Input-Position der Konklusion hat. Dann *temporaer*
+           explizite Applikationsoperatoren im non-pattern der Input-Position der Regelkonklusion
+           einfuegen und an entsprechenden Stellen im Input. ("Vergleichend ablaufen")
+           Nach erfolgter Regelanwendung wieder alle expliziten Applikationsoperatoren
+           aus dem Beweiszustand tilgen.
+
+         !! Problem:  non-Patterns in Output-Positionen von Judgements in Regeln will
+           man ja so erhalten lassen und ihre Patternifikation wuerde somit nicht gegen den
+           erwarteten Output matchen, zB ist in der Typsyntheseregel
+             [|  t1 : (PI x:A. B x)  ;  t2 : A  |] ==> (t1 t2) : B t2
+           fuer Applikation das B t2 ein non-pattern im Output, das in der konkreten Ausfuehrung
+           nach Loesen der Premissen aber immer ground sein wird.
+          Loesung1: Regeln mit non-patterns in Output-Positionen umformen zur Nutzung
+          von voll-variablen Outputs. Im Beispiel:
+             [|  t1 : (PI x:A. B x)  ;  t2 : A  ;  matchout (B t2) against OutVar  |]
+             ==> (t1 $ t2) : OutVar
+          (Und Patternifikation soll nicht unter matchout steigen, wobei die sowieso
+          besser adaptiv ist.)
+          Die Output-Variablen harmonieren dann auch gut mit dem entsprechenden Ansatz
+          zu Output-Matching-Fehlermeldungen.
+          Non-Patterns in Output-Positionen in Premissen von Regel muessen nicht umgeformt werden
+          weil man sich darauf verlaesst das alle Regeln rein variable Outputs
+          haben und Larry's Unifikation mit dem non-Pattern-auf-Var Fall klarkommt.
+          Letzteres scheint zu klappen. Um auf Nummer sicher zu gehen wuerden man temporaer
+          die non-patterns in Outputpositionen des zu loesenden Goals mit explizitem
+          Applikationsoperator kuenstlich zu patterns machen, die Resolution mit
+          der Regel (mit voll-variablem Output) durchfuehren und danach wieder
+          alle expliziten Applikationsoperatoren aus dem Beweiszustand tilgen.
+
+
+
+       * Higher-order pattern matching gegen Regelkonklusion koennte man bimatch_tac
+         simulieren wenn die Outputs in der Regelkonklusion nur Variablen sind.
+         Gibt aber das technische Problem das die Semantik des match-flags von
+         bicompose_aux davon ausgeht das die Regel frischifizierte Vars hat!
+
+         Also nutzen wir biresolve_tac, verlassen uns drauf das Instantiierungen
+         von Variablen in der Regel bevorzugt werden und ueberpruefen das
+         keine Unifvar und keine Variablen in den Inputs instantiiert wurden,
+         sodass also ein Input-Matching vorliegt. (Ggf. muss man hier flex-flex pairs
+         smashen wenn die Unifvars in non-patterns vorkommen und faelschlicherweise
+         unifiziert wurden)
+         Konkret machen wir das so das wir die Variablen betrachten die vorher/nachher
+         im Beweiszustand vorliegen. Hierbei wir die Ausnahme-Situation ignorieren das
+         Unifvariablen im resultierenden-Beweiszustand nicht mehr auftauchen, wenn
+         sie in unser selbst-nachvollzogenen Input-Matching nur an Matching-Variablen
+         gebunden werden die an keiner anderen stelle im urspruenglichen Beweiszustand vorkommen.
+       * Higher-order pattern matching gegen Premissen-output-patterns von Regeln
+         ist komplizierter. Vermutlich muessen wir zu Resolution mit HO-pattern Unifikation
+         uebergehen und das Matchen gegen die Outputs wird dann Teil der neuen Subgoals.
+       * Unifikationsvariablen einfach als nicht-instantiierte Matchingvariablen.
+         Wir merken uns die Unifikationsvariablen die im Beweiszustand vorhanden sind,
+         indem wir nachschauen welche Variable im Beweiszustand hinzugekommen sind
+         nach Anwendung von fresh_univarI, bei Regelmatching pruefen wir das keine
+         Unifvar instantiiert werden und bei Unifikationen lesen wir ab welche
+         Unifvariablen es danach nicht mehr im Beweiszustand gibt.
+         Das funktioniert, weil wenn eine Unifvar weder im Input, noch im Output,
+         noch in verzoegerten Unifikationen oder Constraints auftaucht, dann ist sie
+         vollkommen nutzlos.
+       * verzoegerte hoeherstufige Pattern-Unifikationen verwaltet man als gesonderte
+         Goals der Form  unify t1 t2  die man erst mit der Regel  unify t t  resolviert
+         wenn beide Terme Patterns sind
+       * Constraints als Goals die man nicht gleich loest
+       * Waehrend der Anwendung von normalen Procs (nicht unify_proc etc die speziell
+         realisiert sind) werden Unifikationsvariablen fixiert (damit die Annahmen
+         assumed werden koennen).
+         Dann Resolution mit dem resultierenden Theorem.
+       * lthy Transformationen sind nur erlaubt wenn keine fixes da, also ist nur
+         lineare Kontextpropagierung das novum hier
+       * forward rules [| P1 &&& P2 &&& ... &&& Pn ; ... |] ==> C1 &&& ... &&& Cn
+         * Seperat auf konstruierten Annahmen ausfuehren (das harmoniert auch besser
+           mit expliziten frule Ausfuehrungen)
+         * Waehrend dem Akkumulieren von *lokalen* Fakten muss man die Unfikationsvariablen
+           temporaer fixieren (um Annahmen assumen zu koennen) und danach wieder
+           generalisieren um Fakten der Form 
+              !! fixes.  assms(fixes, vars fixes) ==> fact(fixes, assms, vars fixes)
+           zu generieren. Hierbei ist darauf zu achten das Variable.export nicht unbedingt
+           die urspruenglichen Vars herstellt, also besser selbst  Thm.generalize .. maxidx
+           und dann entsprechendes Thm.instantiate nutzen.
+           
+           Konkret ist es wohl am besten die Fakten-Komplettierung mit forward rules
+           auf dem gefixten Fakt in einem Context auszufuehren der die Unifvar
+           und die Fixes des Beweiszustands fixt und die Annahmen des Beweiszustands annimt.
+           Regeln die waehrenddessen hinzugefuegt werden kriegen eine vor der Fakten-Komplettierung
+           frisch generierte Seriennummer o.ae. sodass wir nach der Fakten-Komplettierung
+           die neuen Regeln einfach erkennen koennen um sie zu dischargen.
+           Den nach der Fakten-Komplettierung entstandenen Kontext wirft man dann wieder weg
+           und extrahiert und exportiert bloss die neu entstandenen lokalen Regeln.
+         * In den Subgoals nur die tatsaechlich getaetigten Annahmen als Premissen
+           halten und ihre Vervollstaendigung ueber forward rules extra verwalten
+           als Fakten (!! fixes. assms ==> fact(fixes)) die man nur nach Bedarf
+           als Regeln anwendet.
+           Weil sonst Skalierungsproblem bei einfacher Anwendung als elim-Regeln
+             P1 ==> P2 ==> ... ==> Pn ==> (P1 ==> C1 ==> ... ==> Cn ==> R) ==> R
+           die die Eliminationspremisse P1 replizieren, wobei
+           die neuen subgoals P2, .., Pn per Annahme geloest werden.
+       * den naechsten Choice-point und die Fehlermeldung bei gescheitertem Matching
+         gegen Output-Patterns in einer Regelpremisse muss man jetzt trickreicher
+         generieren, weil das Output-Pattern ja direkt bei Regel-Matching mit naiver Resolution
+         mit den Regel-Outputs unifiziert wird.
+         Jetzt hat man verschiedene Alternativen:
+
+           * Man analysisiert wann so ein Regel-Matching fehlschlaegt weil die Regel-Outputs
+             nicht zum den Output-Patterns der aufrufenden Premisse passen.
+             Etwas problematisch ist hier das der Regel-Output i.A. ja nicht
+             durch eine Regel-Anwendung sondern ggf durch Subcalls entsteht. Also muss man
+             fuer sinnvolle Fehlermeldung tracken welche Teile des Output-Patterns zu welcher
+             Premisse einer instantiierten Regel-Anwendung im Stack passen.
+
+             Wir merken uns also einen Stack von (fuer diesen Call relevanten)
+             Premissen-Matchings gegen erwarteten Output-Patterns (in der Form wie sie
+             direkt vor Subcall der Premisse vorlag) und bei welcher Regelpremisse
+             diese Matchings konzeptuell stattfinden. Wenn ein Regel-Matching gemaess Resolution
+             fehlschlaegt, aber die Inputs matchen, dann suchen wir das erste Premissen-Matching
+             im Stack das fehlschlaegt und geben eine entsprechende Fehlermeldung mit
+             Regelanwendungs-Stacktrace ab der Regel zu diesem Premissen-Matching zurueck.
+
+             Problem hierbei ist dann noch das die Instantiierungen von Unifikations-
+             variablen i.A. nicht einfach aus den Resolutionsergebnissen extrahiert werden muessen.
+             Entweder man schafft eine Situation in der das moeglich ist (etwa kuenstliche 
+             erste Premisse die alle Variablen enthaelt) oder man verwaltet selbst die
+             aktuellen Instantiierung indem man Regel-Matchings etc. seperat nachvollzieht.
+
+
+           * In Verfeinerung zu obigem Punkt:
+             Man verwaltet die aktuelle Instantiierung *nicht* selbst nebenher.
+             Wenn eine Resolution mit einer Regel fehlschlaegt obwohl die Inputs matchen,
+             dann animiert man die Regel stattdessen in der Instantiierung gemaess Input-Matching
+             und propagiert nach erfolgter Teilableitung die resultierenden Outputs
+             soweit im Stack nach oben bis man den Fehlschlag anhand eines gescheiterten
+             Output-Matchings (der dort vorliegenden Regelpremisse in der Instantiierung
+             vor dem Subcall) erklaeren kann.             
+
+         (*) Man formt die Regel um so das die Judgement-Outputs in der Konklusion immer reine Variablen sind
+             mit Matching-Premissen die das abschliessende Matching auf Output-Patterns darstellen.
+             Mit solchen umgeformten Regeln betreibt
+             man dann das Regel- und Premissen-Output-Matching ueber naive Resolution und loest nach erfolgreicher
+             Ausfuehrung eines Subcalls die Matching-Premisse. Beim loesen der Matching-Premisse
+             verbietet man Instantiierungen im Judgement-Output und wenn das Loesen der Matching-Premisse
+             fehlschlaegt weiss man genau wo man steht: die im Stack vorhergehende Regelapplikation schlaegt
+             fehl weil sie anderes Output-Pattern erwartet.
+
+             Bsp Typ-Syntheseregel fuer Applikations:
+
+                 [| t1 : (PI x:A. B x)  ;  t2 : A |] ==>
+               (t1 t2) : B t2
+
+             wird genutzt in der Form
+
+                 [| t1 : (PI x:A. B x)  ;  t2 : A  ;
+                    matchout (B t2) against OutVar  |] ==>
+               (t1 t2) : OutVar
+               
+
+             Zu beachten ist auch diese Transformation auch fuer lokale Regeln (d.h. Annahmen von
+             Premissen von Regeln) ausgefuehrt wird und hier die Output-Variablen erst spaeter
+             entstehen durch Instantiierung von zusaetzlichen Quantifikationen vor der lokalen Regel.
+             Also wird zB die Typsyntheseregel fuer Abstraktionen:
+               
+                 [|  A : *  ;
+                     !! x. [|  !! LocOutVar2. matchout (LocOutVar2 x) against A ==> x : LocOutVar2 x  |]
+                       ==>  t x : B x  ;
+                     matchout (PI x:A. B x) against OutVar |] ==>
+               (lam x:A. t x) : OutVar
+
+
+             Kostet dann wohl ein wenig Performance ...
+
+       * lokale Regeln koennen jetzt ja auch Unifvariablen enthalten, also sind nur als Terme
+         seperat verwalted, nie als seperate Annahmen, d.h. sie sind beweistheoretisch nur 
+         als Premisse im Resolutionszustand nutzbar. Wir merken uns also welche Premisse
+         des Resolutionszustands zu der lokalen Regel gehoert und wenn wir glauben das
+         eine lokale Regel anwendbar ist schauen wir die Premisse des aktuellen Resolutionszustands
+         frisch an um die neuen Instantiierungen der Unifvariablen in der lokalen Regel
+         mitzubekommen. Dann pruefen wir die tatsaechliche Anwendbarkeit und resolvieren
+         dann.
+
+
+         ?!?!?: ist es denn wirklich wichtig das die Unifvar der lokalen Regel schon
+         direkt die gleichen sind wie die im Beweiszustand und nicht erst durch die Resolution
+         zu ihnen werden?! Wenn nicht, dann koennte man das teures Spezial-Lifting vermeiden!
+         Vermutlich war das alles bloss Paranoia von mir, weil wenn man mit
+           R ==> R[loc.quants instantiate with new vars]
+         liftend resolviert und dann R mit Annahmeregel loest ist ja sichergestellt das die
+         frischifizierten Unif-Variablen in der Regel mit denen von Premisse zu R im
+         Beweiszustand resolviert wurden. Besser keine elim-Resolution mit
+           R ==> (R ==> R_prem1[loc.quants inst with new vars])
+             ==> ..
+             ==> (R ==> R_premn[loc.quants inst with new vars])
+             ==> R_concl[loc.quants inst]
+         weil sich damit die Position der Annahme R im Beweiszustand veraendert (aber schlimm waere
+         das nur wenn wir irgendwann mal die Optimierung mit direkter Annahmeregel fuer Resolution
+         mit atomarer lokaler Regel fahren).
+         !! Wichtig ist hier aber das non-Patterns mit Unifvars durchaus vorkommen koennen und man also
+         und man also in der Varifizierung von R die Unifvar in non-patterns mit (% _ .. _. ?X)
+         instantiiert. (Aber was ist wenn eine Unifvar in verschiedenen non-patterns vorkommt?! Das
+         kriegt man mit einer Instantiierung dann nicht mehr hin!!)
+         Das sollte dann hoffentlich reichen das Larry's Unifikation nur die Unifvar in
+         der Regel instantiiert. Um hier auf Nummer sicher zu gehen koennte man die Patternifikation
+         ueber expliziten Applikationsoperator in der Varifizierung von R und auch temporaer in
+         der Premisse des Beweiszustands zu R durchfuehren.
+         (ggf. wichtige Optimierung: wenn keine loc.quants in R dann direkt Annahmeregel nutzen,
+         wobei wir sicherstellen muessen das tatsaechlich
+         die richtige Annahme genutzt wird => die unifizierenden abzaehlen?)
+
+
+         Zu beachten ist das die lokalen schematischen Matching-Variablen von lokalen Regeln
+         allquantifiziert sind in der Darstellung der lokalen Regel als Premisse im Resolutionszustand.
+         Wenn man eine lokale Regel R anwendet muss man also eine "varifizierte lokale Regel"
+
+           !! fixes. R(fixes) ==> R(fixes)[loc. quants instantiated with vars(fixes)]
+
+         und ihr spezielles Lifting (gilt weil R(fixes) in assms(fixes) enthalten ist)
+
+           (!! fixes. assms(fixes) => R_prem_1(fixes)[loc. quants inst with vars(fixes)])
+           ==> ...
+           ==> (!! fixes. assms(fixes) => R_prem_n(fixes)[loc. quants inst with vars(fixes)])
+           ==> (!! fixes. assms(fixes) => R_concl(fixes)[loc. quants inst with vars(fixes)])
+
+         erzeugen, bzw bereithalten. Diese varifizierte lokale Regel wendet man dann
+         mit unliftender Bicompose-Resolution (wenn wir die fixes auch zu Vars verallgemeinern wuerden,
+         koennten wir theoretisch zwar normale Resolution nutzen, aber dann haben wir ggf. viele
+         Non-Patterns) an und loest sofort ihre Kopf-Premisse R per Assumption (R ist ja als
+         Premisse im Resolutionszustand verfuegbar).
+         (dies entspricht ungefaehr dem (iterierten) Verhalten einer unsafe elim Regel, zB fuer
+          Allquantor-Instantiierung, bei blast)
+
+
+         Lokale generierten Brules sind gemaess Faktengenerierung unter fixes und assumes
+         von folgender Form, wobei R die eigentliche Regel ist:
+
+           !! fixes. assms(fixes) => R(fixes)
+
+         Die varifizierte Form ist dann
+
+           !! fixes. assms(fixes) ==> R(fixes)[loc quants instantiated with vars(fixes)]
+
+         und ihr spezielles Lifting ist
+
+           (!! fixes. assms(fixes) => R_prem_1(fixes)[loc. quants inst with vars(fixes)])
+           ==> ...
+           ==> (!! fixes. assms(fixes) => R_prem_n(fixes)[loc. quants inst with vars(fixes)])
+           ==> (!! fixes. assms(fixes) => R_concl(fixes)[loc. quants inst with vars(fixes)])
+
+         was wir mit unliftender Bicompose-Resolution anwenden.
+
+
+         Normalerweise frischifiziert man bei der Nutzung von Bicompose_tac die Regel selbst.
+         In unserem Fall wollen wir aber das die Unifvariablen in den lokalen
+         (ggf. mit frules generierten) Regeln mit dem Metarec-Ableitungszustand geshared 
+         werden. D.h. kein Thm.incr_indexes (was ja konzeptuell beim automatischen lifting
+         passieren wuerde), sondern nur die Allquantoren der lokalen Regel mit
+         Thm.forall_elim_vars (maxidx deriv_st) instantiieren.
+         Hierbei ist noch anzumerken das die lokal generierten brules bisher als Regeln
+         hinzugefuegt werden ohne Thm.forall_elim_vars.
+
+
+         Problematisch bei lokal generierten brules ist das die Unifvariablen in ihnen
+         ja nicht automatisch mitinstantiiert werden bei den Resolutionsschritte.
+         Also muss man lokal generierte brules mit Unifvariablen doch in die Premissen
+         des Resolutionszustands packen. Nachdem das selten sein sollte hat man vermutlich
+         kein Skalierungsproblem.
+         Diese lokal generierten brules mit Unifvariablen generiert man auch seperat
+         (unter temporaer gefixten Unifvariablen) in der Form
+           !! fixes. assms(fixes) ==> brule(fixes)
+         (wobei wir versuchen moeglichst wenig assms reinzukriegen)
+         wird spezial-geliftet zu
+           (!! fixes. assms(fixes) ==> assm_1(fixes)) 
+           ==> ... ==> (!! fixes. assms(fixes) ==> assm_n(fixes))
+           ==> (!! fixes. assms(fixes) => brule(fixes))
+         Integration als Premisse in den Resolutionszustand erfolgt mit unliftender
+         elim-Resolution (um das erste neue Subgoal gleich billig wegzukriegen)
+         und anschliessendem Loesen der neuen Subgals fuer assm_2, .., assm_n
+         mit exakter Annahmeregel.
+
+
+         Wenn man lokale Regeln in Netzen speichert muss man bedenken
+         das ihre Unifvar im Zuge der Ableitung ggf. instantiiert werden, aber
+         die Repraesentation im Netz dabei nicht geupdated wird, also
+         wird das Netz-Matching deutlich freizuegiger als die tatsaechlich
+         moeglichen Regel-Matchings. Vermutlich aber kein Performanceproblem,
+         zumal in den Inputpositionen von Judgements vorraussichtlich sowieso selten
+         Unifvar vorliegen.
+
+         Nochmal zusammengefasst:
+           * globale Regeln werden normal mit lifting angewandt
+           * lokale Regeln sind entweder direkt Annahmen oder folgen aus Ihnen 
+             ueber forward-rules.
+             In jedem Fall erzeuge ich fuer die Anwendung lokaler Regeln eine
+             varifizierte Version die das Sharing von Unifvar mit dem Beweiszustand
+             beibehaelt, die Allquantoren werden mit frischen Var instantiiert
+             und es erfolgt ein spezielles Lifting.
+
+
+         Neue Aspekte gegenueber normalen Resolutionstaktiken:
+           * moded Judgements und deshalb non-patterns in Output-Positionen kein Problem
+             (wenn man Regeln umformt)
+           * Fehlermeldungen bzgl. des Modings
+           * lokale Regeln die Unifikationsvariablen mit Beweiszustand sharen
+             (Taktiken bieten hier nur den haeufigsten Fall an das die lokale Regel
+              eine atomare Annahme ist mit der man ueber assume_tac resolvieren kann)
+           * Forward-Rules, insbes
+             lthy Transformationen als toplevel-Anteil von Ableitungen
+           * konsequentes Matching statt Unifikation
+           * Non-Patterns in Regeln und Inputs kuenstlich zu Patterns machen
+           * explizite Unifikation, die bei non-patterns verzoegert
+             (statt nur bei Flex-Flex Pairs wie Larry's Unif)
+             Wichtig fuer Typinferenz
+           * Constraints entsprechend Subgoals die man wegrotiert
+           * fehlschlagende Output-Matches ueberspringen viele Choice-Points bis
+             hin zu der Regel die fuer dieses Pattern im Output verantwortlich ist,
+             statt auch ueber spaeter Choice-Points zu backtracken.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

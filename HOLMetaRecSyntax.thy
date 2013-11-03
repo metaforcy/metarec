@@ -92,31 +92,65 @@ lemma gen_colljudI: "PROP P == Trueprop True ==> PROP P" by simp
 
 
 definition
-  constraint :: "prop => prop"
+  constraint_const :: "prop => prop"
 where
-  "constraint P == P"
+  "constraint_const P == P"
 
-lemma constraintI: "PROP P ==> PROP constraint P"
-  by (simp add: constraint_def)
+abbreviation
+  constraint_abbrev :: "prop => prop" ("constraint _" [5] 10) where
+  "constraint_abbrev P == PROP constraint_const P"
 
+lemma constraintI: "PROP P ==> constraint (PROP P)"
+  by (simp add: constraint_const_def)
+
+definition
+  foconstraint_const :: "prop => prop"
+where
+  "foconstraint_const P == P"
+
+abbreviation
+  foconstraint_abbrev :: "prop => prop" ("foconstraint _" [5] 10) where
+  "foconstraint_abbrev P == PROP foconstraint_const P"
+
+lemma foconstraintI: "PROP P ==> foconstraint (PROP P)"
+  by (simp add: foconstraint_const_def)
 
 
 definition
-  unify :: "'a :: {} => 'a => prop"
+  unify_const :: "'a :: {} => 'a => prop"
 where
-  "unify t1 t2 == (t1 == t2)"
+  "unify_const t1 t2 == (t1 == t2)"
 
-lemma unifyI: "t1 == t2 ==> PROP unify t1 t2"
-  by (simp add: unify_def)
+abbreviation
+  unify_abbrev :: "'a :: {} => 'a => prop" ("unify _ _" 10) where
+  "unify_abbrev x y == PROP unify_const x y"
+
+lemma unifyI: "t1 == t2 ==> unify t1 t2"
+  by (simp add: unify_const_def)
 
 definition
-  fresh_unifvar:: "unit => 'a :: {} => prop"
+  fresh_unifvar_const:: "unit => 'a :: {} => prop"
 where
-  "fresh_unifvar u x == (Trueprop True)"
+  "fresh_unifvar_const u x == (Trueprop True)"
 
-lemma fresh_unifvarI: "PROP fresh_unifvar () x"
-  by (simp add: fresh_unifvar_def)
+abbreviation
+  fresh_unifvar_abbrev :: "'a :: {} => prop" ("freshunifvar _" 10) where
+  "fresh_unifvar_abbrev x == PROP fresh_unifvar_const () x"
 
+lemma fresh_unifvarI: "freshunifvar x"
+  by (simp add: fresh_unifvar_const_def)
+
+definition
+  explapp :: "('a :: {} => 'b :: {}) => 'a => 'b" (infixl "$" 200) where
+  "t1 $ t2 == t1 t2"
+
+definition
+  matchout_const :: "'a :: {} => 'a => prop" ("matchout _ _") where
+  "matchout t1 t2 == (t1 == t2)"
+
+lemma matchoutI: "matchout t t"
+  by (simp add: matchout_const_def)
+  
 
 
 ML {*
@@ -133,11 +167,13 @@ ML {*
     val frule_const_name = @{const_name frule_const}
     val frule_const_def = @{thm frule_const_def}
 
-    val constraint_headterm = @{term constraint} |> max_polym
+    val constraint_headterm = @{term constraint_const} |> max_polym
     val constraintI = @{thm constraintI}
-    val unify_headterm = @{term unify} |> max_polym
+    val foconstraint_headterm = @{term foconstraint_const} |> max_polym
+    val foconstraintI = @{thm foconstraintI}
+    val unify_headterm = @{term unify_const} |> max_polym
     val unifyI = @{thm unifyI}
-    val fresh_unifvar_headterm = @{term fresh_unifvar} |> max_polym
+    val fresh_unifvar_headterm = @{term fresh_unifvar_const} |> max_polym
     val fresh_unifvarI = @{thm fresh_unifvarI}
 
     val note_headterm = @{term note_const} |> max_polym
@@ -158,6 +194,16 @@ ML {*
     val prop_nil = @{term "prop_nil"}
 
     val gen_colljudI = @{thm gen_colljudI}
+
+    val expl_app_const_name = @{const_name explapp}
+    val expl_app_def = @{thm explapp_def}
+
+    val matchout_headterm = @{term matchout_const} |> max_polym
+    val matchout_def = @{thm matchout_const_def}
+    val matchoutI = @{thm matchoutI}
+
+    val prf_displayT = @{typ "bool"}
+    fun app_prf_displayt t1 t2 = t1 $ t2
   );
 *}
 

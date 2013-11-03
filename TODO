@@ -43,41 +43,7 @@
 
 
 
-
 (* TODO(opt):
-
-     * kann man die Metarec Ausfuehrung vllt doch als sehr spezielle resolutionsbasierte
-       Taktik auffassen? Das koennte ordentlich Performance bringen weil
-       die Term-Zertifizierungen praktisch ganz wegfaellt (bis auf procs etc).
-       * Wir brauchen dann rewriting von non-patterns in Input-Termen und
-         Regeln zu kuenstlichen Patterns die einen expliziten Applikationsoperator nutzen.
-       * Higher-order pattern matching gegen Regelkonklusion koennte man bimatch_tac
-         simulieren wenn die Outputs in der Regelkonklusion nur Variablen sind.
-         Ansonsten nutzen wir biresolve_tac, verlassen uns drauf das Instantiierungen
-         von Variablen in der Regel bevorzugt werden und ueberpruefen dann das
-         es keine Instantiierung von Variablen in den Inputs gab.
-       * Higher-order pattern matching gegen Premissen-output-patterns von Regeln
-         ist komplizierter. Vermutlich muessen wir zu HO-pattern Unifikation
-         uebergehen und das Matchen gegen die Outputs wird dann Teil der neuen Subgoals.
-       * Unifikationsvariablen einfach als nicht-instantiierte Matchingvariablen
-       * verzoegerte hoeherstufige Pattern-Unifikationen verwaltet man als gesonderte
-         Goals der Form  unify t1 t2  die man erst mit der Regel  unify t t  resolviert
-         wenn beide Terme Patterns sind
-       * Constraints als Goals die man nicht gleich loest
-       * procs wie gehabt, dann Resolution mit dem resultierenden Theorem
-       * lthy Transformationen sind nur erlaubt wenn keine fixes da, also ist nur
-         lineare Kontextpropagierung das novum hier
-       * forward rules [| P1 &&& P2 &&& ... &&& Pn ; ... |] ==> C1 &&& ... &&& Cn
-         * Seperat auf konstruierten Annahmen ausfuehren (das harmoniert auch besser
-           mit expliziten frule Ausfuehrungen)
-         * In den Subgoals nur die tatsaechlich getaetigten Annahmen als Premissen
-           halten und ihre Vervollstaendigung ueber forward rules extra verwalten
-           als Fakten (!! fixes. assms ==> fact(fixes)) die man nur nach Bedarf
-           als Regeln anwendet.
-           Weil sonst Skalierungsproblem bei einfacher Anwendung als elim-Regeln
-             P1 ==> P2 ==> ... ==> Pn ==> (P1 ==> C1 ==> ... ==> Cn ==> R) ==> R
-           die die Eliminationspremisse P1 replizieren, wobei
-           die neuen subgoals P2, .., Pn per Annahme geloest werden.
 
 
      * kann man vllt drum herum kommen die zertifizierten Instantiierungen immer
@@ -237,6 +203,8 @@
         steigt man mit Simplifier in die propositionale Struktur ab
         und nutzt fuer das rewriten von Judgements entsprechende
         cong-Regeln die eventuell det. Regelsysteme anwerfen
+    * Lokale computational rules (nutze ich ja effektiv schon ueber die Interpretation
+      der simp-synthproc des rewto judgements *)
     * Selektiv in Judgements doch eta-normalisieren und fuer matching
       von Objekten in diesen Judgements dann decomposing pattern matching
       module beta, eta (statt nur modulo beta) verwenden.
@@ -838,6 +806,30 @@
 
 
 
+    * wenn das Goal die Form t elabto t' : B und alle Constraints die Form x_i : A_i(x1 .. x_i-1)
+      mit Unif-Variablen x_i (x_i not in t) haben, wobei (:) ein Typisierungsjudgement
+      mit dependent product ist, dann wollen wir spaeter das implizite dependent product
+        (impllam x_1 .. x_n. t') : PIimpl x1:A1 .. x_n:A(x1 .. x_n-1). B(x1 .. x_n)
+      bilden. Hauptsaechliche Schwierigkeit dabei ist die Constraints in eine lineare Reihenfolge
+      zu bringen sodass spaeter Constraints x_i : A_i in A_i nur die Unifvar enthalten duerfen
+      die in vorherigen Constraints typisiert wurden. (Pientka - Insider's look at LF type inference
+      schneidet das kurz an)
+      Semantisch fuehrt man dann lambdas ein die implizit bleiben und zeigt
+        (impllam x_1 .. x_n. t') : PIimpl x1:A1 ... x_n:A_n(x1 .. x_n-1). B(x1 .. x_n)
+      ueber
+        !! x_1 ... x_n. x1:A1 ==> .. ==> x_n:A_n(x1 .. x_n-1) ==> t'(x_1 .. x_n) : B(x_1 .. x_n)
+
+
+   * Constraint-Handling rules bzw. Variante davon um Constraints zu loesen und zu minimieren:
+       biete Propagierungsregeln und metarec-artige Rueckwaertsregeln an
+       Backtracking? Unifikation oder Matching? Verbindung zu Forward rules und metarec?
+     erstmal ohne Zertifizierung die Ableitung finden:
+       * starte mit den initialen Constraints C_0,
+       * bauen einen Hypergraph auf der angibt welche Constraints welche anderen mit welcher
+         Regel in welcher Instantiierung implizieren
+       * suche nach minimaler Menge C_min an Constraints von der aus die initialen Constraints aus erreichbar sind
+       * Zeige C_min ==> C_0 ueber Anwendung der Regelinstantiierungen mit der die Kanten des Hypergraphs
+         beschriftet sind
 
 
 

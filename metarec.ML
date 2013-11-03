@@ -15,6 +15,8 @@ sig
 
   val constraint_headterm : term
   val constraintI : thm (* P ==> constraint P *)
+  val foconstraint_headterm : term
+  val foconstraintI : thm (* P ==> foconstraint P *)
   val fresh_unifvar_headterm : term
   val fresh_unifvarI: thm (* fresh_unifvar X *)
   val unify_headterm : term
@@ -38,6 +40,9 @@ sig
   val prop_nil : term
 
   val gen_colljudI : thm  (* t == Trueprop True ==> t *)
+
+  val prf_displayT : typ
+  val app_prf_displayt : term -> term -> term
 end
 
 
@@ -45,6 +50,9 @@ functor MetaRec(Data : MetaRecData) =
 struct
 
 
+
+(* TODO(feature): globally track unification variables (those introduced by fresh_unifvar_proc) in run_state
+     and disallow their instantiation during rule matching *)
 
 
 
@@ -54,12 +62,87 @@ fun string_of_thm_in_gctxt gctxt =
     Context.Proof ctxt => Display.string_of_thm ctxt
   | Context.Theory thy => Display.string_of_thm_global thy
 
+             
+(* returns NONE if f always returns NONE on xs and st,
+   otherwise returns SOME st' with the first st' which f returned *)
+fun fold_upto_first_change f xs st =
+  case xs of
+    [] => NONE
+  | (x :: xs') =>
+      (case f x st of
+        NONE => fold_upto_first_change f xs' st
+      | SOME st2 => SOME st2)
+
+(* returns NONE if f always returns NONE on xs and st,
+   otherwise returns SOME st' with the last st' which f returned *)
+fun fold_with_change_tracking f xs st =
+  case xs of
+    [] => NONE
+  | (x :: xs') =>
+      (case f x st of
+        NONE => fold_with_change_tracking f xs' st
+      | SOME st2 =>
+          (case fold_with_change_tracking f xs' st2 of
+            SOME st3 => SOME st3
+          | NONE => SOME st2))
+
+
 
 
 infix abeconv
 infix abeconvs
 fun t1 abeconv t2 = (Envir.beta_eta_contract t1) aconv (Envir.beta_eta_contract t2)
 fun t1s abeconvs t2s = forall (op abeconv) (t1s ~~ t2s)
+fun aconv_norm norm (t1, t2) = (norm t1) aconv (norm t2)
+
+
+
+fun ground t = null (Term.add_vars t []) andalso null (Term.add_tvars t [])
+
+(* NB: Variable.export is not exact w.r.t. indices of re-generalized Vars, they rather get maxidx+1 *)
+fun exact_freeze_props_thaw_thms props ctxt =
+  let
+    val thy = Proof_Context.theory_of ctxt
+    val cert = cterm_of thy
+    val certT = ctyp_of thy
+
+    val vars = fold Term.add_vars props []
+    val tvars = fold Term.add_tvars props []
+
+    (* TODO(correctness): if some fx_n ends with "_" we might get a problem with
+       Name.clean_index generating unexpecting variables
+       for the fixed frees in Term_Subst.generalize in Thm.generalize *)
+    val ((fxvar_ns, fxTvar_ns), ctxt2) = ctxt
+      |> Variable.variant_fixes (map (fst #> fst) vars)
+      ||>> Variable.variant_fixes (map (fst #> fst) tvars)
+    val var_fixing = vars ~~ fxvar_ns
+    val tvar_fixing = tvars ~~ fxTvar_ns
+
+    val tvar_fixing_inst = tvar_fixing |> map (fn ((ixn, S), fx_n) => ((ixn, S), TFree(fx_n, S)))
+    val freezeT = Term_Subst.instantiateT tvar_fixing_inst
+    val freeze =
+      Term_Subst.instantiate
+        (tvar_fixing_inst,
+         var_fixing |> map (fn ((ixn, T), fx_n) =>
+           ((ixn, freezeT T), Free(fx_n, freezeT T))))
+
+    fun thaw_th th = 
+      let
+        val maxidx' = Thm.maxidx_of th + 1
+        val thaw_reinstT = tvar_fixing |> map (fn ((ixn, S), fx_n) => (((fx_n, maxidx'), S), TVar(ixn, S)))
+          (* NB: T is already reinstantiated *)
+        val thaw_reinst = var_fixing |> map (fn ((ixn, T), fx_n) => (((fx_n, maxidx'), T), Var(ixn, T)))
+      in
+        th |> Thm.generalize (map snd tvar_fixing, map snd var_fixing) maxidx'
+        |> Thm.instantiate
+             (thaw_reinstT |> map (fn (ixnS, T) => pairself certT (TVar ixnS, T)),
+              thaw_reinst |> map (fn (ixnT, t) => pairself cert (Var ixnT, t)))
+      end
+  in
+    ((map freeze props, thaw_th), ctxt2)
+  end
+
+
 
 
 fun typ_diff (Type(k1, Ts1)) (Type(k2, Ts2)) =
@@ -115,6 +198,20 @@ val beta_eta_long_convert = Conv.fconv_rule Thm.eta_long_conversion
 val beta_norm_cterm = Thm.beta_conversion true #> Thm.rhs_of
 
 
+fun instnorm_thm_with_env ctxt env th =
+  let
+    val vars = Term.add_vars (prop_of th) [] |> map Var
+    val tvars = Term.add_tvars (prop_of th) [] |> map TVar
+    val thy = Proof_Context.theory_of ctxt
+    val normT = Envir.norm_type (Envir.type_env env)
+  in
+    th
+    |> Thm.instantiate (
+         tvars |> map (fn v => (v, normT v) |> pairself (ctyp_of thy)),
+         vars |> map (fn (v as Var(ixn, T)) => (Var(ixn, normT T), Envir.norm_term env v) |> pairself (cterm_of thy)))
+    |> beta_convert
+  end
+
 exception InternalInterrupt
 
 
@@ -155,6 +252,10 @@ fun name_from_const_or_free_perhaps_unsuffix head_term =
 
 
 
+
+ (* proof certification with passing down of ctxt and global instantiation and on-the-fly application of the instantiation *)
+
+
 (* (#input args (not counting the primary argument), #output args) *)
 type mode = int * int
 type frule_id = int
@@ -167,23 +268,12 @@ fun synth_objs_from_sec_objs mode sec_objs = drop (fst mode) sec_objs
 
 type run_state = {
     outer_ctxt: Proof.context,
-    unifvar_cnt: int,
+    env : Envir.env,
     (* the delayed unifs are implicit assumptions t1 == t2 (fully lambda lifted into the outer_ctxt)
        during the derivation which are discharged when both terms have become patterns (or in the very and) *)
     delayed_unifs: (term * term) list,  
     (* constraints are implicit assumptions during the derivation that are always exported wrt. outer_ctxt *)
-    constraints: term list,
-
-    (* NB: we keep unification variables distinct from the matching variables of rules and their
-        instantiations are kept seperate as well.
-      We only store a term instantiation because during metarec derivations all type variables are fixed
-        as we don't introduce new ones during the derivation *)
-    unifvar_inst: Envir.tenv
-
-    (* TODO(opt): for optimization we could cache the certification of the unification variable
-       instantiation and keep it up-to-date with Thm.instantiate_cterm. *)
-    (* cert_unifvar_inst: (ctyp * ctyp) Typtab.table * (cterm * cterm) Termtab.table *)
-      (* maps ?'a |-> (cert ?'a, cT),  ?X |-> (cert ?X, ct) *)
+    constraints: term list
   }
 
 (* TODO(semantics): besser NormalJud in FactJud, RecJud aufteilen? *)
@@ -194,6 +284,47 @@ type judgements_type = (analyzer_ty * term * mode * judgement_kind *
   (thm * string * string option) option * string option * allow_inconsis) Symtab.table
   (* fst = running_expl_frules,   snd = running_on_thy_lvl *)
 type run_info_ty = bool * int * run_state option
+
+
+
+
+
+
+
+(* use proofterms to allow unification variables in assumptions
+   regarded modulo beta, but not modulo extra computational rules *)
+(* TODO: proofterm constructor for normalization with computational rules *)
+(* NB: thm in ThmPrf can have hyps (if it is a local ground rule) which are discharged in proof
+     replay of surrounding ImpI *)
+datatype proofterm = Assumption of term | AllI of (string * typ) * proofterm | ImpI of term * proofterm
+  | ThmPrf of thm * ((indexname * sort) * typ) list * ((indexname * typ) * term) list
+  | MP of proofterm * proofterm | AllE of proofterm * term
+
+
+(* proofterm with its proposition and open assumptions *)
+datatype proof_pack = ProofPack of term * proofterm * term list   
+
+fun prop_of_proofp (ProofPack (prop, _, _)) = prop
+fun proof_of_proofp (ProofPack (_, proof, _)) = proof
+fun assms_of_proofp (ProofPack (_, _, assms)) = assms
+
+fun map_prop_of_proofp f (ProofPack (prop, proof, assms)) =
+  ProofPack (f prop, proof, assms)
+
+(* some of the prf combinators need to access the env in the run_state of the context, so they are defined later when
+   context manipulation functions are available *)
+
+
+
+
+(* DirectRules are freshified before their applications, whereas unification
+   variables in LocalRules are shared in the derivation.
+   LocalRules can be quantified and those quantified variables get instantiated with fresh unification
+   variables before rule matching *)
+datatype rule_ty = DirectRule of thm | LocalRule of proof_pack
+
+
+
 
   (* stands for an arbitrary judgement, i.e. depends on all available
      judgements *)
@@ -209,6 +340,7 @@ val concat_names_jud = "concat_names_jud"
 val fresh_unifvar_jud = "fresh_unifvar_jud"
 val unify_jud = "unify_jud"
 val constraint_jud = "constraint_jud"
+val foconstraint_jud = "foconstraint_jud"
 
 (* define, note, concat_names are added in setup *)
 val judgements_start : judgements_type =
@@ -262,11 +394,32 @@ fun gen_decompose_judgement term_to_jud (judgements : judgements_type) string_of
       | NONE => error ("decompose_judgement: jid "^quote jid^" is not valid"))
   | _ => NONE
 
-fun rule_net_index (judgements : judgements_type) term_to_jud (thm, prior) =
-  thm |> Thm.concl_of |> gen_decompose_judgement term_to_jud judgements (fn _ => "<term (no term printer)>")
+(* NB: we index local rules under their conclusion in the *present* instantiation (which
+   might be more partial than the instantiation in the current context, but in the only
+   relevant call from add_assm_terms_internal this is not the case). If it gets more
+   instantiated later on, the rule matching will only be less precise.
+   Local rules can get coinciding conclusions when unification variables in them are further
+   instantiated. In that case they were always in the same Net-Leaf anyway and are always retrieved together *)
+fun rule_net_index (judgements : judgements_type) term_to_jud (rule, prior) =
+  (case rule of DirectRule th => prop_of th | LocalRule prf => prop_of_proofp prf)
+  |> Logic.strip_imp_concl
+  |> gen_decompose_judgement term_to_jud judgements (fn _ => "<term (no term printer)>")
   |> Option.map (fn (_, (pobj, iobjs, oobjs)) => pack_pobj_iobjs pobj iobjs)
   |> the_list
-fun eq_for_net ((thm1, _), (thm2, _)) = Thm.eq_thm_prop (thm1, thm2)
+
+(* NB: eq_for_net should only be called on theory merge, because otherwise don't use the
+      Item_Net2.{member, member_match, remove, merge} functions.
+      If we ever need one of those, this needs a current ctxt parameter (and Item_Net2 needs
+      to be generalized accordingly) and should then be
+         (rule1, rule2) |> pairself prop_of_rule ctxt |> (op aconv)
+      (note that prop_of_rule norms LocalRules wrt their current instantiation in ctxt) *)
+fun eq_for_net ((rule1, _), (rule2, _)) =
+  case rule1 of
+    DirectRule th1 =>
+      (case rule2 of
+        DirectRule th2 => Thm.eq_thm_prop (th1, th2)
+      | LocalRule _ => error "internal error: eq_for_net was on a local rule")
+  | LocalRule _ => error "internal error: eq_for_net was on a local rule"
 
 
 
@@ -333,21 +486,21 @@ type ruledata_type = {
     (* net for backward rules indexed by non-wellformed term combination  pack_pobj_iobjs pobj iobjs
        when retrieving backward rules are sorted by given priority first, 
        then by reverse order of their addition (i.e. latest additions get priority) *)
-    rules: ((thm * int) Item_Net2.T) Symtab.table,
+    rules: ((rule_ty * int) Item_Net2.T) Symtab.table,
     judgements: judgements_type,
     term_to_jud: string Net.net,
-    assms: thm list,
+    assms: term list, (* TODO(refactor?): better move assms to run_state? but they are not threaded linearly ... *)
+
       (* synthesis procedures indexed by the judgement name
          if invoked in frule-applications the current theory
-         is only available via the generic context
-         
-         possibly results in an update run state (esp. new constaints, delayed unification problems)
-         in the official interface such syn_procs are called state-modifying syn_procs *)
-    syn_procs: (string * (Proof.context -> (Proof.context -> string -> (thm * cterm list) * run_state option)
-      -> (cterm * cterm list * cterm list) -> (thm * cterm list) * run_state option)) Symtab.table,
+         is only available via the generic context.
+         possibly results in an updated run state (esp. new constraints, delayed unification problems).
+         in the official interface such syn_procs are called general syn_procs *)
+    syn_procs: (string * (Proof.context -> (Proof.context -> string -> (proof_pack * term list) * run_state option)
+      -> (term * term list * term list) -> (proof_pack * term list) * run_state option)) Symtab.table,
     comp_rules: simpset option,
     trace_depth: int * int,
-    trace: ((unit -> thm) list) * ((unit -> string) list),
+    trace: ((unit -> term) list) * ((unit -> string) list),
 
     facts: thm Net.net,
       (* facts indexed by non-wellformed term combination  pack_pobj_iobjs pobj iobjs *)
@@ -373,9 +526,12 @@ type ruledata_type = {
     lthy_transform_log: string list,
     
     (* new_facts indexed by their judgement   *)
-    new_facts: thm list Symtab.table
+    new_facts: thm list Symtab.table,
 
-    (* , constraint_solvers: (Proof.context -> term list -> (thm option) list * Proof.context) list *)
+      (* constraint {propagation, simplification} rules indexed by all of their heads respectively;
+         the zero-based position of the head which indexes is also stored *)
+    constraint_propag_rules_hdidx: (thm * int) Net.net,
+    constraint_simp_rules_hdidx: (thm * int) Net.net
   }
 
 val empty_ruledata : ruledata_type = {
@@ -388,7 +544,9 @@ val empty_ruledata : ruledata_type = {
      frules_hdidx = Net.empty, frules_factgen = Net.empty,
      gen_brule_concls = Net.empty,
      lthy_transforms = Symtab.empty, lthy_transform_log = [],
-     new_facts = Symtab.empty
+     new_facts = Symtab.empty,
+     constraint_propag_rules_hdidx = Net.empty,
+     constraint_simp_rules_hdidx = Net.empty
    }
 
 val base_scope = 0
@@ -401,25 +559,28 @@ structure RuleData = Generic_Data(
   val empty = (base_scope, Inttab.empty |> Inttab.update_new (base_scope, empty_ruledata), init_run_info)
   val extend = I
 
-  fun merge ((scope1, tab1, run_info1), (scope2, tab2, run_info2)) =
+  fun merge ((scope1, tab1, run_info1) : T, (scope2, tab2, run_info2) : T) =
     let
       val _ =
         if scope1 = base_scope andalso scope2 = base_scope then ()
         else
           error ("RuleData.merge: scopes are nontrivial")
 
-      fun merge_ruledata (data1, data2) =
+      fun merge_ruledata (data1 : ruledata_type, data2 : ruledata_type) =
         let
           val {rules=rules1, judgements=judgements1, term_to_jud=term_to_jud1, assms=assms1, syn_procs=syn_procs1,
             comp_rules=comp_rules1, trace_depth=trace_depth1, trace=trace1, facts=facts1, facts_lhs_idx=facts_lhs_idx1,
             depgraph=depgraph1, frules=frules1, frules_hdidx=frules_hdidx1, frules_factgen=frules_factgen1,
             gen_brule_concls=gen_brule_concls1, lthy_transforms=lthy_transforms1, lthy_transform_log=lthy_transform_log1,
-            new_facts=new_facts1} = data1
+            new_facts=new_facts1, constraint_propag_rules_hdidx=constraint_propag_rules_hdidx1,
+            constraint_simp_rules_hdidx=constraint_simp_rules_hdidx1} = data1
           val {rules=rules2, judgements=judgements2, term_to_jud=term_to_jud2, assms=assms2, syn_procs=syn_procs2,
             comp_rules=comp_rules2, trace_depth=trace_depth2, trace=trace2,
             facts=facts2, facts_lhs_idx=facts_lhs_idx2, depgraph=depgraph2, frules=frules2, frules_hdidx=frules_hdidx2,
             frules_factgen=frules_factgen2, gen_brule_concls=gen_brule_concls2, lthy_transforms=lthy_transforms2,
-            lthy_transform_log=lthy_transform_log2, new_facts=new_facts2} = data2
+            lthy_transform_log=lthy_transform_log2, new_facts=new_facts2,
+            constraint_propag_rules_hdidx=constraint_propag_rules_hdidx2,
+            constraint_simp_rules_hdidx=constraint_simp_rules_hdidx2} = data2
           val judgements' : judgements_type = Symtab.merge (K true) (judgements1, judgements2)
           val term_to_jud' = Net.merge (op =) (term_to_jud1, term_to_jud2)
           val frules' = frules1 |> Inttab.fold (fn (id, (th, kind, headjuds, applied_to_facts, traced)) =>
@@ -459,7 +620,11 @@ structure RuleData = Generic_Data(
             gen_brule_concls = Net.merge Thm.eq_thm_prop (gen_brule_concls1, gen_brule_concls2),
             lthy_transforms = Symtab.merge (K true) (lthy_transforms1, lthy_transforms2),
             lthy_transform_log = [],
-            new_facts = Symtab.empty
+            new_facts = Symtab.empty,
+            constraint_propag_rules_hdidx = Net.merge (Thm.eq_thm_prop o pairself fst)
+              (constraint_propag_rules_hdidx1, constraint_propag_rules_hdidx2),
+            constraint_simp_rules_hdidx = Net.merge (Thm.eq_thm_prop o pairself fst)
+              (constraint_simp_rules_hdidx1, constraint_simp_rules_hdidx2)
           }
         end
     in
@@ -480,6 +645,7 @@ fun get_current_ruledata gctxt =
       SOME ruledata => ruledata
     | NONE => error "get_current_ruledata: current scope is not defined"
   end
+  
 
 fun new_scope inherit_from_base scope' gctxt =
   let
@@ -513,7 +679,8 @@ fun map_run_info f = RuleData.map (fn (scope, tab, run_info) => (scope, tab, f r
 fun map_rule_stuff f_rules f_depgraph = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules = f_rules rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -521,12 +688,15 @@ fun map_rule_stuff f_rules f_depgraph = map_current_ruledata
      depgraph = f_depgraph depgraph,
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_judgement_stuff f_judgements f_term_to_jud f_depgraph = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements = f_judgements judgements,
      term_to_jud = f_term_to_jud term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -534,12 +704,15 @@ fun map_judgement_stuff f_judgements f_term_to_jud f_depgraph = map_current_rule
      depgraph = f_depgraph depgraph,
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_term_to_jud f_term_to_jud = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements = judgements,
      term_to_jud = f_term_to_jud term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -547,12 +720,15 @@ fun map_term_to_jud f_term_to_jud = map_current_ruledata
      depgraph = depgraph,
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_assms f_assms = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements = judgements,
      term_to_jud=term_to_jud, assms = f_assms assms, syn_procs=syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -560,12 +736,15 @@ fun map_assms f_assms = map_current_ruledata
      depgraph = depgraph,
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_syn_procs f_syn_procs = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements = judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs = f_syn_procs syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -573,12 +752,15 @@ fun map_syn_procs f_syn_procs = map_current_ruledata
      depgraph = depgraph,
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_comp_rules f_comp_rules = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules = f_comp_rules comp_rules, trace_depth=trace_depth, trace=trace,
@@ -586,12 +768,15 @@ fun map_comp_rules f_comp_rules = map_current_ruledata
      depgraph=depgraph,
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun set_trace_depth d = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth = d, trace=trace,
@@ -600,12 +785,15 @@ fun set_trace_depth d = map_current_ruledata
      frules = frules, 
      frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_trace f_trace = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth = trace_depth, trace = f_trace trace,
@@ -614,12 +802,15 @@ fun map_trace f_trace = map_current_ruledata
      frules = frules, 
      frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_fact_stuff f_facts f_facts_lhs_idx f_new_facts = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -628,12 +819,15 @@ fun map_fact_stuff f_facts f_facts_lhs_idx f_new_facts = map_current_ruledata
      frules=frules, frules_hdidx=frules_hdidx, frules_factgen=frules_factgen,
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log,
-     new_facts = f_new_facts new_facts})
+     new_facts = f_new_facts new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_frule_stuff f_depgraph f_frules f_frules_hdidx f_frules_factgen = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -642,12 +836,15 @@ fun map_frule_stuff f_depgraph f_frules f_frules_hdidx f_frules_factgen = map_cu
      frules = f_frules frules,
      frules_hdidx = f_frules_hdidx frules_hdidx, frules_factgen = f_frules_factgen frules_factgen,
      gen_brule_concls=gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_gen_brule_concls f_gen_brule_concls = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -656,12 +853,15 @@ fun map_gen_brule_concls f_gen_brule_concls = map_current_ruledata
      frules = frules,
      frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
      gen_brule_concls=f_gen_brule_concls gen_brule_concls,
-     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts})
+     lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_lthy_transforms f_lthy_transforms = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -671,13 +871,16 @@ fun map_lthy_transforms f_lthy_transforms = map_current_ruledata
      frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
      gen_brule_concls=gen_brule_concls,
      lthy_transforms = f_lthy_transforms lthy_transforms,
-     lthy_transform_log = lthy_transform_log, new_facts=new_facts})
+     lthy_transform_log = lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
 
 fun map_lthy_transforms_log f_lthy_transform_log =
   Local_Theory.target (Context.proof_map (map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
-       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts} =>
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -688,8 +891,47 @@ fun map_lthy_transforms_log f_lthy_transform_log =
      gen_brule_concls=gen_brule_concls,
      lthy_transforms = lthy_transforms,
      lthy_transform_log = f_lthy_transform_log lthy_transform_log,
-     new_facts=new_facts})))
+     new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})))
+
+fun map_constraint_propag_rules_hdidx f = map_current_ruledata
+  (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
+       facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+    {rules=rules, judgements=judgements,
+     term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
+     comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
+     facts=facts, facts_lhs_idx=facts_lhs_idx,
+     depgraph=depgraph,
+     frules = frules, 
+     frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
+     gen_brule_concls=gen_brule_concls,
+     lthy_transforms=lthy_transforms,
+     lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx = f constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
  
+fun map_constraint_simp_rules_hdidx f = map_current_ruledata
+  (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
+       facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+    {rules=rules, judgements=judgements,
+     term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
+     comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
+     facts=facts, facts_lhs_idx=facts_lhs_idx,
+     depgraph=depgraph,
+     frules = frules, 
+     frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
+     gen_brule_concls=gen_brule_concls,
+     lthy_transforms=lthy_transforms,
+     lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx = f constraint_simp_rules_hdidx})
+
+
 fun get_lthy_transform_log lthy =
   let val {lthy_transform_log = log, ...} =
     get_current_ruledata (Context.Proof (Local_Theory.target_of lthy))
@@ -709,10 +951,23 @@ fun get_the_run_state gctxt =
 fun map_run_state f = map_run_info (fn (running_expl_frules, running_on_thy_lvl, run_state) =>
   (running_expl_frules, running_on_thy_lvl, f run_state))
 fun set_run_state st2 = map_run_state (K st2)
-  (* we start unification variables at index 1 so that they are always distinct to matching variables *)
-fun init_run_state ctxt = SOME { outer_ctxt=ctxt, unifvar_cnt=1, delayed_unifs=[],
-  constraints=[], unifvar_inst=Vartab.empty}
- 
+fun init_run_state ctxt = SOME { outer_ctxt=ctxt, env=Envir.empty 1, delayed_unifs=[], constraints=[] }
+fun map_constraints_in_run_state f =
+  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints} =>
+    {outer_ctxt=outer_ctxt, env=env, delayed_unifs=delayed_unifs, constraints=f constraints}))
+fun map_env_in_run_state f =
+  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints} =>
+    {outer_ctxt=outer_ctxt, env=f env, delayed_unifs=delayed_unifs, constraints=constraints}))
+fun get_the_env_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state |> (fn { env, ... } => env)
+fun get_constraints_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state
+  |> (fn { constraints, ... } => constraints)
+fun get_delayed_unifs_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state
+  |> (fn { delayed_unifs, ... } => delayed_unifs)
+fun norm_with_env_in_run_state ctxt = Envir.norm_term (get_the_env_in_run_state ctxt)
+
+
+fun str_of_normed_term ctxt = Syntax.string_of_term ctxt o norm_with_env_in_run_state ctxt
+
 fun get_running_expl_frules ctxt =
   if can Local_Theory.assert ctxt then
      let val (_, _, (running_expl_frules, _, _)) =
@@ -776,6 +1031,12 @@ fun run_on_ctxt run gctxt =
      |> pop_running_on_thy |> Context.Theory
 
 
+fun get_assms gctxt = 
+  let val {assms, ...} = get_current_ruledata gctxt
+  in assms end
+fun set_assms assms = map_assms (K assms)
+
+
 fun get_judgements (gctxt : Context.generic) : judgements_type =
   let val {judgements, ...} = get_current_ruledata gctxt
   in judgements end
@@ -835,6 +1096,748 @@ fun decompose_judgement_cterm gctxt cprop =
 
 
 
+
+
+
+
+
+
+
+
+
+
+fun cert_standalone_term_inst thy tenv =
+  Vartab.dest tenv |> map (fn (ixn, (T, t)) => (Var (ixn, T), t) |> pairself (cterm_of thy))
+
+(* After matching we check if any unification variables have been instantiated
+   and fail then.  *)
+fun gen_pattern_matches_opt match ctxt (pat,  term) =
+  (let
+    val thy = Proof_Context.theory_of ctxt
+    val (tyenv, tenv) = match thy (pat, term) (Vartab.empty, Vartab.empty)
+    val Tinst = Vartab.dest tyenv |> map (fn (ixn, (sort, ty)) => ((ixn, sort), ty))
+    val inst = Vartab.dest tenv |> map (fn (ixn, (T, t)) => ((ixn, Envir.norm_type tyenv T), t))
+   in SOME (Tinst, inst) end)
+   (* NB: DecompPattern.decompose_match also raises Pattern.MATCH and not a distinct exception *)
+  handle Pattern.MATCH => NONE
+
+fun gen_pattern_match_opt match ctxt (pat, term) =
+  gen_pattern_matches_opt (fn thy => fn ([pat'], [term']) => match thy (pat', term')) ctxt ([pat], [term])
+
+
+(* nimmt beta-normale HO-Patterns pat und term an, eta-expandiert on-the-fly
+   BTW: Typen von pat, term werden von Pattern.match selbst gematcht *)
+val pattern_match_opt = gen_pattern_match_opt Pattern.match
+val pattern_matches_opt =
+  let fun match thy (pats, terms) = fold (Pattern.match thy) (pats ~~ terms)
+  in gen_pattern_matches_opt match end
+fun cpattern_matches_opt ctxt (cpats, cterms) =
+  ([], []) |> fold (fn (cpat, cterm) => fn inst =>
+      let
+        val (cpat', cterm') = (cpat, cterm) |> pairself (Thm.instantiate_cterm inst)
+        val inst2 = Thm.match (cpat', cterm')
+      in (fst inst @ fst inst2, snd inst @ snd inst2) end)
+    (cpats ~~ cterms)
+  |> SOME
+  handle Pattern.MATCH => NONE
+fun cpattern_match_opt ctxt (cpat, cterm) = cpattern_matches_opt ctxt ([cpat], [cterm])
+  
+
+val decompose_pattern_match_opt = gen_pattern_match_opt DecompPattern.decompose_match
+
+fun cert_inst thy (Tinst, inst) =
+  (Tinst |> map ((fn ((ixn, S), T) => (TVar (ixn, S), T)) #> pairself (ctyp_of thy)),
+   inst |> map ((fn ((ixn, T), t) => (Var (ixn, T), t)) #> pairself (cterm_of thy)))
+
+fun no_lambdas (t1 $ t2) = no_lambdas t1 andalso no_lambdas t2
+  | no_lambdas (Abs(_,_,_)) = false
+  | no_lambdas _ = true
+
+(* TODO(opt): decomposing pattern matching mit cterm verwaltung *)
+fun cdecompose_pattern_match_opt ctxt (cpat, cterm) =
+  (* TODO: nimmt die einfache Semantik von decompose pattern matching an,
+      ohne Verschraenkung von first-order und higher-order pattern matching *)
+  (* der no_lambdas Fall ist 70-80 Mal haeufiger *)
+  if no_lambdas (Thm.term_of cpat) then (* so no implicit eta expansion of cterm can happen *)
+    cpattern_match_opt ctxt (cpat, cterm)
+  else
+    decompose_pattern_match_opt ctxt (Thm.term_of cpat, Thm.term_of cterm)
+    |> Option.map (cert_inst (Proof_Context.theory_of ctxt))
+
+
+
+fun pattern_fun_to_env_mapper f input env =
+  let val (tyenv2, tenv2) = f input (Envir.type_env env, Envir.term_env env)
+  in Envir.Envir { maxidx = Envir.maxidx_of env, tenv = tenv2, tyenv = tyenv2 } end
+
+(* normation of inputs is necessary now (compared to old metarec) because we don't
+   keep terms fully normed per default anymore and Pattern.match does not norm while
+   analysing terms *)
+fun gen_pattern_match_envctxt match norm ctxt (pat0, term0) =
+  (let 
+    val { outer_ctxt, env, delayed_unifs, constraints } =
+      case get_run_state (Context.Proof ctxt) of
+        SOME st => st
+      | NONE => error ("decompose_pattern_match_envctxt: no run state set")
+
+    val (pat, term) = pairself (norm ctxt) (pat0, term0)
+    val env2 = env
+      |> pattern_fun_to_env_mapper (match (Proof_Context.theory_of ctxt))
+           (pat, term)
+
+    val env3 =
+      if null (inter (op =) (Term.add_vars pat []) (Term.add_vars term []))
+         andalso null (inter (op =) (Term.add_tvars pat []) (Term.add_tvars term []))
+      then (* NB: cyclic env2 can only arise if pat, term have vars or tvars in common *)
+        env2
+      else
+        let
+          (* occurs check and removing self-loops of instantiation.
+             necessary because of different notion of variable identity in the matching algorithm *)
+          val bad_Tvar_insts = Envir.type_env env2 |> Vartab.dest
+            |> filter (fn (ixn, (S, T')) =>
+                 case try Term.dest_TVar T' of
+                   SOME (ixn2, _) => ixn = ixn2
+                 | NONE =>
+                     if member (op =) (Term.add_tvarsT T' [] |> map fst) ixn then
+                       raise Pattern.MATCH
+                     else false)
+          val tyenv3 = Envir.type_env env2 |> fold (Vartab.delete o fst) bad_Tvar_insts
+          val bad_var_insts = Envir.term_env env2 |> Vartab.dest
+            |> filter (fn (ixn, (T, t')) =>
+                 case try Term.dest_Var (Envir.eta_contract t') of
+                   SOME (ixn2, _) => ixn = ixn2
+                 | NONE =>
+                     if member (op =) (Term.add_vars t' [] |> map fst) ixn then
+                       let val _ = tracing ("gen_pattern_match_envctxt: occurs check because matching "
+                         ^" produced "^Syntax.string_of_term ctxt (Var(ixn, T))^" := "
+                         ^Syntax.string_of_term ctxt t')
+                       in raise Pattern.MATCH end
+                     else false)
+          val tenv3 = Envir.term_env env2 |> fold (Vartab.delete o fst) bad_var_insts
+        in
+          Envir.Envir { maxidx = Envir.maxidx_of env2, tenv = tenv3, tyenv = tyenv3 }
+        end
+  in
+    ctxt |> Context.proof_map (set_run_state (SOME
+      { outer_ctxt=outer_ctxt, env=env3, delayed_unifs=delayed_unifs, constraints=constraints }))
+    |> SOME
+  end)
+  handle Pattern.MATCH => NONE
+
+val pattern_match_envctxt =
+  gen_pattern_match_envctxt Pattern.match norm_with_env_in_run_state
+fun pattern_matches_envctxt ctxt (pats, terms) =
+  SOME ctxt |> fold (fn (pat, term) => fn ctxt_opt =>
+      case ctxt_opt of
+        SOME ctxt_ => pattern_match_envctxt ctxt_ (pat, term)
+      | NONE => NONE)
+    (pats ~~ terms)
+val decompose_pattern_match_envctxt =
+  gen_pattern_match_envctxt DecompPattern.decompose_match norm_with_env_in_run_state
+
+
+fun pattern_unifies thy (t1, t2) =
+  (let
+    val t1_maxidx = Term.maxidx_term t1 (~1)
+      (* disjointify vars *)
+    val t2' = Logic.incr_indexes ([], t1_maxidx+1) t2
+    val maxidx = ~1 |> fold Term.maxidx_term [t1, t2']
+    val (tyenv, maxidx2) = Sign.typ_unify thy (fastype_of t1, fastype_of t2') (Vartab.empty, maxidx)
+    val env0 = Envir.Envir {maxidx = maxidx2, tenv = Vartab.empty, tyenv = tyenv}
+  in
+    (Pattern.unify thy (t1, t2') env0; true)
+  end)
+    handle Pattern.Unif => false
+         | Type.TUNIFY => false
+
+fun unifies thy (t1, t2) =
+  let
+    val t1_maxidx = Term.maxidx_term t1 (~1)
+      (* disjointify vars *)
+    val t2' = Logic.incr_indexes ([], t1_maxidx+1) t2
+    val maxidx = ~1 |> fold Term.maxidx_term [t1, t2']
+    val (tyenv, maxidx2) = Sign.typ_unify thy (fastype_of t1, fastype_of t2') (Vartab.empty, maxidx)
+    val env0 = Envir.Envir {maxidx = maxidx2, tenv = Vartab.empty, tyenv = tyenv}
+  in
+    case Seq.pull (Unify.unifiers (thy, env0, [(t1, t2')])) of
+      SOME _ => true
+    | NONE => false
+  end
+
+
+
+
+exception TryPatUnify of Proof.context * (term * term) * string
+
+
+fun try_pat_unify ctxt (t1, t2) env =
+  let
+    fun unif_failed () = raise TryPatUnify(ctxt, (t1, t2), "try_pat_unify: pattern unification of "
+          ^str_of_normed_term ctxt t1^" and "^str_of_normed_term ctxt t2^" failed")
+  in
+    let
+      val thy = Proof_Context.theory_of ctxt
+      val (tyenv2, maxidx2) = (Envir.type_env env, Envir.maxidx_of env)
+        |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
+      val env2 = Envir.Envir { maxidx = maxidx2, tenv = Envir.term_env env, tyenv = tyenv2 }
+      val env3 = Pattern.unify thy (t1, t2) env2
+
+    in
+      SOME env3
+    end
+      handle
+          Pattern.Pattern => NONE
+        | Pattern.Unif => unif_failed ()
+        | Type.TUNIFY => unif_failed ()
+  end
+
+fun try_solve_delayed_unifs ctxt delayed_unifs env =
+   ([], env)
+   |> fold (fn (t1_, t2_) => fn (sd_ufs, env_) =>
+          case try_pat_unify ctxt (t1_, t2_) env_ of
+            SOME env_2 => (sd_ufs, env_2)
+          | NONE => (cons (t1_, t2_) sd_ufs, env_))
+        delayed_unifs
+
+
+
+
+
+
+fun check_same_prior l =
+  let
+    fun aux prio ((_, prio') :: l') = prio = prio' andalso aux prio l'
+      | aux prio [] = true
+  in
+    case l of
+      [] => true
+    | (_, prio) :: l' => aux prio l'
+  end
+  
+
+fun order_by_priority l =
+  if check_same_prior l then
+    l |> map fst
+  else
+    (* TODO(opt): waere zB insertion sort schneller weil Listen klein? *)
+    l |> sort (fn ((_, prio1), (_, prio2)) => rev_order (int_ord (prio1, prio2))) |> map fst
+
+
+
+
+
+fun prop_of_rule ctxt (DirectRule th) = prop_of th
+  | prop_of_rule ctxt (LocalRule proofp) =
+      norm_with_env_in_run_state ctxt (prop_of_proofp proofp)
+
+
+
+
+
+(* TODO(opt):
+     macht es Sinn nur die letzten n Regeln-Tracing-Closures auf dem Trace
+     zu haben damit die anderen GC'ed werden koennen?
+     Aber die werden dann ja von weiter oben im Call-Stack referenziert???
+*)
+fun gen_add_to_trace trace_sel trace_depth_sel updater newobj =
+  Context.proof_map (fn gctxt =>
+    let
+      val {trace, trace_depth, ...} = get_current_ruledata gctxt
+      val my_trace = trace_sel trace
+      val my_trace' = newobj :: my_trace |> take (trace_depth_sel trace_depth)
+    in
+      gctxt |> map_trace (updater my_trace')
+    end)
+fun add_to_rule_trace rule = gen_add_to_trace fst fst (fn new => apfst (K new)) rule
+fun add_to_msg_trace msg = gen_add_to_trace snd snd (fn new => apsnd (K new)) msg
+
+
+fun compose_err_from_trace ctxt msg =
+  let val {trace=(rule_trace, msg_trace), trace_depth=(rule_trace_depth, msg_trace_depth), ...} =
+    get_current_ruledata (Context.Proof ctxt)
+  in
+    (msg
+     ^"\n\nrule trace is\n"
+       ^cat_lines (take rule_trace_depth rule_trace |> map (fn t_delayed =>
+         "\n"^str_of_normed_term ctxt (t_delayed ())))
+     ^"\n\nmessage trace is\n"
+       ^cat_lines (take msg_trace_depth msg_trace |> map (fn msg => msg ())))
+  end
+fun err_with_trace ctxt msg = error (compose_err_from_trace ctxt msg)
+
+ (* NB: d.h. suche Fakten die gegen pat *matchen*, weil Fakten Var-frei *)
+fun lookup_facts gctxt pat = 
+  let val {facts, ...} = get_current_ruledata gctxt
+  in
+    Net.unify_term facts (Envir.eta_contract pat)
+    |> filter (fn fact' => Pattern.matches (Context.theory_of gctxt) (pat, Thm.prop_of fact'))
+  end
+
+fun gen_msg_with_facts ctxt msg =
+  let val {facts, rules, ...} = get_current_ruledata (Context.Proof ctxt)
+  in
+    (msg
+      ^"\n\n========================================================"
+      ^"\ncurrent facts are:\n"
+      ^cat_lines (Net.content facts |> map (Display.string_of_thm ctxt))
+      ^"\n\n========================================================"
+      ^"\ncurrent rules are:\n"
+      ^cat_lines (Symtab.dest rules |> maps (snd #> Item_Net2.content
+         #> map (fst #> prop_of_rule ctxt #> Syntax.string_of_term ctxt))))
+   end
+fun err_with_facts ctxt msg = error (gen_msg_with_facts ctxt msg)
+fun err_with_trace_and_facts ctxt msg =
+  error (gen_msg_with_facts ctxt (compose_err_from_trace ctxt msg))
+fun trace_with_facts ctxt msg = tracing (gen_msg_with_facts ctxt msg)
+
+
+
+fun wrapper_const name args = 
+  let val Ts = map fastype_of args
+  in list_comb (Const(name, Ts ---> Data.prf_displayT), args) end
+
+fun prf_to_display_term ctxt prfp =
+  let
+    val norm = norm_with_env_in_run_state ctxt
+    fun normT T = norm (Free("dummy", T)) |> fastype_of
+
+    fun transf (Assumption t) = wrapper_const "Hyp" [norm t]
+      | transf (AllI ((x, T), prf)) =
+          wrapper_const "AllI" [norm (Free (x, T)), transf prf]
+      | transf (ImpI (t, prf)) =
+          wrapper_const "ImpI" [norm t, transf prf]
+      | transf (ThmPrf (th, Tinst, inst)) =
+          let
+            val Tinst' = map (apsnd normT) Tinst
+            val inst' = map (apfst (apsnd normT) #> apsnd norm) inst
+            fun inst_to_str (str1, str2) = str1 ^ " := " ^ str2
+            (* val _ = tracing ("prf_to_display_term: instantiating theorem "^Display.string_of_thm ctxt th
+              ^" with\n  "
+              ^commas ((Tinst' |> map (fn (ixnS, T') => pairself (Syntax.string_of_typ ctxt) (TVar ixnS, T') |> inst_to_str))
+                @ (inst' |> map (fn (ixnT, t') => pairself (Syntax.string_of_term ctxt) (Var ixnT, t') |> inst_to_str)))) *)
+          in
+            wrapper_const "Thm"
+            [ th |> Thm.instantiate (Thm.certify_inst (Proof_Context.theory_of ctxt) (Tinst', inst'))
+              |> prop_of ]
+          end
+      | transf (MP (prf1, prf2)) =
+          Data.app_prf_displayt (transf prf1) (transf prf2)
+      | transf (AllE (prf, t)) =
+          Data.app_prf_displayt (transf prf) (norm t)
+    fun err msg = err_with_trace ctxt ("prf_to_display_term: failed while transforming proof of "
+      ^str_of_normed_term ctxt (prop_of_proofp prfp)
+      ^":\n"^msg)
+
+  in
+    transf (proof_of_proofp prfp)
+    handle
+      THM(msg, _, _) => err ("THM: "^msg)
+    | TERM(msg, _) => err ("TERM: "^msg)
+    | TYPE(msg, _, _) => err ("TYPE: "^msg)
+  end
+
+
+
+
+
+
+(* TODO(opt): if we combine Thm-proofs, generate a new Thm-proof directly.
+   Convert assumption_prf with ground proposition prop to Thm-proof of Thm.assume prop directly. *)
+
+fun genvar_on_run_state name T ctxt =
+  let
+    val {outer_ctxt, env, delayed_unifs, constraints} =
+      case get_run_state (Context.Proof ctxt) of
+        SOME st => st
+      | NONE => err_with_trace ctxt ("fresh_thm_prf: no run state set")
+    val (env2, v) = Envir.genvar name (env, T)
+    val ctxt2 = ctxt |> Context.proof_map (set_run_state (SOME {outer_ctxt=outer_ctxt, env=env2,
+      delayed_unifs=delayed_unifs, constraints=constraints}))
+  in
+    (v, ctxt2)
+  end
+
+
+fun fresh_thm_prf th ctxt =
+  let
+    val {outer_ctxt, env, delayed_unifs, constraints} =
+      case get_run_state (Context.Proof ctxt) of
+        SOME st => st
+      | NONE => err_with_trace ctxt ("fresh_thm_prf: no run state set")
+
+    val tvars = Term.add_tvars (prop_of th) [] |> rev
+    val (tvars', ctxt2) = ctxt |> fold_map (fn ((n, _), S) =>
+        genvar_on_run_state n (Term.aT []) #>> (fn Var(ixn', _) => TVar(ixn', S)))
+      tvars
+
+    val tvars_inst = tvars ~~ tvars'
+    val instT = (Term_Subst.instantiateT tvars_inst)
+
+    val vars = Term.add_vars (prop_of th) [] |> rev
+    val vars' = (vars |> map (apsnd instT))
+    val (vars'', ctxt3) = ctxt2 |> fold_map (fn ((n, _), T') =>
+      genvar_on_run_state n T') vars'
+
+    val vars_inst = vars' ~~ vars''
+  in
+    (ProofPack (Term_Subst.instantiate (tvars_inst, vars_inst) (prop_of th),
+       ThmPrf (th, tvars_inst, vars_inst), []),
+     ctxt3)
+  end
+
+
+(* NB: using non-ground theorems requires need that th has to instantiated wrt.
+     to the current env !
+   since Isabelle resolution (also OF in matching-use) can rename unification variables
+     it is easy to make mistakes here *)
+fun unsafe_exact_thm_prf th =
+  let 
+    val prop = prop_of th
+    val tvars = Term.add_tvars prop [] |> rev
+    val vars = Term.add_vars prop [] |> rev
+  in
+    ProofPack (prop,
+     ThmPrf (th, tvars |> map (fn v => (v, TVar v)), vars |> map (fn v => (v, Var v))),
+     Thm.hyps_of th)
+  end
+
+fun grnd_exact_thm_prf th =
+  let
+    val prop = prop_of th
+    val tvars = Term.add_tvars prop [] |> rev
+    val vars = Term.add_vars prop [] |> rev
+    val _ =
+      if null vars andalso null tvars then ()
+      else error ("grnd_exact_thm_prf on non-ground theorem "
+        ^Display.string_of_thm_global (Thm.theory_of_thm th) th)
+  in unsafe_exact_thm_prf th end
+
+
+(* with smart constructors for LCF-style on-construction checking *)
+fun assumption_prf t = ProofPack (t, Assumption t, [t])
+
+fun allI_prf ctxt (x, T) (ProofPack (prop, prf, assms)) =
+  let
+    val env = get_the_env_in_run_state ctxt
+    val norm = norm_with_env_in_run_state ctxt
+    val normT = Envir.norm_type (Envir.type_env env)
+    val free = Free (x, normT T)
+  in
+    case assms |> find_first (fn assm => member (op =) (Term.add_frees (norm assm) []) (x, normT T)) of
+      SOME bad_assm =>
+        err_with_trace ctxt ("internal error: fix over "^Syntax.string_of_term ctxt free^" failed: "
+          ^"assumption "^str_of_normed_term ctxt bad_assm^" contains it")
+    | NONE =>
+        (* NB: we have to norm T and prop because prop can contain matching
+           variables of rules that have been instantiated already (and matching
+           variables are not lifted over the fixes, so no chance for abstracting then!) *)
+        ProofPack (Logic.all free (norm prop), AllI ((x,T), prf), assms)
+  end
+
+
+fun impI_prf ctxt t (ProofPack (prop, prf, assms)) =
+  let
+    val norm = norm_with_env_in_run_state ctxt
+  in 
+    ProofPack (Logic.mk_implies (t, prop), ImpI (t, prf), assms |> remove (aconv_norm norm) t)
+  end
+
+
+(* NB: no global substitution of prop1 before implication check *)
+fun mp_prf ctxt (prfp1 as ProofPack (prop1, prf1, assms1)) (prfp2 as ProofPack (prop2, prf2, assms2)) =
+  let
+    val (prop11, prop12) = Logic.dest_implies prop1
+      handle TERM _ => err_with_trace ctxt ("internal error: MP failed: prop1 is not an implication "
+        ^str_of_normed_term ctxt prop1)
+    val norm = norm_with_env_in_run_state ctxt
+  in
+    if prop11 aconv prop2 orelse aconv_norm norm (prop11, prop2) then
+      ProofPack (prop12, MP (prf1, prf2), assms1 |> union (aconv_norm norm) assms2)
+    else
+      let
+        val prf1_t = prf_to_display_term ctxt prfp1
+        val prf2_t = prf_to_display_term ctxt prfp2
+      in
+        err_with_trace ctxt ("internal error: MP failed: premise of prop1 is not the same as prop2:\n"
+          ^str_of_normed_term ctxt prop1
+          ^"\n"^str_of_normed_term ctxt prop2
+          ^"\n\nproofs are\n"
+          ^str_of_normed_term ctxt prf1_t
+          ^"\nand\n"^str_of_normed_term ctxt prf2_t)
+      end
+  end
+
+fun mp_rev_prf ctxt proofp1 proofp2 = mp_prf ctxt proofp2 proofp1
+
+(* NB: no global substitution of prop1 before forall check *)
+fun allE_prf ctxt (ProofPack (prop, prf, assms)) t =
+  case prop of
+    Const ("all", _) $ (bodyabs as Abs (_, T, _)) =>
+      let
+        val T2 = fastype_of t
+        val env = get_the_env_in_run_state ctxt
+        val normty = Envir.norm_type (Envir.type_env env)
+      in
+        if T = T2 orelse normty T = normty T2 then
+          ProofPack (Term.betapply (bodyabs, t), AllE (prf, t), assms)
+        else
+          err_with_trace ctxt ("internal error: AllE failed: forall proposition of wrong type "
+            ^Syntax.string_of_typ ctxt (normty T)
+            ^" and argument has type "^Syntax.string_of_typ ctxt (normty T2)
+            ^"\nproposition is: "^str_of_normed_term ctxt prop)
+      end
+  | _ =>
+    err_with_trace ctxt ("internal error: AllE failed: not a (eta-expanded) forall: "
+      ^str_of_normed_term ctxt prop)
+
+fun allE_rev_prf ctxt t prf = allE_prf ctxt prf t
+
+
+
+fun fresh_proofp_of_rule (DirectRule th) ctxt = fresh_thm_prf th ctxt 
+  | fresh_proofp_of_rule (LocalRule proofp) ctxt =  
+      let
+        val quant_bounds = prop_of_proofp proofp |> Logic.strip_params
+        val (quant_vars, ctxt2) = ctxt |> fold_map (fn (n, T) => genvar_on_run_state n T) quant_bounds
+        val proofp' = proofp |> fold (allE_rev_prf ctxt2) quant_vars
+      in
+        (proofp', ctxt2)
+      end
+
+
+
+
+
+fun mp_match_prf (proofp1 as (ProofPack (prop1, _, _))) (proofp2 as (ProofPack (prop2, _, _))) ctxt =
+  let
+    val (prop11, prop12) = Logic.dest_implies prop1
+      handle TERM _ => err_with_trace ctxt ("internal error: MP match failed: prop1 is not an implication "
+        ^str_of_normed_term ctxt prop1)
+  in
+    case pattern_match_envctxt ctxt (prop11, prop2) of
+      SOME ctxt2 => (mp_prf ctxt2 proofp1 proofp2, ctxt2)
+    | NONE => 
+        err_with_trace ctxt ("internal error: MP match failed: failed to match:\n"
+          ^str_of_normed_term ctxt prop11
+          ^"\nagainst  "^str_of_normed_term ctxt prop2)
+  end
+fun mps_match_prf prf prfs ctxt =
+  (prf, ctxt) |> fold (fn p => fn (prf_, ctxt_) => mp_match_prf prf_ p ctxt_) prfs
+
+fun mps_match_on_freshthm_prf th prfs ctxt =
+  let
+    val (prf1, ctxt2) = fresh_thm_prf th ctxt
+    val (res, ctxt3) = mps_match_prf prf1 prfs ctxt2
+  in
+    (res, ctxt3)
+  end
+
+fun inst_match_on_freshthm_prf th inst ctxt =
+  let
+    val (prf, ctxt2) = fresh_thm_prf th ctxt
+    val vars = Term.add_vars (prop_of_proofp prf) [] |> rev |> map Var
+  in
+    case pattern_matches_envctxt ctxt2
+      (vars, (inst ~~ vars |> map (fn (t_opt, var) => the_default var t_opt)))
+    of
+      SOME ctxt3 => (prf, ctxt3)
+    | NONE =>
+        err_with_trace ctxt2 ("internal error: inst_match_on_freshthm_prf failed on "
+          ^Display.string_of_thm ctxt2 th)
+  end
+
+
+val combination_thm = Thm.axiom @{theory} "Pure.combination"
+val reflexive_thm = Thm.axiom @{theory} "Pure.reflexive"
+
+fun combination_prf prf1 prf2 ctxt =
+  mps_match_on_freshthm_prf combination_thm [prf1, prf2] ctxt
+
+fun reflexive_prf t =
+  inst_match_on_freshthm_prf reflexive_thm [SOME t]
+
+fun fun_cong_prf prf t ctxt =
+  let val (refl_prf, ctxt2) = reflexive_prf t ctxt
+  in combination_prf prf refl_prf ctxt2 end
+
+
+
+
+(* TODO(opt): sharing of prf in resulting proofterms *)
+fun conj_extr_prfs prf ctxt =
+  let val prop = prop_of_proofp prf
+  in
+    case try Logic.dest_conjunction prop of
+      NONE => ([(prop, prf)], ctxt)
+    | SOME (prop1, prop2) =>
+        let
+          val (prf1, ctxt2) = mps_match_on_freshthm_prf Conjunction.conjunctionD1 [prf] ctxt
+          val (res1, ctxt3) = conj_extr_prfs prf1 ctxt2
+          val (prf2, ctxt4) = mps_match_on_freshthm_prf Conjunction.conjunctionD2 [prf] ctxt3
+          val (res2, ctxt5) = conj_extr_prfs prf2 ctxt4
+        in
+          (res1 @ res2, ctxt5)
+        end
+  end
+
+fun conj_concl_extr_prfs prf ctxt =
+  let
+    val prems = Logic.strip_imp_prems (prop_of_proofp prf)
+    val concl_prf = prf |> fold (mp_rev_prf ctxt o assumption_prf) prems
+    val (concl_ress, ctxt2) = conj_extr_prfs concl_prf ctxt
+    val disch_prf = fold_rev (impI_prf ctxt2) prems
+  in
+    (map (apsnd disch_prf) concl_ress, ctxt2)
+  end
+
+
+
+fun fold_terms_prf f ctxt prfp =
+  let
+    fun foldp (Assumption t) = f (norm_with_env_in_run_state ctxt t)
+      | foldp (AllI ((x, T), prf)) = f (Free(x, T)) #> foldp prf
+      | foldp (ImpI (t, prf)) =
+          f (norm_with_env_in_run_state ctxt t) #> foldp prf
+      | foldp (ThmPrf (th, Tinst, inst)) =
+          fold (f o norm_with_env_in_run_state ctxt)
+            (map (Logic.mk_type o snd) Tinst @ map snd inst)
+      | foldp (MP (prf1, prf2)) =
+          foldp prf1 #> foldp prf2
+      | foldp (AllE (prf, t)) =
+          foldp prf #> f (norm_with_env_in_run_state ctxt t)
+  in
+    f (norm_with_env_in_run_state ctxt (prop_of_proofp prfp))
+    #> foldp (proof_of_proofp prfp)
+  end
+
+val add_vars_prf = fold_terms_prf Term.add_vars
+val add_tvars_prf = fold_terms_prf Term.add_tvars
+fun declare_prf prfp ctxt = fold_terms_prf Variable.declare_term ctxt prfp ctxt
+
+
+
+(* TODO(opt): sharing of certified terms as they are shared in env *)
+fun replay_prf ctxt prfp =
+  let
+    val prf = proof_of_proofp prfp
+    val cert = cterm_of (Proof_Context.theory_of ctxt)
+    val certT = ctyp_of (Proof_Context.theory_of ctxt)
+
+    val vars = add_vars_prf ctxt prfp []
+    val tvars = add_tvars_prf ctxt prfp []
+    val ctxt2 = ctxt |> declare_prf prfp
+
+    (* TODO(correctness): if some fx_n ends with "_" we might get a problem with
+       Name.clean_index generating unexpecting variables
+       for the fixed frees in Term_Subst.generalize in Thm.generalize *)
+    val ((fxvar_ns, fxTvar_ns), _) = ctxt2
+      |> Variable.variant_fixes (map (fst #> fst) vars)
+      ||>> Variable.variant_fixes (map (fst #> fst) tvars)
+    val var_fixing = vars ~~ fxvar_ns
+    val tvar_fixing = tvars ~~ fxTvar_ns
+    val fxenv = Envir.merge (get_the_env_in_run_state ctxt2,
+      Envir.Envir { maxidx = 0, tenv = Vartab.empty,
+        tyenv = Vartab.empty |> fold (fn ((ixn, S), fx_n) =>
+          Vartab.update_new (ixn, (S, TFree(fx_n, S)))) tvar_fixing }
+      (* FIXME?: normalize T wrt tvar fixing env?
+         might be fine because of deep normalization in Envir.norm_term *)
+      |> fold (fn ((ixn, T), fx_n) => curry Envir.update ((ixn, T), (Free (fx_n, T)))) var_fixing)
+
+    val certnorm = cert o Envir.norm_term fxenv
+    val normT = Envir.norm_type (Envir.type_env fxenv)
+    val certnormT = certT o normT
+
+    fun replay (Assumption t) = Thm.assume (certnorm t)
+      | replay (AllI ((x, T), prf)) =
+        let val th = replay prf
+        in Thm.forall_intr (certnorm (Free (x, T))) th end
+      | replay (ImpI (t, prf)) =
+          let val th = replay prf
+          in Thm.implies_intr (certnorm t) th end
+      | replay (ThmPrf (th, Tinst, inst)) =
+          let
+            val cTinst = Tinst |> map (fn (v, T) => (certT (TVar v), certnormT T))
+            val cinst = inst |> map (fn (v, t) => (cert (Var (apsnd normT v)), certnorm t))
+          in
+            Thm.instantiate (cTinst, cinst) th |> beta_convert
+          end
+      | replay (MP (prf1, prf2)) =
+         let
+           (* TODO(opt): beta conversion necessary here if done at Assumption, ImpI, AllE proof replay? *)
+           val th1 = replay prf1 |> beta_convert
+           val th2 = replay prf2 |> beta_convert
+         in
+           Thm.implies_elim th1 th2
+         end
+      | replay (AllE (prf, t)) =
+          let
+            val th = replay prf
+          in
+            Thm.forall_elim (certnorm t) th |> beta_convert
+          end
+            
+
+    val th_fxd = replay prf
+      handle THM(msg, _, ths) => err_with_trace ctxt2 ("replay_prf: exception while replaying proof of "
+        ^str_of_normed_term ctxt2 (prop_of_proofp prfp)
+        ^":\n"^msg
+        ^"\n"^cat_lines (map (Display.string_of_thm ctxt2) ths)
+        ^"\n\nproof is\n"
+        ^str_of_normed_term ctxt2 (prf_to_display_term ctxt2 prfp))
+
+    val maxidx' = Thm.maxidx_of th_fxd + 1
+    val T_reinst = tvar_fixing |> map (fn ((ixn, S), fx_n) => (((fx_n, maxidx'), S), TVar(ixn, S)))
+    val reinstT = Term_Subst.instantiateT T_reinst
+
+    (* NB: if th_fxd has hyps containing tvar_fixing or var_fixing we get the
+         usual generaliziation exception here *)
+    val th = th_fxd
+      |> Thm.generalize (map snd tvar_fixing, map snd var_fixing) maxidx'
+      |> Thm.instantiate
+           (T_reinst |> map (fn (ixnS, T') => pairself certT (TVar ixnS, T')),
+             (* NB: T is already reinstantiated *)
+            var_fixing |> map (fn ((ixn, T), fx_n) => pairself cert (Var((fx_n, maxidx'), T), Var(ixn, T))))
+      handle THM(msg, _, _) => err_with_trace ctxt2 ("replay_prf: exception while instantiated replayed proof of "
+        ^str_of_normed_term ctxt2 (prop_of_proofp prfp)
+        ^":\n"^msg)
+  in
+    th
+  end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fun strip_alls ns t =
+  case t of
+    Const("all", _) $ (abs as Abs(n0, T, body)) =>
+      let
+        val (n, ns') = if null ns then (n0, []) else (hd ns, drop 1 ns)
+        val (x, fixed_body) = Term.dest_abs (n, T, body)
+        val fix = Free(x, T)
+      in
+        strip_alls ns' fixed_body |> apfst (cons fix)
+      end
+  | _ => ([], t)
+
+
 fun cdest_all n ct =
   case Thm.term_of ct of
     Const("all", _) $ Abs(_, _, _) =>
@@ -888,61 +1891,6 @@ val dest_try = dest_of_unary_propconst "dest_try" Data.try_const_name
 val dest_brule = dest_of_unary_propconst "dest_brule" Data.brule_const_name
 
 
-
-(* TODO(opt):
-     macht es Sinn nur die letzten n Regeln-Tracing-Closures auf dem Trace
-     zu haben damit die anderen GC'ed werden koennen?
-     Aber die werden dann ja von weiter oben im Call-Stack referenziert???
-*)
-fun gen_add_to_trace trace_sel trace_depth_sel updater newobj =
-  Context.proof_map (fn gctxt =>
-    let
-      val {trace, trace_depth, ...} = get_current_ruledata gctxt
-      val my_trace = trace_sel trace
-      val my_trace' = newobj :: my_trace |> take (trace_depth_sel trace_depth)
-    in
-      gctxt |> map_trace (updater my_trace')
-    end)
-fun add_to_rule_trace rule = gen_add_to_trace fst fst (fn new => apfst (K new)) rule
-fun add_to_msg_trace msg = gen_add_to_trace snd snd (fn new => apsnd (K new)) msg
-
-
-fun compose_err_from_trace ctxt msg =
-  let val {trace=(rule_trace, msg_trace), trace_depth=(rule_trace_depth, msg_trace_depth), ...} =
-    get_current_ruledata (Context.Proof ctxt)
-  in
-    (msg
-     ^"\n\nrule trace is\n"
-       ^cat_lines (take rule_trace_depth rule_trace |> map (fn th => "\n"^Display.string_of_thm ctxt (th ())))
-     ^"\n\nmessage trace is\n"
-       ^cat_lines (take msg_trace_depth msg_trace |> map (fn msg => msg ())))
-  end
-fun err_with_trace ctxt msg = error (compose_err_from_trace ctxt msg)
-
- (* d.h. suche Fakten die gegen pat matchen, weil Fakten Var-frei *)
-fun lookup_facts gctxt pat = 
-  let val {facts, ...} = get_current_ruledata gctxt
-  in
-    Net.unify_term facts (Envir.eta_contract pat)
-    |> filter (fn fact' => Pattern.matches (Context.theory_of gctxt) (pat, Thm.prop_of fact'))
-  end
-
-fun gen_msg_with_facts ctxt msg =
-  let val {facts, rules, ...} = get_current_ruledata (Context.Proof ctxt)
-  in
-    (msg
-      ^"\n\n========================================================"
-      ^"\ncurrent facts are:\n"
-      ^cat_lines (Net.content facts |> map (Display.string_of_thm ctxt))
-      ^"\n\n========================================================"
-      ^"\ncurrent rules are:\n"
-      ^cat_lines (Symtab.dest rules |> maps (snd #> Item_Net2.content
-         #> map (fst #> Display.string_of_thm ctxt))))
-   end
-fun err_with_facts ctxt msg = error (gen_msg_with_facts ctxt msg)
-fun err_with_trace_and_facts ctxt msg =
-  error (gen_msg_with_facts ctxt (compose_err_from_trace ctxt msg))
-fun trace_with_facts ctxt msg = tracing (gen_msg_with_facts ctxt msg)
 
 
 (* TODO(feature):
@@ -998,8 +1946,48 @@ fun add_coll_jud basejud colljudI triggerjud_opt =
 
 
 fun add_general_syn_proc jud proc_id proc = map_syn_procs (Symtab.update (jud, (proc_id, proc)))
-fun add_syn_proc jud proc_id proc = map_syn_procs (Symtab.update (jud, (proc_id,
-    (fn ctxt => fn fail_cont => fn input_terms => (proc ctxt input_terms, NONE)))))
+(* TODO(feature)?: allow unification variables in input but provide fixing/unfixing logic? *)
+fun add_syn_proc jud proc_id proc = add_general_syn_proc jud proc_id 
+    (fn ctxt => fn fail_cont => fn input_terms =>
+      let
+        val (pobj, iobjs, oobjs) = input_terms
+        (* TODO(opt): give uncertified inputs to normal synth procs? *)
+        val [[c_pobj], c_iobjs, c_oobjs] = [[pobj], iobjs, oobjs]
+          |> burrow (map (norm_with_env_in_run_state ctxt #> cterm_of (Proof_Context.theory_of ctxt)))
+        val ts = map Thm.term_of (c_pobj :: c_iobjs)
+        val vars = [] |> fold Term.add_vars ts
+        val tvars = [] |> fold Term.add_tvars ts
+        val _ =
+          if null vars andalso null tvars then ()
+          else
+            err_with_trace ctxt ("synthesis proc "^proc_id^" called on input terms\n  "
+              ^commas (map (Syntax.string_of_term ctxt) ts)
+              ^"\nwhich contain unification variables  "
+              ^commas (map (Syntax.string_of_term ctxt o Var) vars)
+              ^" and type unification variables "
+              ^commas (map (Syntax.string_of_typ ctxt o TVar) tvars))
+        val (th, out_cts) = proc ctxt (c_pobj, c_iobjs, c_oobjs)
+        (* val _ =
+          if null (Thm.hyps_of th) then ()
+          else
+            err_with_trace ctxt ("synthesis proc "^proc_id^" called on input terms\n  "
+              ^commas (map (Syntax.string_of_term ctxt) ts)
+              ^"\nreturned theorem with assumptions\n"
+              ^commas (Thm.hyps_of th |> map (Syntax.string_of_term ctxt))) *)
+
+        val vars' = Term.add_vars (prop_of th) []
+        val tvars' = Term.add_tvars (prop_of th) []
+        val _ = 
+          if null vars' andalso null tvars' then ()
+          else
+            err_with_trace ctxt ("synthesis proc "^proc_id^" called on input terms\n  "
+              ^commas (map (Syntax.string_of_term ctxt) ts)
+              ^"\nreturned theorem with vars and/or tvars\n"
+              ^commas (map (Syntax.string_of_term ctxt o Var) vars'
+                @ map (Syntax.string_of_typ ctxt o TVar) tvars'))
+      in
+        ((grnd_exact_thm_prf th, map Thm.term_of out_cts), NONE)
+      end)
 
 fun add_tactic_proc jid tac =
   let
@@ -1085,169 +2073,32 @@ fun abstr_inst (avail_vars, avail_tvars) =
     | _ => T))
 
 
-fun unif_vars_in t = Term.add_vars t [] |> filter (fn ((n, ix), T) => ix > 0)
 
 
-fun cert_standalone_term_inst thy tenv =
-  Vartab.dest tenv |> map (fn (ixn, (T, t)) => (Var (ixn, T), t) |> pairself (cterm_of thy))
-
-(* After matching we check if any unification variables have been instantiated
-   and fail then.  *)
-fun gen_pattern_matches_opt match ctxt (pat,  term) =
-  (let
-    val thy = Proof_Context.theory_of ctxt
-    val (tyenv, tenv) = match thy (pat, term) (Vartab.empty, Vartab.empty)
-    val Tinst = Vartab.dest tyenv |> map (fn (ixn, (sort, ty)) => ((ixn, sort), ty))
-    val _ = Vartab.dest tenv |> map (fn (ixn, (T, _)) =>
-      if null (unif_vars_in (Var(ixn, T))) then ()
-      else raise Pattern.MATCH)
-    val inst = Vartab.dest tenv |> map (fn (ixn, (T, t)) => ((ixn, Envir.norm_type tyenv T), t))
-   in SOME (Tinst, inst) end)
-   (* NB: DecompPattern.decompose_match also raises Pattern.MATCH and not a distinct exception *)
-  handle Pattern.MATCH => NONE
-
-fun gen_pattern_match_opt match ctxt (pat, term) =
-  gen_pattern_matches_opt (fn thy => fn ([pat'], [term']) => match thy (pat', term')) ctxt ([pat], [term])
-
-
-(* nimmt beta-normale HO-Patterns pat und term an, eta-expandiert on-the-fly
-   BTW: Typen von pat, term werden von Pattern.match selbst gematcht *)
-val pattern_match_opt = gen_pattern_match_opt Pattern.match
-val pattern_matches_opt =
-  let fun match thy (pats, terms) = fold (Pattern.match thy) (pats ~~ terms)
-  in gen_pattern_matches_opt match end
-fun cpattern_matches_opt ctxt (cpats, cterms) =
-  ([], []) |> fold (fn (cpat, cterm) => fn inst =>
-      let
-        val (cpat', cterm') = (cpat, cterm) |> pairself (Thm.instantiate_cterm inst)
-        val inst2 = Thm.match (cpat', cterm')
-        val _ = inst2 |> snd |> map (fn (cX, ct) =>
-          if null (Thm.term_of cX |> unif_vars_in) then ()
-          else raise Pattern.MATCH)
-      in (fst inst @ fst inst2, snd inst @ snd inst2) end)
-    (cpats ~~ cterms)
-  |> SOME
-  handle Pattern.MATCH => NONE
-fun cpattern_match_opt ctxt (cpat, cterm) = cpattern_matches_opt ctxt ([cpat], [cterm])
-  
-
-val decompose_pattern_match_opt = gen_pattern_match_opt DecompPattern.decompose_match
-
-fun cert_inst thy (Tinst, inst) =
-  (Tinst |> map ((fn ((ixn, S), T) => (TVar (ixn, S), T)) #> pairself (ctyp_of thy)),
-   inst |> map ((fn ((ixn, T), t) => (Var (ixn, T), t)) #> pairself (cterm_of thy)))
-
-fun no_lambdas (t1 $ t2) = no_lambdas t1 andalso no_lambdas t2
-  | no_lambdas (Abs(_,_,_)) = false
-  | no_lambdas _ = true
-
-(* TODO(opt): decomposing pattern matching mit cterm verwaltung *)
-fun cdecompose_pattern_match_opt ctxt (cpat, cterm) =
-  (* TODO: nimmt die einfache Semantik von decompose pattern matching an,
-      ohne Verschraenkung von first-order und higher-order pattern matching *)
-  (* der no_lambdas Fall ist 70-80 Mal haeufiger *)
-  if no_lambdas (Thm.term_of cpat) then (* so no implicit eta expansion of cterm can happen *)
-    cpattern_match_opt ctxt (cpat, cterm)
-  else
-    decompose_pattern_match_opt ctxt (Thm.term_of cpat, Thm.term_of cterm)
-    |> Option.map (cert_inst (Proof_Context.theory_of ctxt))
-
-
-fun pattern_unifies thy (t1, t2) =
-  (let
-    val t1_maxidx = Term.maxidx_term t1 (~1)
-      (* disjointify vars *)
-    val t2' = Logic.incr_indexes ([], t1_maxidx+1) t2
-    val maxidx = ~1 |> fold Term.maxidx_term [t1, t2']
-    val (tyenv, maxidx2) = Sign.typ_unify thy (fastype_of t1, fastype_of t2') (Vartab.empty, maxidx)
-    val env0 = Envir.Envir {maxidx = maxidx2, tenv = Vartab.empty, tyenv = tyenv}
+fun unlift_unifvar_occs t0 ctxt =
+  let val t = norm_with_env_in_run_state ctxt t0
   in
-    (Pattern.unify thy (t1, t2') env0; true)
-  end)
-    handle Pattern.Unif => false
-         | Type.TUNIFY => false
-
-fun unifies thy (t1, t2) =
-  let
-    val t1_maxidx = Term.maxidx_term t1 (~1)
-      (* disjointify vars *)
-    val t2' = Logic.incr_indexes ([], t1_maxidx+1) t2
-    val maxidx = ~1 |> fold Term.maxidx_term [t1, t2']
-    val (tyenv, maxidx2) = Sign.typ_unify thy (fastype_of t1, fastype_of t2') (Vartab.empty, maxidx)
-    val env0 = Envir.Envir {maxidx = maxidx2, tenv = Vartab.empty, tyenv = tyenv}
-  in
-    case Seq.pull (Unify.unifiers (thy, env0, [(t1, t2')])) of
-      SOME _ => true
-    | NONE => false
+    case Term.strip_comb t of
+      (v as Var(ixn as (n, _), T), ts) =>
+        if null ts then ctxt
+        else 
+          let
+            val T' = drop (length ts) (binder_types T) ---> body_type T
+            val (v', ctxt2) = genvar_on_run_state n T' ctxt
+            (* ts do not occur in v' of course, so this corresponds to unlifting *)
+            val v'_abs = v' |> fold_rev Term.lambda ts
+          in
+            ctxt2 |> Context.proof_map (map_env_in_run_state (curry Envir.update ((ixn, T), v'_abs)))
+          end
+    | (Abs(_, _, t2), []) => unlift_unifvar_occs t2 ctxt
+    | (a, ts) => ctxt |> fold unlift_unifvar_occs ts
   end
 
 
 
 
-exception TryPatUnify of Proof.context * (term * term) * string
 
 
-fun try_pat_unify ctxt (t1, t2) (unifvar_cnt, unifvar_inst) =
-  let
-    val thy = Proof_Context.theory_of ctxt
-
-      (* NB: while terms are always fully instantiated in metarec derivations we
-         want to accumulate a global instantiataion of course, so we do propagate
-         the term instantiation *)
-    val env = Envir.Envir {maxidx=unifvar_cnt, tenv=unifvar_inst, tyenv=Vartab.empty}
-    val (Envir.Envir {maxidx=unifvar_cnt2, tenv=unifvar_inst2, tyenv}) =
-      Pattern.unify thy (t1, t2) env
-
-    val _ =
-      if not (Vartab.is_empty tyenv) then
-        err_with_trace ctxt ("try_pat_unify: type variable instantiation is not empty after pattern unification")
-      else ()
-    (* TODO(opt): this is just a paranoia check for debugging *)
-    val _ = Vartab.dest unifvar_inst |> map (fn ((n, ix), (T, t)) =>
-      if ix = 0 then
-        err_with_trace ctxt ("try_pat_unify: internal error: unification instantiated a matching variable "
-          ^Syntax.string_of_term ctxt (Var ((n, ix), T)))
-      else
-        ())
-  in
-    SOME (unifvar_cnt2, unifvar_inst2)
-  end
-    handle
-        Pattern.Pattern => NONE
-      | Pattern.Unif => raise TryPatUnify(ctxt, (t1, t2), "try_pat_unify: pattern unification of "
-          ^Syntax.string_of_term ctxt t1^" and "^Syntax.string_of_term ctxt t2^" failed")
-
-
-fun try_solve_delayed_unifs ctxt delayed_unifs (unifvar_cnt, unifvar_inst) =
-   ([], (unifvar_cnt, unifvar_inst))
-   |> fold (fn (t1_, t2_) => fn (sd_ufs, (uv_cnt, uv_inst)) =>
-          case try_pat_unify ctxt (t1_, t2_) (uv_cnt, uv_inst) of
-            SOME (uv_cnt2, uv_inst2) => (sd_ufs, (uv_cnt2, uv_inst2))
-          | NONE => (cons (t1_, t2_) sd_ufs, (uv_cnt, uv_inst)))
-        delayed_unifs
-
-
-
-
-
-
-fun check_same_prior l =
-  let
-    fun aux prio ((_, prio') :: l') = prio = prio' andalso aux prio l'
-      | aux prio [] = true
-  in
-    case l of
-      [] => true
-    | (_, prio) :: l' => aux prio l'
-  end
-  
-
-fun order_by_priority l =
-  if check_same_prior l then
-    l |> map fst
-  else
-    (* TODO(opt): waere zB insertion sort schneller weil Listen klein? *)
-    l |> sort (fn ((_, prio1), (_, prio2)) => rev_order (int_ord (prio1, prio2))) |> map fst
 
 
 
@@ -1409,6 +2260,89 @@ fun pot_note_in_lthy fact ctxt =
 
 
 
+and add_assm_terms_internal assms0 ctxt =
+  let
+    val {judgements, term_to_jud, ...} = get_current_ruledata (Context.Proof ctxt)
+    val cert = cterm_of (Proof_Context.theory_of ctxt)
+
+    (* TODO(opt): assms0 are normalized already in the call from solve_prems *)
+    val assms = map (norm_with_env_in_run_state ctxt) assms0
+    val g_assms = filter ground assms
+    val ng_assms = filter_out ground assms
+
+    (* NB: nur fuer non-ground assms diesen Kontext-Extraktions-Hack machen damit
+        ground-assms die auch Fakten sind weiterhin im Fakten-Pool bleiben *)
+    (* TODO(opt): certification is slow here. can we do anything about this?
+         probably only if we can guarantee no implicit forward rules will match
+         on the ground assumption, so we don't have to add it via the normal
+         mechanism that expects thms *)
+    (* NB: discharge of these assumptions (which become hyps of the DirectRule ths)
+         happens in normal ImpI proof replay *)
+    val (g_assm_ths, ctxt2) = ctxt |> Assumption.add_assumes (map cert g_assms)
+    val ctxt3 = fold (add_assm false) g_assm_ths ctxt2
+
+    val ((ng_assms_fxd, thaw_th), ctxt4) = exact_freeze_props_thaw_thms ng_assms ctxt3
+    val (ng_assm_fxd_ths, ctxt5) = ctxt4 |> Assumption.add_assumes (map cert ng_assms_fxd)
+    val ctxt6 = fold (add_assm false) ng_assm_fxd_ths ctxt5
+
+
+    fun construct_local_rule R_th ctxt_ = 
+      let
+          (* as an optimization we only discharge the assumptions that have actually been used in the derivation of the rule *)
+        val rule_hyps = Thm.hyps_of R_th
+        val cassms_used = Assumption.local_assms_of ctxt6 ctxt3
+          |> filter (fn cassm_fxd => member (op aconv) rule_hyps (Thm.term_of cassm_fxd))
+
+          (* NB: vars (but no TVars) can be present in R_th because add_assm does Thm.forall_elim_vars *)
+          (* NB: loc_vars cannot occur in the cassms_used because they are ground *)
+        val loc_vars = Term.add_vars (prop_of R_th) []
+        val (loc_vars_fxns, ctxt_2) = ctxt_ |> Variable.variant_fixes (map (fst #> fst) loc_vars)
+        val loc_var_fixing = loc_vars ~~ loc_vars_fxns |> map (fn ((ixn, T), n') => (Var (ixn, T), Free(n', T)))
+
+        val R_th_disch = R_th
+          |> Drule.implies_intr_list cassms_used
+          |> Thm.instantiate ([], loc_var_fixing |> map (pairself (cterm_of (Proof_Context.theory_of ctxt_2))))
+          |> thaw_th
+
+        val assms_used_thawed = Thm.prems_of R_th_disch |> take (length cassms_used)
+        (* TODO(opt): if R_th_disch is of the form  P ==> P, then just give back the allI-closed assumption_prf P *)
+        (* NB: exact_thm_prf is safe here because thaw_th constructed theorem with instantation into current env *)
+        val prf = unsafe_exact_thm_prf R_th_disch
+          |> fold (mp_rev_prf ctxt3 o assumption_prf) assms_used_thawed
+          |> fold_rev (allI_prf ctxt_2) (map (snd #> Term.dest_Free) loc_var_fixing)
+      in
+        (LocalRule prf, ctxt_2)
+      end
+    
+    val {rules, ...} = get_current_ruledata (Context.Proof ctxt3)
+    val {rules=rules2, ...} = get_current_ruledata (Context.Proof ctxt6)
+      (* NB: we rely on the fact that the item net content is managed like a stack *)
+      (* TODO(opt): this is very slow?! *)
+    val new_rules = Symtab.dest rules2 |> maps (fn (jud_, itemnet) =>
+      Item_Net2.content itemnet |> rev |> drop (Symtab.lookup rules jud_ |> Option.map Item_Net2.content |> the_default [] |> length)
+      |> map (fn (ruleref, prior) => case ruleref of
+             DirectRule th => (th, jud_, prior)
+           | LocalRule prfp => err_with_trace ctxt6 ("add_assm_terms_internal: internal error: locally generated rule is not direct: "
+              ^Syntax.string_of_term ctxt6 (prop_of_proofp prfp))))
+  in
+    ctxt3
+    |> Context.proof_map (map_assms (append assms))
+    |> fold (fn (new_rule, rule_jud, prior) => fn ctxt_ =>
+        let
+          val (rule', ctxt_2) = construct_local_rule new_rule ctxt_
+        in
+          (* minor FIXME: we don't update the depgraph. this is already in anticipation of removal of
+               the automatic dependency tracking feature *)
+          (* NB: if a local rule gets instantiated further, we do not update the net indexing.
+             this is ok because the net matching will then just be more approximative than necessary *)
+          ctxt_2 |> Context.proof_map (map_rule_stuff
+            (Symtab.map_default (rule_jud, Item_Net2.init eq_for_net)
+              (* NB: the local rule rule' is normed wrt current run state, since assms are normed *)
+              (Item_Net2.cons (rule', prior) (rule_net_index judgements term_to_jud)))
+            I)
+        end)
+      new_rules
+  end
 
 (* TODO(semantics): dynamisch auf Wohlgeformtheit der entstehenden Metafunktion
      pruefen, dh zu jedem Atom und inputs gibt es hoechstens eine Annahme
@@ -1416,21 +2350,23 @@ fun pot_note_in_lthy fact ctxt =
 (* TODO(opt): add_fact auf lokale Fakten optimieren
      vllt auch nur dann als lokales Faktum hinzufuegen
      wenn das Judgement bestimmte Form hat? *)
+(* TODO(opt): wenn Annahme keine Unifikationsvariablen hat als thm reingeben
+   lassen und als DirectRule statt als LocalRule auffassen *)
 (* NB: darf zugruendeliegende thy des ctxts nicht veraendern,
     insbesondere auch keine declarations erlaubt (weil die checkpoints
     emittieren) *)
 and add_assm checked th ctxt =
   let
+    (* TODO: wenn assm quantifiziert ist und ausserdem Unifvar hat,
+         muessen wird es als lokale Regel betrachten bei deren Benutzung ihre
+         quantifizierte Variablen immer zu frischen Unifvar instantiiert werden
+         und die bereits bestehenden Unifvar geshared werden *)
     val rule =
       if null (Logic.strip_params (prop_of th)) then th
       else Thm.forall_elim_vars 0 th
     val prop = prop_of rule
-    val _ = unif_vars_in prop |> map (fn v =>
-      err_with_trace ctxt ("add_assm: rule contains non-zero Var "^Syntax.string_of_term ctxt (Var v)))
-    val (prems, concl) = Logic.strip_horn prop
     val is_rule = gen_check_rule checked checked ctxt prop |> is_some
-    val is_fact = is_rule andalso null prems andalso null (Term.add_vars concl [])
-      andalso null (Term.add_tvars concl [])
+    val is_fact = is_rule andalso null (Logic.strip_imp_prems prop) andalso ground prop 
     val frule_opt = 
       case Term.head_of prop of
         Const (n, _) =>
@@ -1440,7 +2376,6 @@ and add_assm checked th ctxt =
       | _ => NONE
 
     val ctxt' = ctxt
-      |> Context.proof_map (map_assms (cons th))
       |> (if is_fact then (* Fakten werden automatisch brules *)
             add_local_fact rule 
           else if is_rule then
@@ -1454,7 +2389,26 @@ and add_assm checked th ctxt =
   end
 
 
+(* prems are assumed to be ground
+   (therefore the replay of their proofs is possible without hyp discharge) *)
+(* NB: local forward rule execution works on ctxt with non-trivial instantiation in run-state
+   from surrounding metarec-state but ignores this instantiation because it should
+   not interfere with the instantiation calculated by solving the premises of the frule.
+   In particular the uninstantiated variables in locally generated brules should be
+   interpreted as generalization variables and not be accidentally instantiated from the
+   surrounding metarec state.  *)
+and solve_prems_standalone global_fail_cont local_fail_cont rule prems ctxt0 =
+  let
+    val run_st0_opt = get_run_state (Context.Proof ctxt0)
+    val ctxt = ctxt0 |> Context.proof_map (set_run_state (init_run_state ctxt0) #> set_assms [])
+    val (prfps, ctxt2) = solve_prems true true global_fail_cont local_fail_cont (prop_of rule) prems ctxt
+    val ths = map (replay_prf ctxt2) prfps
 
+    val env = get_the_env_in_run_state ctxt2
+    val ctxt3 = ctxt2 |> Context.proof_map (set_run_state run_st0_opt)
+  in
+    ((ths, env), ctxt3)
+  end
 
 (* prems have to be normal, rule is only used for printing *)
  (* ctxt is the thy-transferred version of ctxt0 corresponding to 
@@ -1462,12 +2416,12 @@ and add_assm checked th ctxt =
     NB: ctxt is not really propagated linearly here, everything starts from
       a theory transferred ctxt0, which is also the first output
  *)
-and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule prems ctxt0 =
+and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule_prop prems ctxt0 =
   let
     exception LocalFail of Proof.context * string
     exception GlobalFail of Proof.context * string
 
-    fun solve_prem prem (inst, ctxt) =
+    fun solve_prem prem ctxt =
       let
         val thy = Proof_Context.theory_of ctxt
         val gctxt = Context.Proof ctxt
@@ -1483,53 +2437,66 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                statt als  [| P1 ; P2 |] ==> C
                wenn P2 von P1 abhaengt
              BTW: C wird automatisch im um die Pi erweiterten Kontext gerewritet *)
-        val prem2 = Thm.instantiate_cterm inst prem
-          |> normalize_cterm ctxt
-        fun act_rule () = Thm.instantiate inst rule
-          |> normalize_withvars ctxt
+        val prem2 = norm_with_env_in_run_state ctxt prem
+        (* val _ = tracing ("solve_prem on "^Syntax.string_of_term ctxt prem2) *)
+        fun act_rule () = norm_with_env_in_run_state ctxt rule_prop
 
         (* TODO(tuning): use Subgoal.focus to prove prem
              but how to deal with implicit normalization?
                normalize prem2 instead!
              (will probably degrade performance, so not really a good idea?) *)
-        val params_raw = Logic.strip_params (Thm.term_of prem2)
+        val params_raw = Logic.strip_params prem2
         val (param_names, ctxt_rec0) = Variable.variant_fixes (map fst params_raw) ctxt 
-        val (params, prem2_body) = prem2 |> strip_alls_cterm param_names 
+        val (params, prem2_body) = prem2 |> strip_alls param_names 
           (* noetig weil durch Parameterfixierung non-Patterns entstehen *)
-        val param_lam_lift = fold_rev Thm.lambda params
-        val (prem2_assms, prem2_concl) = strip_horn_cterm prem2_body 
-        val (prem2_assm_ths, ctxt_rec1) = ctxt_rec0
+        val param_lam_lift = fold_rev Term.lambda params
+        val (prem2_assms, prem2_concl) = Logic.strip_horn prem2_body 
+        val ctxt_rec = ctxt_rec0
           (* necessary so that we can retrieve the types of fixes when generating unification variables: *)
-          |> fold (Variable.declare_constraints o Thm.term_of) params  
-          |> Assumption.add_assumes prem2_assms
-        val ctxt_rec = ctxt_rec1 |> fold (add_assm false) prem2_assm_ths
+          |> fold (Variable.declare_constraints) params  
+          |> add_assm_terms_internal prem2_assms
+
+        (* val _ = tracing ("solve_prems: declared constraints of "^commas (map (str_of_normed_term ctxt_rec) params)
+          ^" are "^(Variable.constraints_of ctxt_rec |> fst |> Vartab.dest |> filter (fn ((n, ix), _) => ix = ~1)
+            |> map (fn ((n, _), t) => Free(n,t) |> Syntax.string_of_term ctxt_rec) |> commas)) *)
 
         val (fail_ex, prem2_concl', pot_wrap_try) =
-          case try cdest_try prem2_concl of
-            SOME x => (LocalFail, x, fn th => Data.tryI OF [th])
-          | NONE => (GlobalFail, prem2_concl, I)
-        fun discharge th = 
-          th |> pot_wrap_try
-          |> Assumption.export false ctxt_rec ctxt
-          |> Drule.forall_intr_list params
-        fun extend_inst new_inst inst = inst
-          |> apfst (append (fst new_inst))
-          |> apsnd (append (snd new_inst))
+          case try dest_try prem2_concl of
+            SOME x => (LocalFail, x, mps_match_on_freshthm_prf Data.tryI o single)
+          | NONE => (GlobalFail, prem2_concl, pair)
+        fun discharge prf ctxt_ = 
+          let
+            val (prf2, ctxt_2) = (prf, ctxt_) |-> pot_wrap_try
+              handle THM (msg, _, _) => err_with_trace ctxt_
+                ("error while discharging proof of "^str_of_normed_term ctxt_ (prop_of_proofp prf))
+            val prf3 = prf2 |> fold_rev (impI_prf ctxt_2) prem2_assms
+            val prf4 = prf3 |> fold_rev (allI_prf ctxt_2 o Term.dest_Free) params
+            (* val _ = tracing ("discharging "^str_of_normed_term ctxt_2 (prop_of_proofp prf2)
+              ^"\n  (uninstantiated "^Syntax.string_of_term ctxt_2 (prop_of_proofp prf2)^")"
+              ^"\nunder "^commas (map (str_of_normed_term ctxt_2) (params @ prem2_assms))
+              ^"\n  (uninstantiated "^commas (map (Syntax.string_of_term ctxt_2) (params @ prem2_assms))^")"
+              ^"\ngives "^str_of_normed_term ctxt_2 (prop_of_proofp prf4)) *)
+          in
+            (prf4, ctxt_2)
+          end
 
         (* val _ = tracing ("solve_prems: prem2_concl' is "^
-          Syntax.string_of_term ctxt_rec (mark_eta_redexes (Thm.term_of prem2_concl'))) *)
+          Syntax.string_of_term ctxt_rec (mark_eta_redexes prem2_concl')) *)
       in
-        case decompose_judgement_cterm gctxt prem2_concl' of
+
+        (* TODO: we need to apply the global substitution to get a rigid head to decide the judgement *)
+        case decompose_judgement gctxt prem2_concl' of
           SOME (jid, (pobj_of_prem, iobjs_of_prem, oobj_pats_of_prem)) => 
             let
               (* val _ = tracing ("solve_prems: pobj_of_prem is "^
-                Syntax.string_of_term ctxt_rec (mark_eta_redexes (Thm.term_of pobj_of_prem))) *)
+                Syntax.string_of_term ctxt_rec (mark_eta_redexes pobj_of_prem)) *)
               val ctxt_rec' = add_to_rule_trace act_rule ctxt_rec
-              val ((disch_th, oobjs), disch_ctxt2) =
+              val ((disch_prf, oobjs), disch_ctxt2) =
                 (case Symtab.lookup syn_procs jid of
                   SOME (_, proc) =>
                     let
-                      val ((th, oobjs), st2_opt) = proc ctxt_rec' (fn ctxt => fn msg => raise fail_ex (ctxt, msg))
+                      (* val _ = tracing ("calling synproc on "^str_of_normed_term ctxt_rec' prem2_concl') *)
+                      val ((prf, oobjs), st2_opt) = proc ctxt_rec' (fn ctxt => fn msg => raise fail_ex (ctxt, msg))
                         (pobj_of_prem, iobjs_of_prem, oobj_pats_of_prem)
                       val _ =
                         if is_some st2_opt andalso allow_lthy_transf then
@@ -1542,8 +2509,9 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                           ctxt |> Context.proof_map (set_run_state st2_opt)
                         else
                           ctxt
+                      (* val _ = tracing ("synproc returned "^str_of_normed_term disch_ctxt2 (prop_of_proofp prf)) *)
                     in
-                      ((th, oobjs), disch_ctxt2)
+                      ((prf, oobjs), disch_ctxt2)
                     end
                 | NONE =>
                     (case Symtab.lookup lthy_transforms jid of
@@ -1552,19 +2520,26 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                           err_with_trace ctxt_rec' ("solve_prems: lthy transformation not allowed")
                         else if not (null params andalso null prem2_assms) then
                           err_with_trace ctxt_rec' ("solve_prems: lthy transformation under fixes or assumes not allowed")
+                        else if not (ground pobj_of_prem andalso forall ground iobjs_of_prem) then
+                          err_with_trace ctxt_rec' ("solve_prems: lthy transformation with arguments containing "
+                            ^"unification variables not allowed")
                         else if get_running_expl_frules ctxt then
-                          (* ctxt = ctxt_rec' weil keine Param oder Annahmen
+                          (* ctxt = ctxt_rec' (bis auf rule trace), weil keine Param oder Annahmen
                              ctxt ist eine lthy *)
                           let
-                            val lthy = ctxt
-                            val (res as (resth, _), lthy2) = lthy
-                              |> lthy_transform (pobj_of_prem, iobjs_of_prem)
+                            (* locally unsetting run state only for cleanness *)
+                            val lthy = ctxt |> Context.proof_map (set_run_state NONE) 
+                            val certnorm = norm_with_env_in_run_state ctxt
+                              #> cterm_of (Proof_Context.theory_of lthy)
+                            val ((resth, couts), lthy2) = lthy
+                              |> lthy_transform (certnorm pobj_of_prem, map certnorm iobjs_of_prem)
+                            val lthy3 = lthy2 |> Context.proof_map (set_run_state (get_run_state (Context.Proof ctxt)))
                           in
-                            (res, lthy2)
+                            ((grnd_exact_thm_prf resth, map Thm.term_of couts), lthy3)
                           end
                         else
                           err_with_trace ctxt_rec' ("solve_prems: expected local theory to do lthy transformation "
-                            ^quote lthy_transform_id^" on "^Syntax.string_of_term ctxt_rec (Thm.term_of prem2_concl'))
+                            ^quote lthy_transform_id^" on "^Syntax.string_of_term ctxt_rec prem2_concl')
                     | NONE =>
                         (* NB: recursive calls to solve_prems in metarec_worker are not
                             allowed to do lthy transformations; ctxt_rec' always contains generated
@@ -1573,54 +2548,59 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule 
                           (SOME (fn ctxt => fn msg => raise fail_ex (ctxt, msg)))
                           jid (pobj_of_prem, iobjs_of_prem)
                         ||> (fn ctxt2 => ctxt |> Context.proof_map (set_run_state (get_run_state (Context.Proof ctxt2))))))
-                |> (fn ((th, oobjs), disch_ctxt2) =>
+                |> (fn ((prf, oobjs), disch_ctxt2) =>
+                     let val (prf', disch_ctxt2') = discharge prf disch_ctxt2
+                     in
                      (* FIXME: wenn lthy transformation Local_Defs nutzt will man diese Assumptions nicht exporten! *)
-                     ((discharge th, map (normalize_cterm disch_ctxt2) oobjs), disch_ctxt2))
+                       ((prf', map (norm_with_env_in_run_state disch_ctxt2') oobjs), disch_ctxt2')
+                     end)
 
-              (* TODO(opt): if we don't instantiate the rule in metarec_worker before we solve its premises
-                   with solve_prems, we could restrict ourselves here to construct only the instantiation of
-                   unification variables that occur in the rule instantiation, oobjs and oobj_pats_of_prem.
-                   Performing the the rule instantiation via act_rule () seems a bit costly. *)
-              val new_inst1 = case get_run_state (Context.Proof disch_ctxt2) of
-                  SOME {unifvar_inst, ...} => ([], cert_standalone_term_inst thy unifvar_inst)
-                | NONE => ([], [])
-
-              val (oobj_pats_of_prem', oobjs') = (oobj_pats_of_prem, oobjs)
-                |> pairself (map (Thm.instantiate_cterm new_inst1 #> beta_norm_cterm))
-              val new_inst2 =
-                case cpattern_matches_opt disch_ctxt2 (map param_lam_lift oobj_pats_of_prem', map param_lam_lift oobjs') of
-                  SOME x => x
+              val disch_ctxt3 =
+                case pattern_matches_envctxt disch_ctxt2 (map param_lam_lift oobj_pats_of_prem, map param_lam_lift oobjs) of
+                  SOME disch_ctxt3 => disch_ctxt3
                 | NONE =>
                     let
                       val maker' = lookup_judgement_analyzer judgements jid |> the |> #2
-                      val t = maker' (Proof_Context.theory_of disch_ctxt2)
-                        (Thm.term_of pobj_of_prem, map Thm.term_of iobjs_of_prem, map Thm.term_of oobjs')
+                      val t = maker' (Proof_Context.theory_of disch_ctxt2) (pobj_of_prem, iobjs_of_prem, oobjs)
                     in
                       raise fail_ex (disch_ctxt2, "solve_prems: recursive synthesized judgement "  
                       ^"\n     "^Syntax.string_of_term disch_ctxt2 t
                       ^"\ndoes not match premise (with lifting parameters ["
-                        ^Library.commas (map (Syntax.string_of_term disch_ctxt2 o Thm.term_of) params)
-                      ^"])\n     "^Syntax.string_of_term disch_ctxt2 (Thm.term_of prem2_concl')
+                        ^Library.commas (map (Syntax.string_of_term disch_ctxt2) params)
+                      ^"])\n     "^Syntax.string_of_term disch_ctxt2 prem2_concl'
                       ^"\nof instantiated rule "
-                      ^"\n     "^Display.string_of_thm disch_ctxt2 (act_rule ())
-                      ^"\n\n raw oobjs: \n" ^cat_lines (map PolyML.makestring oobjs')
-                      ^"\n\n raw oobj_pats: \n"^cat_lines (map PolyML.makestring oobj_pats_of_prem'))
+                      ^"\n     "^Syntax.string_of_term disch_ctxt2 (act_rule ())
+                      ^"\n\n raw oobjs: \n" ^cat_lines (map PolyML.makestring oobjs)
+                      ^"\n\n raw oobj_pats: \n"^cat_lines (map PolyML.makestring oobj_pats_of_prem))
                     end
-               val inst3 = inst |> extend_inst new_inst1 |> extend_inst new_inst2
+
+              val _ =
+                if aconv_norm (norm_with_env_in_run_state disch_ctxt3) (prop_of_proofp disch_prf, prem) then ()
+                else
+                  ( tracing ("solve_prems: wanted to solve prem "
+                    ^str_of_normed_term disch_ctxt3 prem
+                    ^"\nbut constructed proof for\n"
+                    ^str_of_normed_term disch_ctxt3 (prop_of_proofp disch_prf)) ;
+
+                  err_with_trace ctxt_rec ("solve_prems: wanted to solve prem "
+                    ^str_of_normed_term disch_ctxt3 prem
+                    ^"\nbut constructed proof for\n"
+                    ^str_of_normed_term disch_ctxt3 (prop_of_proofp disch_prf)
+                    ^"\nproof is:\n"
+                    ^str_of_normed_term disch_ctxt3 (prf_to_display_term disch_ctxt3 disch_prf)))
+
+              (* val _ = tracing ("solved premise "^str_of_normed_term disch_ctxt3 prem) *)
             in
-              (disch_th, (inst3, disch_ctxt2))
+              (disch_prf, disch_ctxt3)
             end
         | NONE =>
             err_with_trace ctxt_rec ("solve_prems: not a known judgement in instantiated premise"
-                 ^"\n      "^Syntax.string_of_term ctxt_rec (Thm.term_of prem2_concl')
+                 ^"\n      "^Syntax.string_of_term ctxt_rec prem2_concl'
                  ^"\nof instantiated rule"
-                 ^"\n      "^Display.string_of_thm ctxt_rec (act_rule ()))
+                 ^"\n      "^Syntax.string_of_term ctxt_rec (act_rule ()))
       end
   in
-    (([],[]), ctxt0) |> fold_map solve_prem prems
-      (* TODO(opt): noch noetig wenn prem2 schon normalisiert wird ? *)
-    |-> (fn ths => fn (inst, ctxt') =>
-          (map (normalize ctxt') ths, (inst, ctxt')))
+    ctxt0 |> fold_map solve_prem prems
       handle
         LocalFail (ctxt, msg) => local_fail_cont ctxt msg
       | GlobalFail (ctxt, msg) => global_fail_cont ctxt msg
@@ -1636,7 +2616,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
     val gctxt = Context.Proof ctxt
     val {rules, judgements, ...} = get_current_ruledata gctxt
 
-    exception LocalFail
+    exception LocalFail of Proof.context * string
     exception GlobalFail of Proof.context * string
     val global_fail_cont =
       case global_fail_cont_opt of
@@ -1644,33 +2624,33 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
       | NONE => err_with_trace
 
     val _ =
-      if length iobjs = fst (get_judgement_mode gctxt jid)then ()
+      if length iobjs = fst (get_judgement_mode gctxt jid) then ()
       else err_with_trace ctxt ("metarec_worker: judgement "^quote jid
-         ^" has wrong number of input objects "^Library.commas (map (Syntax.string_of_term ctxt o Thm.term_of) iobjs))
+         ^" has wrong number of input objects "^Library.commas (map (Syntax.string_of_term ctxt) iobjs))
 
     val thy = Proof_Context.theory_of ctxt
-    val jud_cmatcher =
+    val jud_matcher =
       case lookup_judgement_analyzer judgements jid of
-        SOME (_, _, jud_cmatcher) => jud_cmatcher
+        SOME (jud_matcher, _, _) => jud_matcher
       | NONE => err_with_trace ctxt ("metarec_worker: judgment "^quote jid^" not known")
 
     val pot_rules = case Symtab.lookup rules jid of
         SOME inet =>
           Item_Net2.retrieve_match inet
-            (pack_pobj_iobjs (Thm.term_of pobj) (map Thm.term_of iobjs) |> Envir.eta_contract)
+            (pack_pobj_iobjs pobj iobjs |> Envir.eta_contract)
           |> order_by_priority
       | NONE => [] (* error ("metarec_worker: no rules registered for judgement "^quote jid) *)
 
     fun no_match failed_rules =
       let val no_match_msg =
         "metarec_worker: no matching rule for animation of judgement "
-        ^quote jid^" for primary object\n"^Syntax.string_of_term ctxt (Thm.term_of pobj)
-         ^"\nand further inputs\n"^cat_lines (map (Syntax.string_of_term ctxt o Thm.term_of) iobjs)
+        ^quote jid^" for primary object\n"^Syntax.string_of_term ctxt pobj
+         ^"\nand further inputs\n"^cat_lines (map (Syntax.string_of_term ctxt) iobjs)
          ^(if null failed_rules then
              ""
            else
-             "\nfailed rules:\n"^cat_lines (map (Display.string_of_thm ctxt) failed_rules))
-         ^"\npotential rules:\n"^cat_lines (map (Display.string_of_thm ctxt) pot_rules)
+             "\nfailed rules:\n"^cat_lines (map (Syntax.string_of_term ctxt o prop_of_proofp) failed_rules))
+         ^"\npotential rules:\n"^cat_lines (map (Syntax.string_of_term ctxt o prop_of_rule ctxt) pot_rules)
       in
         raise GlobalFail (ctxt, no_match_msg)
       end
@@ -1679,70 +2659,105 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
 
     fun rulematch () =
       let
-        (* NB: we don't need to rename the Vars in the rule by incrementing their maxidxs because
-             we keep matching variables and unification variables distinct by having maxidx=0 and maxidx>0 respectively.
-           check_rule ensures that matching variables in rules always have maxidx=0 *)
-        fun rename_and_inst_rule rule inst = 
+        fun rename_proofp proofp ctxt4 = 
+          proofp |> map_prop_of_proofp (fn prop =>
+            let
+              (* val _ = tracing ("before renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of rule))) *)
+                (* rename bound variables for better error messages *)
+                (* use uninstantiated rule to avoid confusion with var:=abstraction instantiations *)
+                (* pobj_of_rule, iobjs_of_rule  und  obj, iobjs  beta-normal wg add_rule *)
+              val (pobj_of_rule, iobjs_of_rule, _) = prop |> Logic.strip_imp_concl |> jud_matcher |> the
+              (* FIXME: bound variable name that we first descend into is not shared ?!?! should pobj, iobjs be normed ?! *)
+              val prop2 = prop
+                |> Term.rename_abs (pack_pobj_iobjs pobj_of_rule iobjs_of_rule)
+                     (pack_pobj_iobjs pobj iobjs)
+                |> the_default prop
+              (* val _ = tracing ("after renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of res))) *)
+            in
+              prop2
+            end)
+
+        fun app_rule proofp' ctxt4 = 
           let
-            (* val _ = tracing ("before renaming and inst: "^Syntax.string_of_term ctxt (mark_eta_redexes (prop_of rule))) *)
-              (* rename bound variables for better error messages *)
-              (* use uninstantiated rule to avoid confusion with var:=abstraction instantiations *)
-              (* pobj_of_rule, iobjs_of_rule  und  obj, iobjs  beta-normal wg add_rule *)
-            val (pobj_of_rule, iobjs_of_rule, _) = rule |> cconcl_of |> jud_cmatcher |> the
-            val rule1 = rule
-              |> Thm.rename_boundvars (pack_pobj_iobjs (Thm.term_of pobj_of_rule) (map Thm.term_of iobjs_of_rule))
-                   (pack_pobj_iobjs (Thm.term_of pobj) (map Thm.term_of iobjs))
-            val res = Thm.instantiate inst rule1 |> normalize_withvars ctxt
-            (* val _ = tracing ("after renaming and inst: "^Syntax.string_of_term ctxt (mark_eta_redexes (prop_of res))) *)
-          in
-            res
-          end
-        fun app_rule rule' = 
-          let
-            val prems' = Drule.cprems_of rule'
-            val (solved_prems, (inst', ctxt2)) =
+            val prems' = prop_of_proofp proofp' |> Logic.strip_imp_prems
+            val (solved_prems, ctxt5) =
               solve_prems false false
-                (fn ctxt => fn msg => raise GlobalFail (ctxt, msg))
-                (fn _ => fn _ => raise LocalFail)
-                rule' prems' ctxt
+                (fn ctxt_ => fn msg => raise GlobalFail (ctxt_, msg))
+                (fn ctxt_ => fn msg => raise LocalFail (ctxt_, msg))
+                (prop_of_proofp proofp') prems' ctxt4
+
+            (* val _ = tracing ("metarec_worker: solved rule premises \n"
+              ^cat_lines (map (str_of_normed_term ctxt5 o prop_of_proofp) solved_prems)
+              ^"\nof instantiated rule\n"^str_of_normed_term ctxt5 (prop_of_proofp proofp')) *)
 
             (* val _ = tracing ("solved prems are: "^commas
-              (solved_prems |> map (Syntax.string_of_term ctxt2 o mark_eta_redexes o prop_of)))
+              (solved_prems |> map (Syntax.string_of_term ctxt5 o mark_eta_redexes o prop_of)))
 
             val _ = tracing ("concl-matching-instantiated rule is: "
-              ^Syntax.string_of_term ctxt2 (prop_of rule' |> mark_eta_redexes)) *)
+              ^Syntax.string_of_term ctxt5 (prop_of rule' |> mark_eta_redexes)) *)
 
             (* TODO(correctness): normalize_withvars nutzen weil nichtinst Vars
                  im Typ von Refinement-Regeln uebrigbleiben duerfen? oder verbieten? *)
-            val rule'' = Thm.instantiate inst' rule' |> normalize ctxt2
+            val prop'' = prop_of_proofp proofp' |> norm_with_env_in_run_state ctxt5
 
             (* val _ = tracing ("premise-solving-instantiated and normalized rule is: "
-              ^Syntax.string_of_term ctxt2 (prop_of rule'' |> mark_eta_redexes)) *)
+              ^Syntax.string_of_term ctxt5 (prop_of rule'' |> mark_eta_redexes)) *)
 
 
             val (pobj_of_rule'', iobjs_of_rule'', oobjs_of_rule'') =
-              cconcl_of rule'' |> jud_cmatcher |> the
+              Logic.strip_imp_concl prop'' |> jud_matcher |> the
+
+            fun ext_rl_tr ctxt_ = add_to_rule_trace (K (prop_of_proofp proofp')) ctxt
+
             (* TODO(opt): refinement check weglassen wenn iobj_pat der uninstantiierten Regel
                 bereits ein pattern war *)
-            val _ = map2 (fn iobj => fn iobj_of_rule =>
+            val ctxt6 = ctxt5 |> fold (fn (iobj_of_rule0, iobj0) => fn ctxt_ =>
+                let
+                  val norm = norm_with_env_in_run_state ctxt_
+                  val (iobj_of_rule, iobj) = pairself norm (iobj_of_rule0, iobj0)
+                  val frees = Term.add_frees iobj_of_rule [] |> map Free
+                  val abs_frees = fold_rev Term.lambda frees
+                  val iobj_of_rule_absd = abs_frees iobj_of_rule
+                in
                   (* iobj_of_rule  und  iobj  beta-normal, s.o. *)
-                if Pattern.pattern (Thm.term_of iobj_of_rule) then 
-                  case cpattern_match_opt ctxt2 (iobj_of_rule, iobj) of
-                    SOME _ =>
-                      (* TODO(correctness): instantiierung noch auf rule'' anwenden
-                           sonst ist rule'' allgemeiner als das was mit den iobjs gefordert wurde *)
-                      ()
-                  | NONE => raise LocalFail
-                else
-                  err_with_trace ctxt2 ("metarec_worker: refinement not a pattern after"
-                    ^" instantiation with synthesized information"))
-              iobjs iobjs_of_rule''
+                  (* TODO(feature): instead of checking against pattern, just allow usual
+                      fall back to first-order pattern matching via Pattern.match *)
+                  if Pattern.pattern iobj_of_rule_absd then 
+                    case pattern_match_envctxt ctxt_ (iobj_of_rule_absd, abs_frees iobj) of
+                      SOME ctxt_2 => ctxt_2
+                    | NONE => raise LocalFail (ext_rl_tr ctxt_, "metarec_worker: refinement check of non-primary input failed:\n"
+                        ^"  "^str_of_normed_term ctxt_ iobj
+                        ^"\ndoes not match\n"
+                        ^"  "^str_of_normed_term ctxt_ iobj_of_rule)
+                  (* else if iobj_of_rule aconv iobj then
+                    ctxt_
+                  else if can Term.dest_Var (Term.head_of iobj_of_rule) then
+                    let val ctxt_2 = unlift_unifvar_occs (Term.head_of iobj_of_rule) ctxt_
+                    in
+                      case pattern_match_envctxt ctxt_2 (iobj_of_rule_absd, abs_frees iobj) of
+                        SOME ctxt_3 => ctxt_3
+                      | NONE => raise LocalFail (ext_rl_tr ctxt_2,
+                          "metarec_worker: refinement check of non-primary input failed "
+                          ^"(even after unlifting of matching side head):\n"
+                          ^"  "^str_of_normed_term ctxt_2 iobj
+                          ^"\ndoes not match\n"
+                          ^"  "^str_of_normed_term ctxt_2 iobj_of_rule)
+                    end *)
+                  else
+                    err_with_trace (ext_rl_tr ctxt_)
+                      ("metarec_worker: input expression "^Syntax.string_of_term ctxt_ iobj_of_rule
+                      ^" in rule still not a pattern after instantiation with synthesized information "
+                      ^" and the input got instantiated to\n  "
+                      ^Syntax.string_of_term ctxt_ iobj)
+                end)
+              (iobjs_of_rule'' ~~ iobjs)
             
-            val res = Drule.implies_elim_list rule'' solved_prems
-            (* val _ = tracing ("discharged rule assumptions gave "
-              ^Syntax.string_of_term ctxt2 (prop_of res |> mark_eta_redexes)) *)
+
+            val res = proofp' |> fold (mp_rev_prf ctxt6) solved_prems
+            (* val _ = tracing ("metarec_worker: after discharge of rule premises \n"
+              ^str_of_normed_term ctxt6 (prop_of_proofp res)) *)
           in
-            ((res, oobjs_of_rule''), ctxt2)
+            ((res, oobjs_of_rule''), ctxt6)
           end
 
 
@@ -1769,37 +2784,52 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
           | first_succ (rule :: rem_rules) failed_rules = 
               let
                 (* beta normal wg add_rule *)
-                val (pobj_pat, iobj_pats, _) = rule |> cconcl_of |> jud_cmatcher |> the
-                fun match_iter [] [] succ_cont inst = succ_cont inst
-                  | match_iter (iobj_pat :: rem_iobj_pats) (iobj :: rem_iobjs) succ_cont inst =
+                val (proofp, ctxt2) = ctxt |> fresh_proofp_of_rule rule
+                val (pobj_pat, iobj_pats, _) = proofp |> prop_of_proofp
+                  |> Logic.strip_imp_concl |> jud_matcher |> the
+
+                fun match_iter [] [] succ_cont ctxt_ = succ_cont ctxt_
+                  | match_iter (iobj_pat :: rem_iobj_pats) (iobj :: rem_iobjs) succ_cont ctxt_ =
                         (* kein eta, wird on-the-fly expandiert *)
-                      let val iobj_pat' = Thm.instantiate_cterm inst iobj_pat |> beta_norm_cterm
+                      let val iobj_pat' = norm_with_env_in_run_state ctxt_ iobj_pat
                       in
-                        if Pattern.pattern (Thm.term_of iobj_pat') then
-                           (case cpattern_match_opt ctxt (iobj_pat', iobj) of
+                        if Pattern.pattern iobj_pat' then
+                           (case pattern_match_envctxt ctxt_ (iobj_pat', iobj) of
                              NONE => first_succ rem_rules failed_rules
-                           | SOME inst2 =>
-                               match_iter rem_iobj_pats rem_iobjs succ_cont
-                                 (inst2 |> apfst (append (fst inst))
-                                   |> apsnd (append (snd inst))))
-                        else 
-                          (* fuer dieses Argument also bisher nur struktureller Abgleich uebers Netz gecheckt,
-                             spaeter wird geprueft ob das gereicht hat.
-                             wenn das nicht gereicht, schmeisst der sanity check die LocalFail exception
-                             und probiert somit auch die anderen matchenden Regeln *)
-                          match_iter rem_iobj_pats rem_iobjs succ_cont inst
+                           | SOME ctxt_2 =>
+                               match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_2)
+                        else
+                          let
+                            val frees = Term.add_frees iobj_pat' []
+                            val abs_frees = fold_rev (Term.lambda o Free) frees
+                            val iobj_pat'_absd = abs_frees iobj_pat'
+                          in
+                            if Pattern.pattern iobj_pat'_absd then
+                              match_iter (iobj_pat'_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs)
+                                succ_cont ctxt_
+                            else
+                              (* fuer dieses Argument also bisher nur struktureller Abgleich uebers Netz gecheckt,
+                                 spaeter wird geprueft ob das gereicht hat.
+                                 wenn das nicht gereicht, schmeisst der sanity check die LocalFail exception
+                                 und probiert somit auch die anderen matchenden Regeln *)
+                              match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_
+                          end
                       end
               in
                 (* Implicitly degrades to structural first-order matching (which is also
                    decompose in this sense) if pobj_pat is not a pattern. *)
-                case cdecompose_pattern_match_opt ctxt (pobj_pat, pobj) of
+                case decompose_pattern_match_envctxt ctxt2 (pobj_pat, pobj) of
                   NONE => first_succ rem_rules failed_rules
-                | SOME inst0 =>
-                    inst0 |> match_iter iobj_pats iobjs (fn inst =>
-                      let val rule' = rename_and_inst_rule rule inst
+                | SOME ctxt3 =>
+                    ctxt3 |> match_iter iobj_pats iobjs (fn ctxt4 =>
+                      let val proofp' = rename_proofp proofp ctxt4
                       in
-                        app_rule rule'
-                        handle LocalFail => first_succ rem_rules (rule' :: failed_rules)
+                        app_rule proofp' ctxt4
+                        handle LocalFail (ctxt_, msg) =>
+                          let val _ = () (* tracing ("application of rule\n  "
+                            ^str_of_normed_term ctxt_ (prop_of_proofp proofp')
+                            ^"\nfailed:\n"^msg) *)
+                          in first_succ rem_rules (proofp' :: failed_rules) end
                       end)
               end
       in
@@ -1939,41 +2969,6 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
   
   
 
-(* pobj, iobjs  may not contain any Vars
-  find beta,comp_rule-normal  oobjs  with  J pobj iobjs oobjs *)
-(* TODO: return simplified contraints and delayed unifprobs ?? *)
-(* Note: for implicit toplevel GEN: because of the successful groundness check all variables that
-     are present after metarec execution are unification variables that have been introduced in the derivation,
-     so just instantiate all of them to freshly fixed free variables that will be schematically quantified
-     on export later on
- *)
-and metarec ctxt0 jid (pobj, iobjs) =
-  let
-    val thy = Proof_Context.theory_of ctxt0
-    val ctxt = ctxt0
-      |> add_to_msg_trace (fn () =>
-           "metarec: on judgement "^quote jid^" with input ("
-             ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])")
-      |> fold Variable.declare_term (pobj :: iobjs)
-      |> (fn ctxt => ctxt |> Context.proof_map (set_run_state (init_run_state ctxt)))
-    val {judgements, ...} = get_current_ruledata (Context.Proof ctxt)
-    val jud_maker =
-      case lookup_judgement_analyzer judgements jid of
-        SOME (_, jud_maker, _) => jud_maker
-      | NONE => err_with_trace ctxt ("metarec: judgment "^quote jid^" not known")
-
-    val cert = cterm_of thy
-    val pobj' = normalize_term ctxt pobj
-    val iobjs' = map (normalize_term ctxt) iobjs
-
-    val ((th, coobjs), ctxt2) = metarec_worker true ctxt NONE jid (cert pobj', map cert iobjs')
-    val {unifvar_cnt, delayed_unifs, constraints, unifvar_inst, ...} = get_the_run_state (Context.Proof ctxt2)
-    val (still_delayed_unifs, (unifvar_cnt2, unifvar_inst2)) =
-      (* TODO(feature): add optional fallback to FO-unif ? *)
-      try_solve_delayed_unifs ctxt2 delayed_unifs (unifvar_cnt, unifvar_inst)
-      handle TryPatUnify (ctxt, (bad_t1, bad_t2), msg) =>
-        err_with_trace ctxt ("metarec: solving of a delayed unification problem failed: "^msg)
-
     (* TODO(feature): customizable constraint solvers that can see many interrelated constraints at once *)
     (* sketch of universelevel-constraint-solver
          * for each constraint i<j, i<=j put an edge i -> j in a graph
@@ -1987,54 +2982,682 @@ and metarec ctxt0 jid (pobj, iobjs) =
            and show that the other constraints area implied the the irreducable ones via
            transitivity
     *)
-    val constraints_solved_opt =
-      constraints |> map (fn C =>
-        let
-          (* note: since no lthy transformation can have taken place thy is not stale *)
-          val cC = cterm_of thy C
-          exception Fail
-        in
-          (let 
-            val ctxt_ = ctxt2 |> Context.proof_map (set_run_state (SOME { outer_ctxt=ctxt, unifvar_cnt=unifvar_cnt2,
-              delayed_unifs=still_delayed_unifs, constraints=[], unifvar_inst=unifvar_inst2 }))
-            val ([C_th], (inst, ctxt_2)) =
-              solve_prems false false
-                (fn _ => fn _ => raise Fail) (fn _ => fn _ => raise Fail)
-                (Thm.trivial cC) [cC] ctxt_
-            val {constraints=elementary_constraints, ...} = get_the_run_state (Context.Proof ctxt_2)
-            val _ =
-              if not (null (fst inst) andalso null (snd inst)) then
-                err_with_trace ctxt ("metarec: solving constraint "^Syntax.string_of_term ctxt_2 C
-                  ^" resulted in non-trivial instantiation")
-              else ()
+    (* TODO(feature): allgemeine Constraintmengen-Minimierung
+          (reicht fuer Typklassen und Universenlevel-Inferenz)
+      * vereinfache die aus metarec-Ableitungen entstandenen Constraints mit metarec zu implikational
+        elementareren Constraints C_0
+      * bilde schrittweisen Abschluss unter mehrkoepfigen Constraint-Propagierungsregeln
+        (ggf. mit metarec Judgements als weiteren Annahmen die geloest werden muessen,
+         insbes auch (globale) Unifikation die wie bei CHRs nicht backtrackbar ist)
+        (ggf. artificially bounded Fixpunktbildung, aber Constraint-Propagierungsregeln
+        sollten fuer gewoehnlich terminieren)
+        (est unzertifizierte Termableitung wegen Unifvar in Constraints
+        die bei Erfolg als Thmableitung rekonstruiert wird)
+      * *urspruengliche* Constraints nochmal (implikational) vereinfachen, weil Unifikationen erfolgt sein koennen
+        und jetzt unter Annahme der anderen *vervollstaendigten* Constraints, womit mehr
+        bedingte Vereinfachungsregeln anspringen koennen
+        (bei CHRs wuerden alle Constraints mit mehrkoepfigen Vereinfachungsregeln waehrend dem
+        Propagierungsprozess vereinfacht; die mehrkoepfigen Vereinfachungsregeln muessten dann
+        hier als Varianten dargestellt werden)
+      * zu denjenigen Constraints c aus C_0 die durch Abschluss-Generierung ohne Nutzung von c "neu"
+        erzeugt werden koennen, protokollieren wir das minimale (soweit innerhalb des bounds erreichte)
+        C'_c mit C'_c ==> c
+      * die vereinfachten Constraints <= C_0 sind dann diejenigen die nicht durch Abschluss-Generierung
+        neu erzeugt werden koennen oder in einem C'_c vorkommen.
+        Warnung an User bei Constraints die sich wechselseitig implizieren.
+        Diese werden ja gemaess obigem beibehalten.  
+        (Es gaebe hier natuerlich auch die Alternative nur den "ergiebigsten" der Constraints beizubehalten
+        die sich wechselseitig implizieren, naemlich den der am meisten impliziert und dabei moeglichst
+        wenig andere Constraints braucht.)
+
+        Das Tracking welche constraints welche anderen implizieren muss wohl in der Form
+        eine Tabellierung
+          Constraint C |-> optional (wird impliziert von Constraints C_n und Theorem C_n ==> C dazu)
+        erfolgen.
+        Das deckt dann Forwaerts-Propagierungs und Vereinfachungsschritte ab:
+          * bei Forwaerts-Propagierung werden die neuen Constraints vom alten Constraint impliziert
+          * bei Vereinfachungs-Schritten wird das alte Constraint von den neuen impliziert.
+        Um letztendlich die resultierende minimierte Constraintmenge zu berechnen geht man von
+        urspruenglichen Constraints aus, und entfernt bzw. ersetzt (bei Vereinfachung)
+        Constraints aus dieser Menge wenn Tracking eine nicht-wechselseitige Implizierung des
+        Constraints ergeben hat. Dazu betrachten wir die transitiven Nachfolger-Mengen der
+        urspruenglichlen Constraints im Hypergraphen des Implikations-Trackings
+        (wobei wir die Implikationen dabei zusammenschalten): wenn diese Nachfolger-Menge zu
+        einem Constraint C1 nicht ein anderes urspruengliches Constraint C2 enthaelt das C1 als
+        Nachfolger hat, dann koennen wir C1 ersetzen durch seine Nachfolger-Menge.
+
+
+
+
+        BEACHTEN: die Constraints die durch metarec-Ableitung generiert werden sind i.A. ja in HHF-Form
+            !! fixes. assms ==> Constraint(fixes)
+          also muss die Constraint-Propagierung und Vereinfachung unter fixes und assms stattfinden!!!
+
+          Preprocessing: wenn sich Constraints nur in den Annahmen
+          unterscheiden, dann schneidet man die Annahme-Mengen und nimmt nur
+          eines der Constraints. Wenn sich Constraints nur in Fixes
+          unterscheiden die nur in uninstantiierten
+          Unifikationsvariablen-Applikationen genutzt werden, dann schneidet
+          man die Fixes-Mengen und nimmst nur eines der Constraints.
+
+          Propagierung: bei Anwendung einer Propagierungregel auf mehrere Constraints
+          werden deren Fixes- und Annahme-Mengen vereinigt und die neu entstehenden
+          Constraints erhalten diese vereinigten Fixes und Annahmen. Die Propagierungsregel
+            [| G1 ;  ... ; Gk |] ==> H1 &&& .. &&& Hm ==> R1 &&& ... &&& Rn
+          wird also gelifted zu
+            [| lftd G1 ; ... ; lftd Gk |] ==> lftd H1 &&& .. &&& lftd Hm ==> lftd R1 &&& ... &&& lftd Rn
+          wobei lftd die vereinigten Fixes und Annahmen voranstellt und vorkommende Unifvar
+          ueber die vereinigten Fixes lifted.
+          Die H1, .., Hm werden vor Regelanwendung dann so *abgeschwaecht*, dass sie die vereinigten Fixes und
+          Annahmen aufweisen.
+
+          Vereinfachung(dual zu Propagierung): bei Anwendung einer Vereinfacungsregel auf mehrere Constraints
+          werden deren Fixes vereinigt und deren Annahme-Mengen geschnitten und die vereinfachten Constraints
+          erhalten diese vereinigten Fixes und geschnittenen Annahmen. Die Vereinfachungsregel
+            [| guard G1 ;  ... ; guard Gk |] ==> [| R1 ; ... ; Rn |] ==> H1 &&& .. &&& Hm 
+          wird also geliftet zu
+            [| guard lftd G1 ;  ... ; guard lftd Gk |] ==> [| lftd R1 ; ... ; lftd Rn |] ==> lftd H1 &&& .. &&& lftd Hm 
+          wobei lftd die vereinigten Fixes und geschnittenen Annahmen voranstellt und vorkommende Unifvar
+          ueber die vereinigten Fixes lifted.
+          Die H1, .., Hm werden vor Regelanwendung dann so *verstaerkt*, dass sie die vereinigten Fixes und
+          geschnittenen Annahmen aufweisen.
+
+          In der tracking-Tabelle stehen die Constraints dann ohne Fixes und Annahmen, d.h. mit loose bounds.
+
+          Aber erstmal behandeln wir nur den haeufigen Fall der scheinbar immer bei
+          Universenlevel- und Typklassen-Inferenz vorliegt:
+            die Annahmen werden nur zur Vereinfachung von Constraints genutzt die waehrend der metarec-Ableitung
+            weiter instantiiert wurden und die Fixes von Constraints werden nur in Unifvar-Applikationen genutzt.
+              Vermutlich ist das damit zu erklaeren das Constraints nur fuer universen-level, die immer
+            als first-order betrachten werden koennen, oder fuer die Typisierung von freie Variablen im Input
+            generiert werden, wo also lokale Annahmen und Fixes keine Rollen spielen duerfen.
+
+            Also gehen wir wie folgt vor:
+              * Vereinfachung der die Constraints unter ihren Fixes und Annahmen.
+              * Entfernung der Annahmen der resultierenden vereinfachten Constraints.
+              * Unliften der Unifvar in den resultierenden Constraints (durch Instantiierung mit frischen
+                ungelifteten Unifvar)
+              * Check das Fixes nicht mehr in den resultierenden Constraints vorkommen und anschliessender
+                Entfernung der Fixes-Quantifikationen.
+              * Propagierung, Minimierung, weitere Vereinfachung der resultierenden Constraints
+                ohne Fixes und Annahmen
+
+
+            Mal probieren ob es nicht noch einfacher geht:
+              beim Absetzen von constraints die vorkommenden Unifvar immer komplett unliften (d.h. mit ungelifteten
+              Unifvar instantiieren) keine Fixes und Annahmen davor.
+
+
+
+
+
+        Mehrkoepfige Vereinfachungsregeln sind bei mir reverse Implikationen und nicht Gleichheiten
+        wie bei CHR, also allgemeiner:
+          statt
+            H1, .., Hm <=> G1, .., Gn | R1, .., Rk
+          nutze ich
+            [| guard G1 ; ... ; guard Gn |] ==> [| R1 ; ... ; Rn |] ==> H1 &&& ... &&& Hm 
+            (guard marker zur Abgrenzung)
+
+        Vorteil gegenueber CHRs:
+          * Vereinfachungsregeln sind semantisch keine Gleichheiten sondern reverse Implikationen.
+            Das brauchen wir fuer rekursive Dictionary-Konstruktions-Regeln.
+            Sulzman et al nutzen das auch so!
+          * CHRs leisten kurioserweise i.A. keine Minimierung der urspruenglichen Constraintmenge,
+            sondern reichern diese an und vereinfachen lokal mehrkoepfig, d.h. vereinfachen
+            nicht unter transitiver Propagierung.
+
+            Wenn man Regeln A ==> B, B ==> C, A &&& B == A, B &&& C == B hat und mit
+            Constraintmenge { A, C } startet, dann erhaelt man nach CHR-Saettigung { A, C }
+              (bzw. Nicht-Termination weil { A, C } -> { A, B, C } == { A, C }
+                oder auch { A, C } -> { A, B, C } == { A, B } -> { A, B, C } == { A, C })
+            statt dem minimalen Resultatet { A }. Es fehlt die Vereinfachungsregel A &&& C == A.
+    *)
+    (* TODO(feature): Narrowing zur Constraint-Vereinfachung
+         * Das bloede an Narrowing im Vgl zu CHRs ist das Narrowing nur funktioniert wenn mindestens
+           ein Constraint eine lokal-eindeutige Loesung hat (d.h. Loesung dieses Constraints ist eindeutig,
+           auch wenn man die anderen Constraints ausser Acht laesst).
+           Nicht-konfluentes nicht-terminierendes verallgemeinertes Narrowing,
+           also bounded, nicht-determ, mit Eindeutigkeitscheck und
+           mit mehrkoepfigen Propagierungsregeln (?) waere wohl das coolste.
+         * das Bloede an CHRs ist das man ein spezialisiertes Regelsystem braucht.
+    *)
+(* TODO(refactor): this contains an adaptation of the frules computation mechanism to propagation rules;
+     can perhaps be realized with a common implementation, but the frules computation is completely ground *)
+
+and constraint_simplification ctxt0 =
+  let
+    val gctxt0 = Context.Proof ctxt0
+    val { constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, ...} =
+      get_current_ruledata gctxt0
+    val { constraints=constraints0, ...} = get_the_run_state gctxt0
+
+
+    (* simplification step (muessen konfluent sein):   prems ==> subgoals ==> conjunctioned heads
+         * match simprule conclusion-heads against input constraints
+         * solve premises of instantiated simprule (including subgoals)
+           which potentially generates new constraints
+         * form
+             (% new_constraints. instantiated_simprule MP solved_premises(new_constraints))
+             : new_constraints ==> conjunctioned input constraints
+         * new constraints generated are added to constraint store
+         * add new entries to tracking table:
+             input constraint |-> new_constraints
+               with proof
+                 conj_concl_extr_prf (instantiated_simprule MP solved_premises)
+                 : new_constraints ==> input constraint
+           where
+             conj_concl_extr_prf = (% R. (% new_constraint_prfs. conjDk_1 (... (conjDk_m (R new_constraint_prfs)) ..)))
+
+      propagation step:   prems ==> conjunctioned heads ==> conjunctioned new constraints
+         * rotate conjunctioned heads premise to front and curry proprule to format
+             heads ==> prems ==> conjunctioned new constraints
+           and rotate heads back to "implicational form"
+             prems ==> heads ==> conjunctioned new constraints
+         * match proprule heads against input constraints
+         * solve premises of instantiated proprule and discharge to
+             proprule' : input constraints ==> conjunctioned new constraints
+         * add instantiated new constraints to constraint store
+         * add new entries to tracking table:
+             new constraint |-> input constraints
+               with proof
+                 conj_concl_extr_prf proprule' : input constraints ==> new constraint
+           where
+             conj_concl_extr_prf = (% R. (% inputCs. conjDk_1 (... (conjDk_m (R inputCs)) ..)))
+
+      wenn neues constraint C hinzukommt:
+        * versuchen *einen* simplification Schritt auszufuehren der C nutzt
+        * wenn dies nicht geklappt hat, versuchen propagation Schritte auszufuehren die C nutzen
+          (TODO: kann es interessant sein auch nicht maximal vereinfachte Constraints zu propagieren?)
+
+      minimization
+         * zu jedem urspruengliche Constraint die azyklische terminale Nachfolgermenge im
+           tracking-Graphen mit Tiefensuche bilden (und dabei die Beweise verzahnen sodass ein Beweis
+             Nachfolger ==> Constraint entsteht).
+           Beachte das selbst-Abhaengigkeiten ignoriert werden sollen, was schon
+           dadurch gegen sein sollte das man den tracking Graphen azyklisch ablaeuft.
+           Breitensuche waere schlecht weil wir dann bei Tracking-Graph
+             A -> {B, C}, B -> {C};  C -> {B}
+           die Nachfolgermenge {B, C} fuer A ermitteln. Tiefensuche nutzt hier A -> B-> C um
+           auf die minimalere Nachfolgermenge {C} zu kommen.
+         * wenn die Nachfolgermenge zu einem Constraint C kein anderes Constraint C2 enthaelt
+           das C als Nachfolger hat, dann kann man C durch seine Nachfolger ersetzen.
+           Die Nachfolger werden also neue Constraints, C faellt raus und wir registrieren
+             C |-> Nachfolger ==> C
+           als Grund dafuer in Output-Tabelle 
+
+    *)
+
+
+    fun gen_with_pot_rules is_propagation pot_rules_with_C4head (constraint_graph0, ctxt0) = 
+      let
+        (* NB: only the first successful simplification rule is applied *)
+        (* NB: eta-expanded for local polymorphism *)
+        fun fold_poss_rule_ress f =
+          if is_propagation then fold_with_change_tracking f
+          else fold_upto_first_change f
+
+        fun do_pot_rule (rule, C4head) (constraint_graph, ctxt) =
+          let
+            exception UnsolvablePrem
+
+            val nprems =
+              if is_propagation then Thm.nprems_of rule - 1
+              else Thm.nprems_of rule
+            val nheads =
+              let val ct = 
+                  if is_propagation then
+                    Drule.cprems_of rule |> List.last
+                  else
+                    cconcl_of rule
+              in
+                Conjunction.dest_conjunctions ct |> length
+              end
+
+            (* prems ==> [ propagation rule heads as implications ]
+                ==> new constraints for propag rules  or  conjunction heads for simp rules *)
+            val implicational_rule =
+              if is_propagation then
+                (* transform  prems ==> conj heads ==> conj concl  into  prems ==> heads ==> conj concl  *)
+                rule |> Drule.rotate_prems nprems |> Conjunction.curry_balanced nheads
+                |> Drule.rotate_prems (~ nprems)
+              else
+                rule
+
+            val (prf, ctxt2) = fresh_thm_prf rule ctxt
+            val rl_prop = prop_of_proofp prf
+
+            val ((prems, heads), static_new_constraints_opt) =
+              let val concl_conjs_dest = Logic.strip_imp_concl #> Logic.dest_conjunctions
+              in
+                if is_propagation then
+                  (Logic.strip_imp_prems rl_prop |> chop nprems, SOME (concl_conjs_dest rl_prop))
+                else 
+                  ((Logic.strip_imp_prems rl_prop, concl_conjs_dest rl_prop), NONE)
+              end
+               
+
+
+            fun lookup head =
+              Net.unify_term constraint_graph (Envir.eta_contract head)
+              |> filter (fn (C', _) => pattern_match_envctxt ctxt2 (head, C') |> is_some)
+              |> map fst
+            val cs_for_heads_posprod = heads |> map_index (fn (i,head) =>
+                 let val (headidx, C) = C4head
+                 in
+                   if headidx = i then [C]
+                   else lookup head
+                 end)
+               |> list_amb
+
+            fun inst_and_apply_rule cs_for_heads (constraint_graph, ctxt2) =
+              case pattern_matches_envctxt ctxt2 (heads, cs_for_heads) of
+                NONE => NONE
+              | SOME ctxt3 => 
+                  (* TODO(feature): renaming of bound variables in rule to share them with input constraints *)
+                  let
+                    fun global_fail_cont ctxt_ msg = 
+                      err_with_trace_and_facts ctxt_
+                        ("failed to solve a premise in an instantiated constraint "
+                          ^(if is_propagation then "propagation" else "simplification")
+                          ^" rule\n"
+                          ^str_of_normed_term ctxt_ rl_prop
+                          ^"\n\nbecause:\n"^msg)
+                    fun local_fail_cont _ _ = raise UnsolvablePrem
+
+                    val ctxt3_ = ctxt3 |> Context.proof_map (map_constraints_in_run_state
+                      (K (these static_new_constraints_opt)))
+                    val (solved_prems, ctxt4_) = solve_prems false false global_fail_cont local_fail_cont
+                      rl_prop prems ctxt3_
+                    val new_constraints = get_constraints_in_run_state ctxt4_
+                    val new_dynamic_constraints = new_constraints
+                      |> subtract (aconv_norm (norm_with_env_in_run_state ctxt4_))
+                           (these static_new_constraints_opt)
+                    val _ =
+                      if is_propagation andalso not (null new_dynamic_constraints) then
+                        err_with_trace ctxt4_ ("application of constraint propagation rule\n  "
+                          ^Display.string_of_thm ctxt4_ rule
+                          ^"\nto input constraints\n  "
+                          ^commas (map (str_of_normed_term ctxt4_) cs_for_heads)
+                          ^"\nresulted in new dynamic constraints\n  "
+                          ^commas (map (str_of_normed_term ctxt4_)  new_dynamic_constraints))
+                      else ()
+                    val ctxt4 = ctxt4_ |> Context.proof_map (map_constraints_in_run_state
+                      (K (get_constraints_in_run_state ctxt3)))
+
+
+                    (* for propag rules:  input constraints ==> conjunctioned new constraints
+                       for simp rules:  new_constraints ==> conjunctioned input constraints *)
+                    val disch_prf = prf |> fold (mp_rev_prf ctxt4) solved_prems
+                      |> fold_rev (impI_prf ctxt4) new_constraints
+
+                    (* for propag rules:  (new constraint i, proof of (input constraints ==> new constraint i))_i
+                       for simp rules:  (input constraint i, proof of (new_constraints ==> input constraint i))_i *)
+                    val (concls_prfs, ctxt5) = conj_concl_extr_prfs disch_prf ctxt4
+                  in
+                    if is_propagation then
+                      (constraint_graph, ctxt5)
+                      |> fold (fn (new_constr, new_constr_prf) => 
+                             if new_constr aconv (Data.mk_Trueprop Data.True) then
+                               I
+                             else
+                               add_constraint new_constr (SOME new_constr_prf))
+                           concls_prfs
+                      |> SOME
+                    else
+                      (constraint_graph, ctxt5)
+                      |> fold (fn (inp_constr, inp_constr_prf) => fn (constraint_graph_, ctxt_) =>
+                             (* TODO(refactor): some code duplication with add_constraint function *)
+                             let
+                               val eq_C = aconv_norm (norm_with_env_in_run_state ctxt_)
+
+                               (* NB: inp_constr is the corresponding instantiated part of the rule, not the
+                                    thing contained in the net, therefore we have to norm and eta-reduce it *)
+                               val (C, existing_prf_opt) =
+                                 case
+                                   Net.match_term constraint_graph_
+                                     (Envir.eta_contract (norm_with_env_in_run_state ctxt_ inp_constr))
+                                   |> filter (fn (C', _) => eq_C (C', inp_constr))
+                                 of
+                                   [] => err_with_trace ctxt_ ("internal error on appliation of constraint rule: "
+                                     ^"we could not find some input constraint in the constraint graph")
+                                 | ((C, existing_prf_opt) :: _) => (C, existing_prf_opt)
+
+                               val constraint_graph_2 =
+                                 if is_some existing_prf_opt then
+                                   constraint_graph_
+                                 else
+                                   constraint_graph_ |> Net.delete_term (apsnd fst #> eq_C) (C, C)
+                                   |> Net.insert_term (pairself fst #> eq_C) (C, (C, SOME inp_constr_prf))
+                             in
+                               (constraint_graph_2, ctxt_)
+                             end)
+                           concls_prfs
+                      |> fold (fn new_constr => add_constraint new_constr NONE) new_constraints
+                      |> SOME
+                  end
           in
-            ((C, SOME C_th), elementary_constraints)
-          end)
-          handle Fail => err_with_trace ctxt ("metarec: solving constraint "^Syntax.string_of_term ctxt2 C^" failed")
-        end)
-    val solved_constraints = constraints_solved_opt |> filter (snd #> null) |> map (fn ((_, SOME C_th), _) => C_th)
-    val rem_constraints = constraints_solved_opt |> maps snd
+            (constraint_graph, ctxt2)
+            |> fold_poss_rule_ress (fn cs_for_heads => fn (constraint_graph_, ctxt_) =>
+                   inst_and_apply_rule cs_for_heads (constraint_graph_, ctxt_)
+                   handle UnsolvablePrem => NONE)
+                 cs_for_heads_posprod
+          end
+      in
+        (constraint_graph0, ctxt0)
+        |> fold_poss_rule_ress do_pot_rule pot_rules_with_C4head
+      end
 
-    val th' = th |> fold (fn C_th => fn th =>
-        Thm.implies_elim (Thm.implies_intr (cprop_of C_th) th) C_th)
-      solved_constraints
+
+    (* TODO(feature): tracking of serveral implications leading to a constraint *)
+    and add_constraint C0 implied_by_opt (constraint_graph, ctxt) = 
+      let
+        val C = norm_with_env_in_run_state ctxt C0 |> Envir.eta_contract
+
+        val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
+        val existing_C_opt = Net.match_term constraint_graph C
+          |> filter (fn (C', _) => eq_C (C', C))
+          |> try hd
+        val exists_already = is_some existing_C_opt
+        val implied_by_already = existing_C_opt |> Option.map (snd #> is_some)
+
+        val constraint_graph' =
+          if exists_already then
+            (if the implied_by_already orelse not (is_some implied_by_opt) then
+              constraint_graph
+            else
+              constraint_graph |> Net.delete_term (apsnd fst #> eq_C) (C, C)
+              |> Net.insert_term (pairself fst #> eq_C) (C, (C, implied_by_opt)))
+          else
+            constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C, (C, implied_by_opt))
+      in
+        if exists_already then
+          (constraint_graph', ctxt)
+        else
+          let
+            val ext_with_C0 = map (fn (rl, head_idx) => (rl, (head_idx, C0)))
+            val pot_simp_rls = Net.match_term constraint_simp_rules_hdidx C |> ext_with_C0
+            val pot_propag_rls = Net.match_term constraint_propag_rules_hdidx C |> ext_with_C0
+
+            (* val _ = tracing ("add_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
+
+            (* val _ = tracing ("pot_frules for new fact \n"
+              ^ Display.string_of_thm ctxt2 fact
+              ^"\nare\n"^cat_lines (map (Display.string_of_thm ctxt2 o get_frule frules o fst) pot_frules)) *)
+            val res1_opt = (constraint_graph', ctxt)
+              |> gen_with_pot_rules false pot_simp_rls
+          in
+            (* only apply propagation rule if no simplification rule was successful *)
+            case res1_opt of
+              SOME res1 => res1
+            | _ =>
+                (constraint_graph', ctxt)
+                |> gen_with_pot_rules true pot_propag_rls 
+                |> the_default (constraint_graph', ctxt)
+          end
+      end
 
 
-    val oobjs = map Thm.term_of coobjs
-    val orig_jud = jud_maker (Proof_Context.theory_of ctxt2) (pobj, iobjs, oobjs)
-      (* TODO(opt): nur close_derivation machen wenn die Ableitung gross genug war ?! *)
-    (* un-normalize to original judgement *)
-    val res = (Drule.equal_elim_rule2 OF [normalize_term_conv ctxt2 orig_jud, th'])
-      |> Thm.close_derivation
+     (* constraint store with tracking which other constraints optionally imply this constraint *)
+    val constraint_graph0 = Net.empty : (term * proof_pack option) Net.net
+    val (constraint_graph', ctxt') = (constraint_graph0, ctxt0)
+      |> fold (fn C => add_constraint C NONE) constraints0
+    val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
+
+
+    (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
+       if a constraint is not simplified according to the constraint graph, it has a self-dependency;
+       we locally give up when discovering cycles and share dependency results *)
+    fun calc_dependencies C0 (walked, calced) =
+      let
+        val C = norm_with_env_in_run_state ctxt' C0 |> Envir.eta_contract
+        fun triv_dep C2 = ([C2], assumption_prf C2)
+      in
+        case 
+          Net.match_term walked C
+          |> filter (fn C' => eq_C (C', C))
+        of
+          _ :: _ => (triv_dep C0, (walked, calced)) (* encountered cycle *)
+        | [] => 
+            case
+              Net.match_term calced C
+              |> filter (fn (C', _) => eq_C (C', C))
+            of
+              (_, res) :: _ => (res, (walked, calced))
+            | [] =>
+                let
+                 (* TODO(correctness): constraints koennen durch unification waehrend der Propagierung
+                      zusammenfallen.
+                        Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
+                      sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
+                      Eintrag mit Vereinfachungsbeweis zum Constraint finden.
+                      Sollte das auch beim Anlegen dieser Eintraege waehrend der Propagierung so gemacht werden? *)
+                  val implied_by_opt =
+                    case Net.match_term constraint_graph' C
+                      |> filter (fn (C', _) => eq_C (C', C))
+                    of
+                      [] => err_with_trace ctxt' ("internal error when calculating dependencies: constraint "
+                        ^str_of_normed_term ctxt' C^" was not found in constraint graph")
+                    | C'_and_implied_by_opts => C'_and_implied_by_opts |> map_filter snd |> try hd
+
+                  val (res, (walked3, calced2)) =
+                    case implied_by_opt of
+                      NONE => (triv_dep C0, (walked, calced))
+                    | SOME implied_by_prf =>
+                       let
+                         val walked2 = walked |> Net.insert_term eq_C (C, C)
+                         val Cs = Logic.strip_imp_prems (prop_of_proofp implied_by_prf)
+                         val (Cs_ress, (walked3, calced2)) = (walked2, calced)
+                           |> fold_map calc_dependencies Cs
+                         val deps = [] |> fold (union eq_C) (map fst Cs_ress)
+                         val prf = implied_by_prf |> fold (mp_rev_prf ctxt' o snd) Cs_ress
+                       in
+                         ((deps, prf), (walked3, calced2))
+                       end
+
+                   val calced3 = calced2 |> Net.insert_term (pairself fst #> eq_C) (C, (C, res))
+                in
+                  (res, (walked3, calced3))
+                end
+      end
+
+    val constraints0_deps = constraints0 |> map (fn C =>
+      let
+        val ((deps, prf), (walked, _)) = calc_dependencies C (Net.empty, Net.empty)
+        val used = union eq_C deps (Net.content walked)
+      in (C, (deps, prf, used)) end)
+
+    val implied_constraints = constraints0_deps |> map_filter (fn (C, (deps, prf, used)) =>
+      if member eq_C deps C
+      then (* C is not implied by other constraints *)
+        NONE
+      else if constraints0_deps |> exists (fn (C', (_, _, used')) =>
+          not (eq_C (C, C')) andalso member eq_C used' C andalso member eq_C used C')
+      then
+        (* mutually dependent *original* constraints are both retained,
+           even if they have both been simplified further
+           (i.e. they are both not terminal in the constraint graph) *)
+        NONE
+      else
+        SOME (C, (deps, prf)))
+
+    val constraints' = constraints0 |> subtract eq_C (map fst implied_constraints)
+      |> fold (union eq_C) (map (fn (_, (deps, _)) => deps) implied_constraints)
+
+    val implied_constraints_res = implied_constraints
+      |> map (fn (C, (_, prf)) => (C, prf (* |> fold_rev (impI_prf ctxt') constraints' *)))
   in
-    ((res, oobjs), (still_delayed_unifs, rem_constraints))
+    ((constraints', implied_constraints_res), ctxt')
   end
 
+
+(* pobj, iobjs  may not contain any Vars
+   metarec calculates beta,comp_rule-normal  oobjs  with  J pobj iobjs oobjs *)
+(* Note: for implicit toplevel GEN: because of the successful groundness check all variables that
+     are present after metarec execution are unification variables that have been introduced in the derivation,
+     so just instantiate all of them to freshly fixed free variables that will be schematically quantified
+     on export later on. Doesn't this take place in replay_prf already?  *)
+and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
+  let
+    val thy = Proof_Context.theory_of ctxt0
+    val ctxt = ctxt0
+      |> add_to_msg_trace (fn () =>
+           "metarec: on judgement "^quote jid^" with input ("
+             ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])")
+      |> fold Variable.declare_term (pobj :: iobjs)
+      |> (fn ctxt => ctxt |> Context.proof_map (set_run_state (init_run_state ctxt) #> set_assms []))
+
+    (* val _ = tracing ( "metarec: on judgement "^quote jid^" with input ("
+      ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])") *)
+    (* val _ = tracing ("metarec: declared constraints are "
+      ^(Variable.constraints_of ctxt |> fst |> Vartab.dest |> filter (fn ((n, ix), _) => ix = ~1)
+        |> map (fn ((n, _), t) => Free(n,t) |> Syntax.string_of_term ctxt) |> commas)) *)
+
+    val {judgements, ...} = get_current_ruledata (Context.Proof ctxt)
+    val jud_maker =
+      case lookup_judgement_analyzer judgements jid of
+        SOME (_, jud_maker, _) => jud_maker
+      | NONE => err_with_trace ctxt ("metarec: judgment "^quote jid^" not known")
+
+    val cert = cterm_of thy
+    val pobj' = normalize_term ctxt pobj
+    val iobjs' = map (normalize_term ctxt) iobjs
+
+    val ((prf, oobjs), ctxt2) = metarec_worker true ctxt (SOME failcont) jid (pobj', iobjs')
+    val {env, delayed_unifs, constraints, ...} = get_the_run_state (Context.Proof ctxt2)
+
+    (* val _ = tracing ("metarec derivation was successful (but no replay tried yet) with: "
+          ^str_of_normed_term ctxt2 (prop_of_proofp prf)) *)
+    val _ = 
+      let val th_1 = prf |> fold_rev (impI_prf ctxt2) (map Logic.mk_equals delayed_unifs @ constraints)
+        |> replay_prf ctxt2 (* for testing *)
+      in
+        () (* tracing ("metarec derivation was successful (but no constraint min yet) with: "
+          ^Display.string_of_thm ctxt2 th_1) *)
+       end
+
+    (* NB: try to simplify constraints with fixes or assumes by solve_prems and replace them with the newly
+         generated constraints. If the newly generated constraints still carry fixes or assumes then
+         provide an error message. Note that constraint_gen_proc automatically generates constraints
+         with as few fixes and assumes as possible. 
+       E.g. in
+            (fun x. fun y. f x y) elabto (lam x:A. lam y:B(x). f x y) : A -> B(x) -> C(x)
+         we encounter the constraint  (!! x. x:A ==> B(x) :> guniv ?i)
+         which has to be simplified to  B : A -> guniv ?i
+         by applying metarec clause 
+           [|  freshunifvar f  ;  try (unify appt (f ` x))  ;
+               try(x elabto x : A)  ;  f :> (PROD x:A. B(x))  |] ==> appt :> B(x)
+
+            [| x elabto x : A  ;  B :> A -> guniv i |] ==> CTXTMATCH (!! x. x : A ==> B(x) :> guniv i)
+         with a context-matching (non-hhf) constraint simplification rule like
+            B :> A -> guniv i ==> CTXTMATCH (!! x. x : A ==> B(x) :> guniv i)
+            
+         as a quick solution simplify the constraint on the fly right here with user-given proc that returns a theorem
+             B : A -> guniv ?i ==> (!! x. x:A ==> B(x) :> guniv ?i) *)
+    (* NB: checking if fixes and assumes of constraints have become non-relevant due to later unifications
+         eliminating them in this case already happens if they are newly generated from their solve_prems call *)
+    val (prf2, ctxt3) = (prf, ctxt2) |> fold (fn C0 => fn (prf_, ctxt_) =>
+        if false (* null (Logic.strip_params C0) andalso null (Logic.strip_assums_hyp C0) *) then
+          (prf_, ctxt_)
+        else
+          let
+            val C = norm_with_env_in_run_state ctxt_ C0
+            exception ConstraintSimpFailed
+            fun fail_cont ctxt_ msg =
+              let val _ = () (* tracing
+                ("failed to simplify a constraint "(*^"with fixes or assumes: "*)
+                ^str_of_normed_term ctxt_ C
+                ^"\n\nbecause:\n"^msg) *)
+              in
+                raise ConstraintSimpFailed
+              end
+
+            val ctxt_2 = ctxt_ |> Context.proof_map (map_constraints_in_run_state (K []))
+          in
+            case (SOME (solve_prems false false fail_cont fail_cont C [C] ctxt_2)
+               handle ConstraintSimpFailed => NONE)
+            of
+              NONE => (prf_, ctxt_)
+            | SOME ([C_prf], ctxt_3) =>
+                let
+                 val eq_C = (aconv_norm (norm_with_env_in_run_state ctxt_3))
+                 (* val _ = tracing ("simplied constraint "^str_of_normed_term ctxt_3 C
+                   ^" to "^commas (map (str_of_normed_term ctxt_3)
+                     (get_the_run_state (Context.Proof ctxt_3) |> #constraints))) *)
+                 val _ = replay_prf ctxt_3 (C_prf
+                   |> fold_rev (impI_prf ctxt_3) (get_constraints_in_run_state ctxt_3)) (* for testing *)
+                 (* val _ = tracing "replay of simplification proof done" *)
+                 val ctxt_4 = ctxt_3 |> Context.proof_map (map_constraints_in_run_state
+                   (union eq_C (get_constraints_in_run_state ctxt_ |> remove eq_C C)))
+                 val prf_2 = prf_ |> impI_prf ctxt_4 C |> mp_rev_prf ctxt_4 C_prf
+                 (* val _ = tracing "replaying proof with simplified constraint ..." *)
+                 val _ = replay_prf ctxt_3 (C_prf
+                   |> fold_rev (impI_prf ctxt_4) (get_constraints_in_run_state ctxt_4)
+                   |> fold_rev (impI_prf ctxt_4 o Logic.mk_equals) (get_delayed_unifs_in_run_state ctxt_4)) (* for testing *)
+                 (* val _ = tracing "  done" *)
+                in
+                  (prf_2, ctxt_4)
+                end
+          end)
+      constraints
+
+
+
+    (* FIXME: loops for map elaboration?! *) 
+    val ((constraints', implied_constraints), ctxt4) = (* constraint_simplification ctxt3 *)
+       ((get_the_run_state (Context.Proof ctxt3) |> #constraints, []), ctxt3)
+    val prf3 = prf2
+      |> fold (fn (C, C_prf) => impI_prf ctxt4 C #> mp_rev_prf ctxt4 C_prf) implied_constraints
+      |> fold_rev (impI_prf ctxt4) constraints'
+
+    val _ = replay_prf ctxt4 (prf3 |> fold_rev (impI_prf ctxt4 o Logic.mk_equals) delayed_unifs) (* for testing *)
+
+    val env3 = get_the_env_in_run_state ctxt4
+
+    val (still_delayed_unifs, env4) =
+      (* TODO(feature): add optional fallback to FO-unif ? *)
+      try_solve_delayed_unifs ctxt4 delayed_unifs env3
+      handle TryPatUnify (ctxt_, (bad_t1, bad_t2), msg) =>
+        err_with_trace ctxt_ ("metarec: solving of a delayed unification problem failed: "^msg)
+
+    val ctxt5 = ctxt4 |> Context.proof_map (map_env_in_run_state (K env4))
+
+    val solved_delayed_unifs = delayed_unifs
+      |> subtract (pairself Logic.mk_equals #> aconv_norm (norm_with_env_in_run_state ctxt5))
+           still_delayed_unifs
+
+    val (prf4, ctxt6) = (prf3, ctxt5) |> fold (fn (t1, t2) => fn (prf_, ctxt_) =>
+         let
+           val P = Logic.mk_equals (t1, t2)
+           val (refl_t1_prf, ctxt_2) = reflexive_prf t1 ctxt_
+         in
+           (prf_ |> impI_prf ctxt_2 P |> mp_rev_prf ctxt_2 refl_t1_prf, ctxt_2)
+         end)
+       solved_delayed_unifs
+
+    val prf5 = prf4 |> fold_rev (fn (t1, t2) =>
+         let val P = Logic.mk_equals (t1, t2)
+         in impI_prf ctxt6 P end)
+       still_delayed_unifs
+
+      (* TODO(opt): nur close_derivation machen wenn die Ableitung gross genug war ?! *)
+      (* TODO(feature): try to un-normalize to original judgement? *)
+    val th = replay_prf ctxt6 prf5 |> Thm.close_derivation
+  in
+    ((th, oobjs), (still_delayed_unifs, constraints'))
+  end
+
+
+and metarec ctxt jid (pobj, iobjs) =
+  metarec_with_failcont err_with_trace ctxt jid (pobj, iobjs)
+
+(* FIXME?: undischarged unification problems cannot be represented as hyps in a thm, therefore this is stupid.
+     same for constraints containing unification variables *)
 and metarec_fully_discharged ctxt jid (pobj, iobjs) =
   let
     val ((th, oobjs), (delayed_unifs, constraints)) = metarec ctxt jid (pobj, iobjs)
-    val th' = th |> fold (fn C => Thm.implies_intr (cterm_of (Proof_Context.theory_of ctxt) C))
-      (constraints @ map Logic.mk_equals delayed_unifs)
+    val th' = th (* |> fold (fn C => Thm.implies_intr (cterm_of (Proof_Context.theory_of ctxt) C))
+      (constraints @ map Logic.mk_equals delayed_unifs) *)
   in
     (th', oobjs)
   end
@@ -2079,6 +3702,7 @@ and metarec_no_constraints ctxt jid (pobj, iobjs) =
          die man dynamisch durch nachschauen des Judgements kontrollieren muesste *)
 (* TODO(feature): checken das kein brule in Annahmen benutzt wird. das war ein
      haeufiger Fehler von mir *)
+(* FIXME: Spezialbehandlung von freshunifvar (fuehrt nicht zu Fakten-Inkonsistenz bei gleichem Input ()) *)
 (* "Premissen" entspr. goal clauses in lambdaProlog
    "Annahmen" entspr. definite clauses die in Implikationen vor Goals benutzt werden *)
 and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_transf, (avail_vars, avail_tvars, juds)) =
@@ -2134,11 +3758,15 @@ and check_prem ctxt may_have_lthy_transforms check_groundness prem (seen_lthy_tr
       case decompose_judgement gctxt prem_concl of
         SOME (jid_of_prem, (pobj_of_prem, iobjs_of_prem, oobjs_of_prem)) =>
           let
-            val _ = (pobj_of_prem :: iobjs_of_prem)
-              |> map (check_no_additional_vars
-                   ("metarec premise conclusion\n"
-                   ^Syntax.string_of_term ctxt2 prem_concl
-                     ^"\nhas additional Vars or TVars in input position"))
+            val _ =
+              if jid_of_prem = constraint_jud then
+                [()]
+              else
+                (pobj_of_prem :: iobjs_of_prem)
+                |> map (check_no_additional_vars
+                     ("metarec premise conclusion\n"
+                     ^Syntax.string_of_term ctxt2 prem_concl
+                       ^"\nhas additional Vars or TVars in input position"))
             val seen_lthy_transf' =
               if not (Symtab.defined lthy_transforms jid_of_prem) then
                 seen_lthy_transf
@@ -2282,10 +3910,6 @@ and check_rule_wellformedness ctxt prop0 =
 and gen_check_rule calc_juddeps check_groundness ctxt prop =
     case decompose_judgement (Context.Proof ctxt) (Logic.strip_imp_concl prop) of
       SOME (concl_jud, (pobj, iobjs, oobjs)) =>
-        let
-          val _ = unif_vars_in prop |> map (fn v =>
-            err_with_trace ctxt ("check_rule: rule contains non-zero Var "^Syntax.string_of_term ctxt (Var v)))
-        in
         if not calc_juddeps andalso not check_groundness then
           SOME (concl_jud, [])
         else
@@ -2351,7 +3975,6 @@ and gen_check_rule calc_juddeps check_groundness ctxt prop =
           in
             SOME (concl_jud, jud_deps)
           end)
-        end
     | NONE => NONE
 
 and check_rule calc_juddeps check_groundness ctxt prop =  
@@ -2396,7 +4019,7 @@ and gen_add_rule local_rule check_groundness ctxt0 prior rule0 gctxt =
     gctxt
     |> map_rule_stuff
       (Symtab.map_default (concl_jud, Item_Net2.init eq_for_net)
-         (Item_Net2.cons (rule, prior) (rule_net_index judgements term_to_jud)))
+         (Item_Net2.cons (DirectRule rule, prior) (rule_net_index judgements term_to_jud)))
       (K depgraph')
   end
 
@@ -2531,17 +4154,23 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
               ^Display.string_of_thm ctxt2 inst_frule_wo_heads
               ^"\n\nbecause:\n"^msg)
         fun local_fail_cont _ _ = raise UnsolvablePrem
-        fun do_solve_prems () = solve_prems true true global_fail_cont local_fail_cont
-          inst_frule_wo_heads (Drule.cprems_of inst_frule_wo_heads) ctxt
+        val _ =
+          if not local_run andalso is_some (get_run_state (Context.Proof ctxt)) then
+            err_with_trace ctxt ("gen_with_pot_frules: context before solve_prems has a run state."
+              ^"\ninstantiated frule without heads is "^Display.string_of_thm ctxt inst_frule_wo_heads)
+          else ()
 
-        fun succ_cont (solved_prems, (inst', ctxt')) =
+        fun do_solve_prems () = solve_prems_standalone global_fail_cont local_fail_cont
+          inst_frule_wo_heads (Thm.prems_of inst_frule_wo_heads) ctxt
+
+        fun succ_cont ((solved_prems, inst_env'), ctxt') =
             let
               val _ =
                 if not local_run andalso is_some (get_run_state (Context.Proof ctxt')) then
-                  err_with_trace ctxt' ("gen_with_pot_frules.succ_cont: context after solve_prems has a run state")
+                  err_with_trace ctxt' ("gen_with_pot_frules.succ_cont: context after solve_prems has a run state"
+                    ^"\ninstantiated frule without heads is "^Display.string_of_thm ctxt' inst_frule_wo_heads)
                 else ()
-              val thy' = Proof_Context.theory_of ctxt'
-              val frule'' = Thm.instantiate inst' inst_frule_wo_heads |> normalize ctxt'
+              val frule'' = inst_frule_wo_heads |> instnorm_thm_with_env ctxt' inst_env'
                 (* TODO(correctness): wer ist der eta-Uebeltaeter? *)
               val res = Drule.implies_elim_list (eta_convert frule'') (map eta_convert solved_prems)
               val gen_raw_facts = 
@@ -2556,7 +4185,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                     (* TODO(feature): Thm.forall_elim_vars 0,  frule checking muss man dann auch entspr anpassen *)
                     val brule = fact
                       |> Conv.fconv_rule (Conv.rewr_conv Data.brule_const_def)
-                      |> normalize_withvars ctxt'
+                      |> beta_convert (* TODO(opt): necessary? *)
                   in
                      SOME brule
                   end
@@ -2593,10 +4222,27 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                                (* NB: cannot use ctxt2 because declarations emit theory checkpoints
                                     which change the theory *)
                                (* TODO(opt!!): proof_of teuer *)
+                               (* NB: we want generated brules to be available in subsequent metarec calls *)
                              #> (fn gctxt => gctxt |> gen_add_rule true false (Context.proof_of gctxt) 0 brule')
                            end
-                         (* NB: we want generated brules to be available in subsequent metarec calls *)
-                       (* val msg = "adding generated brule "^Display.string_of_thm ctxt2 brule *)
+
+                       (* fun str_of_thm_with_constTs th =
+                          Display.string_of_thm ctxt2 th
+                          ^"\n  where "^commas (Term.add_consts (prop_of th) [] |> map (fn (n, T) =>
+                             Syntax.string_of_term ctxt2 (Const(n,T)) ^" :: "^Syntax.string_of_typ ctxt2 T))
+                       val _ = tracing
+                         ("adding brule\n  "^str_of_thm_with_constTs brule
+                          ^"\ngenerated from instantiated frule (wo heads)\n  "
+                          ^str_of_thm_with_constTs frule''
+                          ^"\nbased on frule (wo heads)\n  "
+                          ^str_of_thm_with_constTs inst_frule_wo_heads
+                          ^"\nbased on frule (renamed)\n  "
+                          ^str_of_thm_with_constTs frule'
+                          ^"\ninst_env' (type part) is\n  "
+                          ^commas (Vartab.dest (Envir.type_env inst_env')
+                             |> map (fn (ixn, (S, T')) =>
+                               Syntax.string_of_typ ctxt2 (TVar(ixn, S))^" := "^Syntax.string_of_typ ctxt2 T'))) *)
+
                        val ctxt3 = ctxt2
                          |> (if local_run then Context.proof_map (Morphism.form transf)
                              else map_pot_lthy transf)
@@ -2729,7 +4375,6 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
                           ^PolyML.makestring oobjs')
                     | NONE => err_with_facts ctxt2 ("gen_add_fact: an already indexed fact has unknown judgement:\n"
                         ^Display.string_of_thm ctxt2 fact'))
-
            in
              ctxt2 |> gen_with_pot_frules local_run expl_frules_opt pot_frules
            end)
@@ -2806,9 +4451,6 @@ and gen_add_frule checked checked_grndness explicit traced frule0 gctxt =
     val _ =
       if explicit orelse null prems then ()
       else err_with_trace ctxt "gen_add_frule: implicit frule has premises"
-    val _ = unif_vars_in (prop_of frule) |> map (fn v =>
-        err_with_trace ctxt ("gen_add_frule: frule has Var "
-          ^Syntax.string_of_term ctxt (Var v)^" with non-zero index"))
     val (avail_vars0, avail_tvars0) =
       (Term.add_vars (term_of maj_cprem) [], Term.add_tvars (term_of maj_cprem) [])
     val (avail_vars, avail_tvars, prem_juds) =
@@ -3092,6 +4734,129 @@ fun run_expl_frules lthy0 =
 
 
 
+(* constraint propagation rules are of the form
+     guards aka prems ==> heads conjunction ==> conclusion conjunction *)
+fun add_constraint_propag_rule checked_grndness propag_rule0 gctxt =
+  let
+    val thy = Context.theory_of gctxt
+    val ctxt = Context.proof_of gctxt
+
+    val {constraint_propag_rules_hdidx, ...} = get_current_ruledata gctxt
+    val propag_rule = propag_rule0 |> normalize_lesseta_withvars ctxt
+
+    val nprems = length (Thm.prems_of propag_rule) - 1
+    val balance_conv =
+      Conv.concl_conv nprems (
+        (Conv.implies_conv (balance_conj_conv thy) Conv.all_conv)
+        then_conv (Conv.concl_conv ~1 (balance_conj_conv thy)))
+    val propag_rule = propag_rule0 |> normalize_withvars ctxt
+      |> Conv.fconv_rule balance_conv
+    val prems = Thm.prems_of propag_rule |> rev |> drop 1 |> rev
+
+    val heads_conj = Drule.cprems_of propag_rule |> drop nprems |> hd
+    val heads = Conjunction.dest_conjunctions heads_conj |> map Thm.term_of
+    val concls = Conjunction.dest_conjunctions (cconcl_of propag_rule) |> map Thm.term_of
+      |> filter_out (fn concl => concl aconv (Data.mk_Trueprop Data.True))
+
+
+    fun check_jud err term = 
+      case decompose_judgement gctxt term of
+        SOME _ => () 
+      | NONE => err term
+    val _ = heads |> map (check_jud (fn head =>
+      error ("add_constraint_propag_rule: head is of unknown judgement\n"^Syntax.string_of_term ctxt head)))
+    val _ = concls |> map (check_jud (fn concl =>
+      error ("add_constraint_propag_rule: conclusion is of unknown judgement\n"^Syntax.string_of_term ctxt concl)))
+
+    (* TODO(correctness): check if propag_rule is a propag_rule already *)
+
+    (* braucht insert_term_safe weil Variablen der propag_rule verschiedene
+       heads oder gen facts unifizierbar erscheinen lassen *)
+    val constraint_propag_rules_hdidx' = constraint_propag_rules_hdidx |> fold_index (fn (i, head) =>
+        Net.insert_term_safe (eq_pair Thm.eq_thm_prop (op =)) (head, (propag_rule, i))) heads
+
+    val (avail_vars0, avail_tvars0) =
+      (Term.add_vars (Thm.term_of heads_conj) [], Term.add_tvars (Thm.term_of heads_conj) [])
+    val (avail_vars, avail_tvars, prem_juds) =
+      check_prems ctxt false checked_grndness prems (avail_vars0, avail_tvars0)
+    val _ = concls |> map (fn concl =>
+      let
+        val vars = Term.add_vars concl []
+        val tvars = Term.add_tvars concl []
+        val bad_vars = vars |> Library.subtract (op =) avail_vars
+        val bad_tvars = tvars |> Library.subtract (op =) avail_tvars
+        val _ =
+          if null bad_vars andalso null bad_tvars then
+            ()
+          else
+            err_with_trace ctxt ("add_constraint_propag_rule: concl has additional vars or tvars: "^
+              Syntax.string_of_term ctxt concl
+              ^"\nvars are "^Library.commas (vars
+                   |> map (fn (ixn,T) => Syntax.string_of_term ctxt (Var(ixn,T))))
+              ^"\ntvars are "^Library.commas (tvars
+                   |> map (fn (ixn,S) => Syntax.string_of_typ ctxt (TVar(ixn,S))))
+              ^"\nbad_vars are "^Library.commas (bad_vars
+                   |> map (fn (ixn,T) => Syntax.string_of_term ctxt (Var(ixn,T))))
+              ^"\nbad_tvars are "^Library.commas (bad_tvars
+                   |> map (fn (ixn,S) => Syntax.string_of_typ ctxt (TVar(ixn,S)))))
+       in () end)
+        
+    (* val _ = tracing ("gen_add_frule: prem_juds are  "^Library.commas prem_juds) *)
+  in
+    gctxt
+    |> map_constraint_propag_rules_hdidx (K constraint_propag_rules_hdidx')
+  end
+
+
+(* constraint simplification rules are of the form
+     guards and sub-goals aka prems ==> heads conjunction *)
+fun add_constraint_simp_rule checked_grndness simp_rule0 gctxt =
+  let
+    val thy = Context.theory_of gctxt
+    val ctxt = Context.proof_of gctxt
+
+    val {constraint_simp_rules_hdidx, ...} = get_current_ruledata gctxt
+    val simp_rule = simp_rule0 |> normalize_lesseta_withvars ctxt
+
+    val nprems = length (Thm.prems_of simp_rule)
+    val balance_conv = Conv.concl_conv nprems (balance_conj_conv thy)
+    val simp_rule = simp_rule0 |> normalize_withvars ctxt
+      |> Conv.fconv_rule balance_conv
+    val prems = Thm.prems_of simp_rule
+
+    val heads_conj = cconcl_of simp_rule
+    val heads = Conjunction.dest_conjunctions heads_conj |> map Thm.term_of
+
+    fun check_jud err term = 
+      case decompose_judgement gctxt term of
+        SOME _ => () 
+      | NONE => err term
+    val _ = heads |> map (check_jud (fn head =>
+      error ("add_constraint_simp_rule: head is of unknown judgement\n"^Syntax.string_of_term ctxt head)))
+
+    (* TODO(correctness): check if simp_rule is a simp_rule already *)
+
+    (* braucht insert_term_safe weil Variablen der simp_rule verschiedene
+       heads oder gen facts unifizierbar erscheinen lassen *)
+    val constraint_simp_rules_hdidx' = constraint_simp_rules_hdidx |> fold_index (fn (i, head) =>
+        Net.insert_term_safe (eq_pair Thm.eq_thm_prop (op =)) (head, (simp_rule, i))) heads
+
+    val (avail_vars0, avail_tvars0) =
+      (Term.add_vars (Thm.term_of heads_conj) [], Term.add_tvars (Thm.term_of heads_conj) [])
+    val (avail_vars, avail_tvars, prem_juds) =
+      check_prems ctxt false checked_grndness prems (avail_vars0, avail_tvars0)
+
+    (* val _ = tracing ("gen_add_frule: prem_juds are  "^Library.commas prem_juds) *)
+  in
+    gctxt
+    |> map_constraint_simp_rules_hdidx (K constraint_simp_rules_hdidx')
+  end
+
+
+
+
+
+
 
 
 
@@ -3323,6 +5088,8 @@ val MRassm_decl_attr = Scan.lift (Scan.succeed (fn (gctxt, th) =>
     Context.Proof _ => (SOME (Context.map_proof (add_assm true th) gctxt), SOME th)
   | _ => error "MRassm attribute: not in a proof context"))
 
+(* TODO(correctness): actually implement deletion declarations or at least throw
+    not-implemented-exception to avoid confusion *)
 val add_comp_rule_att = Thm.declaration_attribute add_comp_rule
 val del_comp_rule_att = Thm.declaration_attribute (K I)
 
@@ -3343,6 +5110,12 @@ val impl_frule_del = Thm.declaration_attribute (K I)
 
 val impl_frule_uncheckedgrnd_add = Thm.declaration_attribute add_impl_frule_unchecked_grnd
 val impl_frule_uncheckedgrnd_del = Thm.declaration_attribute (K I)
+
+val constraint_propag_rule_add = Thm.declaration_attribute (add_constraint_propag_rule true)
+val constraint_propag_rule_del = Thm.declaration_attribute (K I)
+
+val constraint_simp_rule_add = Thm.declaration_attribute (add_constraint_simp_rule true)
+val constraint_simp_rule_del = Thm.declaration_attribute (K I)
 
 
 (* auf Definitionen mit == anwenden *)
@@ -3477,9 +5250,12 @@ fun rel_local_frees ctxt rel_frees_opt =
     val rel_names_tab_opt = rel_frees_opt |> Option.map (fn rel_frees =>
        Symtab.empty |> fold (fn n => Symtab.update (n, ())) (map fst rel_frees))
 
-    fun add_typing n = Free(n, Vartab.lookup free_constraints (n, ~1) |> the)
+    val normT = Logic.type_map (norm_with_env_in_run_state ctxt)
+    fun add_typing n = Free(n, Vartab.lookup free_constraints (n, ~1) |> the |> normT)
     val local_fixes = Variable.dest_fixes ctxt |> map snd
-      |> filter (fn n => Variable.is_fixed outer_ctxt n)
+      |> filter_out (fn n => Variable.is_fixed outer_ctxt n)
+    (* val _ = tracing ("rel_local_frees: fixes = "^commas (map snd (Variable.dest_fixes ctxt))
+      ^"\n  local_fixes ="^commas local_fixes) *)
     val rel_local_fixes = case rel_names_tab_opt of
         SOME rel_names_tab => local_fixes |> filter (Symtab.defined rel_names_tab)
       | NONE => local_fixes
@@ -3491,111 +5267,176 @@ fun rel_local_frees ctxt rel_frees_opt =
 
 
 (* TODO(opt): first-order Unifikationsvariablen anbieten die nicht von lokalen Fixes abhaengen koennen *)
-fun fresh_unifvar_proc ctxt fail_cont (_, [], [coutpat]) =
+fun fresh_unifvar_proc ctxt fail_cont (_, [], [outpat0]) =
   let
     val thy = Proof_Context.theory_of ctxt
-    val {outer_ctxt, unifvar_cnt, delayed_unifs, constraints, unifvar_inst} =
+    val { outer_ctxt, env, delayed_unifs, constraints } =
       case get_run_state (Context.Proof ctxt) of
         SOME st => st
       | NONE => err_with_trace ctxt ("fresh_unifvar_proc: no run state set")
 
-    val local_frees = rel_local_frees ctxt NONE
+    val norm = norm_with_env_in_run_state ctxt
+    val outpat = norm outpat0
+    val local_frees = rel_local_frees ctxt NONE 
 
-    val out_cT = Thm.ctyp_of_term coutpat
-    val T = (local_frees |> map (fn Free(n,T2) => T2)) ---> (Thm.typ_of out_cT)
-    val ct = list_comb (Var(("_X", unifvar_cnt), T), local_frees) |> cterm_of thy
-    val th = Data.fresh_unifvarI |> Drule.instantiate' [SOME out_cT] [SOME ct]
-    val st2 = {outer_ctxt=outer_ctxt, unifvar_cnt=unifvar_cnt+1, delayed_unifs=delayed_unifs,
-      constraints=constraints, unifvar_inst = unifvar_inst}
+    val out_T = fastype_of outpat
+    val out_n = outpat |> Term.head_of |> Term.dest_Var |> fst |> fst
+      handle TERM _ => err_with_trace ctxt ("fresh_unifvar_proc: output pattern not a variable: "
+        ^Syntax.string_of_term ctxt outpat)
+    val T = (local_frees |> map (fn Free(n,T2) => T2)) ---> out_T
+    val (var, ctxt2) = genvar_on_run_state out_n T ctxt
+    val t = list_comb (var, local_frees)
+    (* val _ = tracing ("generated fresh unifvar "^Syntax.string_of_term ctxt2 t) *)
+    val (res_prf, ctxt3) = inst_match_on_freshthm_prf Data.fresh_unifvarI  [SOME t] ctxt2
+      handle
+        TYPE (msg, Ts, _) => err_with_trace ctxt2 ("fresh_unifvar_proc: exception in instantiate' with "
+          ^Syntax.string_of_term ctxt2 t^":\n"^msg
+          ^"\n"^cat_lines (map (Syntax.string_of_typ ctxt2) Ts))
+      | THM (msg, _, _) => err_with_trace ctxt2 ("fresh_unifvar_proc: exception in instantiate' with "
+          ^Syntax.string_of_term ctxt2 t^":\n"^msg)
   in
-    ((th, [ct]), SOME st2)
+    ((res_prf, [t]), SOME (get_the_run_state (Context.Proof ctxt3)))
   end
 
 
-fun unify_proc ctxt fail_cont (ct1, [ct2], _) =
+fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
   let
     val thy = Proof_Context.theory_of ctxt
-    val {outer_ctxt, unifvar_cnt, delayed_unifs, constraints, unifvar_inst} =
+    val {outer_ctxt, env, delayed_unifs, constraints} =
       case get_run_state (Context.Proof ctxt) of
         SOME st => st
       | NONE => err_with_trace ctxt ("unify_proc: no run state set")
-    val (t1, t2) = (ct1, ct2) |> pairself Thm.term_of 
+    val (t1, t2) = (t1_0, t2_0) |> pairself (norm_with_env_in_run_state ctxt)
 
     val rel_frees = [] |> fold Term.add_frees [t1, t2]
     val local_frees = rel_local_frees ctxt (SOME rel_frees)
 
     val (t1_lft, t2_lft) = (t1, t2) |> pairself (fold_rev Term.lambda local_frees)
-    fun calc_res_state unifvar_cnt2 delayed_unifs2 unifvar_inst2 =
-      { outer_ctxt=outer_ctxt, unifvar_cnt=unifvar_cnt2, delayed_unifs=delayed_unifs2,
-        unifvar_inst=unifvar_inst2, constraints=constraints }
+    (* val _ = tracing ("unify_proc on (lifted) terms "
+      ^str_of_normed_term ctxt t1_lft ^",  "^str_of_normed_term ctxt t2_lft) *)
+
+    fun calc_res_state env2 delayed_unifs2 =
+      { outer_ctxt=outer_ctxt, env=env2, delayed_unifs=delayed_unifs2,
+        constraints=constraints }
 
     fun nonpattern_cont () =
       let
-        val delayed_assm = Thm.assume (cterm_of thy (Logic.mk_equals (t1_lft, t2_lft)))
-        (* TODO(opt): cache certifications of locally fixed frees *)
-        val inst_delayed_assm = delayed_assm
-          |> fold_rev (fn arg => fn th => Drule.fun_cong_rule th (cterm_of thy arg)) local_frees
-          |> beta_convert
-        val delayed_unifs2 = delayed_unifs |> insert (eq_pair (op aconv) (op aconv)) (t1_lft, t2_lft)
-        val st2 = calc_res_state unifvar_cnt delayed_unifs2 unifvar_inst
+        val delayed_assm = assumption_prf (Logic.mk_equals (t1_lft, t2_lft))
+        val (appd_delayed_assm, ctxt2) = (delayed_assm, ctxt)
+          |> fold_rev (fn arg => fn (prf, ctxt_) => fun_cong_prf prf arg ctxt_) local_frees
+        val aconv' = aconv_norm (norm_with_env_in_run_state ctxt2)
+        val delayed_unifs2 = delayed_unifs |> insert (eq_pair aconv' aconv') (t1_lft, t2_lft)
+
+        val (res_prf, ctxt3) = mps_match_on_freshthm_prf Data.unifyI [appd_delayed_assm] ctxt2
+
+        val env2 = get_the_env_in_run_state ctxt3
+        val st2 = calc_res_state env2 delayed_unifs2
       in
-        ((Data.unifyI OF [inst_delayed_assm], []), SOME st2)
+        ((res_prf, []), SOME st2)
       end
   in
-    (case try_pat_unify ctxt (t1_lft, t2_lft) (unifvar_cnt, unifvar_inst) of
-      SOME (unifvar_cnt2, unifvar_inst2) => 
+    (case try_pat_unify ctxt (t1_lft, t2_lft) env of
+      SOME env2 => 
         let
-          (* TODO(opt): only certify the relevant parts of the unification variable instantiation *)
-          val ct1' = ct1 |> Thm.instantiate_cterm ([], cert_standalone_term_inst thy unifvar_inst2)
-            |> beta_norm_cterm
-          
+          val envdiff = env2 |> Envir.term_env |> Vartab.dest
+            |> subtract (pairself fst #> (op =)) (Envir.term_env env |> Vartab.dest)
+          (* val _ = tracing ("unify_proc did term instantiation "
+            ^commas (envdiff |> map (fn (ixn, (T, t)) =>
+               Syntax.string_of_term ctxt (Var(ixn,T)) ^ " := "
+               ^ str_of_normed_term ctxt t))) *)
+
           fun changed_unifprob (t1_, t2_) =
-            [] |> fold Term.add_vars [t1_, t2_] |> exists (fn (ixn, T) => Vartab.defined unifvar_inst2 ixn)
+            [] |> fold (Term.add_vars o Envir.norm_term env) [t1_, t2_]
+            |> exists (curry Envir.lookup env2 #> is_some)
           val changed_delayed_unifs = delayed_unifs |> filter changed_unifprob
           val unchanged_delayed_unifs = delayed_unifs |> filter_out changed_unifprob
 
-          val (still_delayed_unifs, (unifvar_cnt3, unifvar_inst3)) =
-            try_solve_delayed_unifs ctxt changed_delayed_unifs (unifvar_cnt2, unifvar_inst2)
-          val st2 = calc_res_state unifvar_cnt2 (still_delayed_unifs @ unchanged_delayed_unifs) unifvar_inst2
+          val (still_delayed_unifs, env3) =
+            try_solve_delayed_unifs ctxt changed_delayed_unifs env2
+          val st2 = calc_res_state env3 (still_delayed_unifs @ unchanged_delayed_unifs)
+
+          val ctxt2 = ctxt |> Context.proof_map (set_run_state (SOME st2))
+          val (refl_prf, ctxt3) = reflexive_prf t1 ctxt2
+          val (res_prf, ctxt4) = mps_match_on_freshthm_prf Data.unifyI [refl_prf] ctxt3
+
+          (* val _ = tracing ("unify_proc: res_prf is "^Syntax.string_of_term ctxt4
+            (Envir.norm_term env3 (prop_of_proofp res_prf))) *)
+
+          val st4 = get_the_run_state (Context.Proof ctxt4)
         in
-          ((Data.unifyI OF [Thm.reflexive ct1'], []), SOME st2)
+          ((res_prf, []), SOME st4)
         end
     | NONE => nonpattern_cont ())
     handle TryPatUnify (ctxt, (bad_t1, bad_t2), msg) =>
       fail_cont ctxt ("unify_proc: "^msg)
   end
+  
 
-(* TODO(opt): first-order constraints anbieten die nicht von lokalen Fixes und Annahmen abhaengen koennen *)
-fun constraint_gen_proc ctxt fail_cont (ct, [], _) =
+fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
   let
     val thy = Proof_Context.theory_of ctxt
-    val {outer_ctxt, unifvar_cnt, delayed_unifs, constraints, unifvar_inst} =
+    val {outer_ctxt, constraints, delayed_unifs, ... } =
       case get_run_state (Context.Proof ctxt) of
         SOME st => st
       | NONE => err_with_trace ctxt ("constraint_gen_proc: no run state set")
-    val t = Thm.term_of ct
 
-    val local_assms = Assumption.local_assms_of ctxt outer_ctxt |> map Thm.term_of
+    val ctxt2 =
+      if local_constraint then ctxt
+      else ctxt |> unlift_unifvar_occs t0
+
+    val norm = norm_with_env_in_run_state ctxt2
+    val t = norm t0
+
+    (* val _ = tracing ("generating constraint for "^Syntax.string_of_term ctxt2 t) *)
+
     (* NB: we don't use Variable.export because we would then have to identify which Vars
        have been generalized on export and which ones are unification variables in the derivation *)
-    val rel_frees = [] |> fold Term.add_frees (cons t local_assms)
-    val local_frees = rel_local_frees ctxt (SOME rel_frees)
+    (* NB: since unification variables are applied to over the frees they can depend on this is also correct
+       in the case of unification variables in rel_assms that have been instantiated *) 
+    val rel_frees0 = [] |> Term.add_frees t
+    (* NB: invariant is that the assms are always wrt. the outer_ctxt *)
+    (* NB: since we normed all terms and types we can use op = to compare frees *)
+    val rel_assms =
+      get_assms (Context.Proof ctxt2) |> map norm
+      |> filter_out (fn assm => null (inter (op =) (Term.add_frees assm []) rel_frees0))
+    val rel_frees = rel_frees0
+      |> union (op =) ([] |> fold Term.add_frees rel_assms)
 
-    val local_prems = Assumption.local_prems_of ctxt outer_ctxt
+    (* val _ = tracing ("rel_frees0 are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees0)
+      ^"\nrel_frees are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees)) *)
 
-    val t' = Logic.list_all (local_frees |> map Term.dest_Free, Logic.list_implies (local_assms, t))
-    val ct'_th = Thm.assume (cterm_of thy t')
-    val ct_th = ct'_th
-      |> forall_elim_list (map (cterm_of thy) local_frees)
-      |> (fn th => Drule.implies_elim_list th local_prems)
+    val local_frees = rel_local_frees ctxt2 (SOME rel_frees)
+    (* val _ = tracing ("local_frees are "^commas (map PolyML.makestring (*Syntax.string_of_term ctxt2*) local_frees)) *)
+    
+    (* val _ =
+      if local_constraint orelse null local_frees then ()
+      else (* NB: we may not give up in this case because of explicit universe level annotations, e.g. in
+          (lam i:nat. lam x:guniv i ...) *)
+        err_with_trace ctxt2 ("constraint_gen_proc: constraint "
+          ^Syntax.string_of_term ctxt2 (norm_with_env_in_run_state ctxt t)
+          ^" contains local frees "^commas (map (Syntax.string_of_term ctxt2) local_frees)
+          ^" even after unlifting its unification variables") *)
+        
 
-    val constraints2 = insert (op =) t' constraints
-    (* TODO(feature): already simplify constraints on-the-fly *)
-    val constraints3 = (* simplify_constraints *) constraints2
-    val st2 = {outer_ctxt=outer_ctxt, unifvar_cnt=unifvar_cnt, delayed_unifs=delayed_unifs, constraints=constraints3,
-      unifvar_inst=unifvar_inst}
+    val t' = fold_rev Logic.all local_frees (Logic.list_implies (rel_assms, t))
+    val t'_prf = assumption_prf t'
+    val t_prf = t'_prf
+      |> fold (allE_rev_prf ctxt2) local_frees
+      |> fold (mp_rev_prf ctxt2 o assumption_prf) rel_assms
+
+    (* val _ = tracing ("generating constraint "^str_of_normed_term ctxt2 t'^" ...") *)
+
+    val intro_th = if local_constraint then Data.constraintI else Data.foconstraintI
+    val (res_prf, ctxt3) = mps_match_on_freshthm_prf intro_th [t_prf] ctxt2
+    val env2 = get_the_env_in_run_state ctxt3
+
+    (* val _ = tracing ("generated constraint "^str_of_normed_term ctxt3 t') *)
+
+    (* TODO(feature/opt): already simplify constraints on-the-fly *)
+    val constraints2 = insert (aconv_norm (norm_with_env_in_run_state ctxt3)) t' constraints
+    val st2 = { outer_ctxt=outer_ctxt, env=env2, delayed_unifs=delayed_unifs, constraints=constraints2 }
   in
-    ((Data.constraintI OF [ct_th], []), SOME st2)
+    ((res_prf, []), SOME st2)
   end
 
 
@@ -3623,18 +5464,24 @@ val setup =
     "Declaration of implicit forward rules without groundness checking"
   #> Attrib.setup (Binding.name "comp_rule") (Attrib.add_del add_comp_rule_att del_comp_rule_att)
       "Declaration of computational rules for Soft Type Checking"
+  #> Attrib.setup (Binding.name "constraint_propag_rule") (Attrib.add_del constraint_propag_rule_add constraint_propag_rule_del)
+    "Declaration of constraint propagation rules"
+  #> Attrib.setup (Binding.name "constraint_simp_rule") (Attrib.add_del constraint_simp_rule_add constraint_simp_rule_del)
+    "Declaration of constraint simplification rules"
   #> Context.theory_map (
        gen_add_nplace_synth_jud DisallowInconsis LthyTransfJud NONE 1 1 define_jud Data.define_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis NormalJud NONE 1 0 note_jud Data.note_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 1 1 concat_names_jud Data.concat_names_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 1 fresh_unifvar_jud Data.fresh_unifvar_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 1 0 unify_jud Data.unify_headterm
-       #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 0 constraint_jud Data.constraint_headterm)
+       #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 0 constraint_jud Data.constraint_headterm
+       #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 0 foconstraint_jud Data.foconstraint_headterm)
   #> Context.theory_map (
        add_syn_proc concat_names_jud "concat_names_proc" concat_names_proc
        #> add_general_syn_proc fresh_unifvar_jud "fresh_unifvar_proc" fresh_unifvar_proc
        #> add_general_syn_proc unify_jud "unify_proc" unify_proc
-       #> add_general_syn_proc constraint_jud "constraint_gen_proc" constraint_gen_proc
+       #> add_general_syn_proc constraint_jud "constraint_gen_proc" (constraint_gen_proc true)
+       #> add_general_syn_proc foconstraint_jud "foconstraint_gen_proc" (constraint_gen_proc false)
        #> add_lthy_transform define_jud  "define" define_lthy_transf)
 
 

@@ -8,8 +8,8 @@ begin
 
 
 definition
-  unify where
-  [MRjud 1 1]: "unify tup C \<equiv> ((\<forall> P\<in>C. P) \<longrightarrow> fst tup = snd tup)"
+  founify where
+  [MRjud 1 1]: "founify tup C \<equiv> ((\<forall> P\<in>C. P) \<longrightarrow> fst tup = snd tup)"
 
 definition
   hasNoOcc where
@@ -86,52 +86,55 @@ lemma [MR]: "
 
 
 lemma [MR]: "
-    [| try (var x) ; unify (x, t) C |] ==>
-  unify (t, x) C"   by (simp add: unify_def)
+    [| try (var x) ; founify (x, t) C |] ==>
+  founify (t, x) C"   by (simp add: founify_def)
 
 lemma [MR]: "
-    \<lbrakk>  try (var x)  ;  subst x t'  ;  unify (t', t) C \<rbrakk> \<Longrightarrow>
-  unify (x, t) C " by (simp add: unify_def subst_def)
+    \<lbrakk>  try (var x)  ;  subst x t'  ;  founify (t', t) C \<rbrakk> \<Longrightarrow>
+  founify (x, t) C " by (simp add: founify_def subst_def)
 
 lemma [MR]: "
     \<lbrakk>  try (var x) ;  try (subst x x)  ;  subst t t'  ;  hasNoOcc t' x \<rbrakk> \<Longrightarrow>
-  unify (x, t) { x = t' }"    by (simp add: unify_def subst_def)
+  founify (x, t) { x = t' }"    by (simp add: founify_def subst_def)
 
 lemma [MR]: "
-   [| unify (t1, t1') C1  ;  addToCtxt C1 ==> unify (t2, t2') C2 |] ==>
- unify (t1 t2, t1' t2') (C1 Un C2)"     by (auto simp add: unify_def addToCtxt_def)
+   [| founify (t1, t1') C1  ;  addToCtxt C1 ==> founify (t2, t2') C2 |] ==>
+ founify (t1 t2, t1' t2') (C1 Un C2)"     by (auto simp add: founify_def addToCtxt_def)
 
 lemma [MR]: "
-  unify (t, t) {}"  by (simp add: unify_def)
-
-
+  founify (t, t) {}"  by (simp add: founify_def)
 
 
 
 
 schematic_lemma
+  assumes [MRassm]: "var X" "var Y"
+  shows "founify (c X, c Y) ?C"
+  by (tactic {* MetaRec.metarec_tac @{context} 1 *})
+
+schematic_lemma
   assumes [MRassm]: "var X"
-  shows "unify (c X t, c t X) ?C"
+  shows "founify (c X t, c t X) ?C"
   by (tactic {* MetaRec.metarec_tac @{context} 1 *})
 
 (* performance test *)
 schematic_lemma
   assumes [MRassm]: "var A" "var B" "var C" "var D" "var E" "var F" "var G"
-  shows "unify (c A B C D E F G, c (f1 5 5) (f2 A A) (f3 B B) (f4 C C) (f5 D D) (f6 E E) (f7 F F)) ?C"
+  shows "founify (c A B C D, c (f1 5 5) (f2 A A) (f3 B B) (f4 C C)) ?C"
   by (tactic {* MetaRec.metarec_tac @{context} 1 *})
 
 
 (* throws occurs check *)
 (* schematic_lemma
   assumes [MRassm]: "var X" "var Y"
-  shows "unify (c Y X, c (f X) Y) ?C"
+  shows "founify (c Y X, c (f X) Y) ?C"
   by (tactic {* MetaRec.metarec_tac @{context} 1 *}) *)
 
 
 (* throws occurs check *)
 (* schematic_lemma
   assumes [MRassm]: "var X"
-  shows "unify (c X, X) ?C"
+  shows "founify (c X, X) ?C"
   by (tactic {* MetaRec.metarec_tac @{context} 1 *}) *)
 
 
