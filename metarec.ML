@@ -51,8 +51,15 @@ struct
 
 
 
-(* TODO(feature): globally track unification variables (those introduced by fresh_unifvar_proc) in run_state
-     and disallow their instantiation during rule matching *)
+(* TODO(feature): globally track unification variables (those introduced by fresh_unifvar_proc;
+     as opposed to matching variables) in run_state and disallow their instantiation during rule matching *)
+
+(* TODO(feature):
+     * tracking of originating rule  of constraints and delayed unification problems to allow better error message 
+     * tracking von Unifikationen waehrend Constraint-{Propagierung, Vereinfachung}
+       (dann braucht man keine on-the-fly Propagierung von Constraints sobald sie entstehen um
+       bessere Fehlermeldungen zu kriegen)
+*)
 
 
 
@@ -1269,22 +1276,120 @@ fun unifies thy (t1, t2) =
 
 
 exception TryPatUnify of Proof.context * (term * term) * string
+exception TryStructUnify of Proof.context * (term * term) * string
 
 
-fun try_pat_unify ctxt (t1, t2) env =
+fun strip_abss t =
+  case t of
+    (abs as Abs(n, T, body)) =>
+      let
+        val (x, fixed_body) = Term.dest_abs (n, T, body)
+        val fix = Free(x, T)
+      in
+        strip_abss fixed_body |> apfst (cons fix)
+      end
+  | _ => ([], t)
+
+(* TODO(refactor): collect fixed bounds and pass to f. then use this in patternify instead of strip_abss *)
+(* t is assumed to be beta normal *)
+fun fold_varapps f fixes t =
+  case Term.strip_comb t of
+    (Var(ixn, T), ts) => f fixes (ixn, T) ts
+  | (Abs (n, T, t2), []) =>
+      let val (x, fixed_t2) = Term.dest_abs (n, T, t2)
+      in fold_varapps f (cons (Free (x, T)) fixes) fixed_t2 end
+  | (a, ts) => fold (fold_varapps f fixes) ts
+
+
+(* term is assumed to be normal wrt env *)
+fun patternify ctxt term env =
+  env |> fold_varapps (fn fixes => fn v0 => fn ts => fn env_ =>
+      case Envir.norm_term env_ (Var v0) of
+        Var (ixn, T) =>
+          let
+            fun fixes_in t = Term.add_frees t [] |> map Free |> inter (op aconv) fixes
+            val app_fxs = inter (op aconv) fixes ts
+            val (ts', app_fxs') = [] |> fold_map (fn t => fn app_fxs' =>
+                if member (op aconv) app_fxs' t then (NONE, app_fxs')
+                else if member (op aconv) app_fxs t then (NONE, cons t app_fxs')
+                else if subset (op aconv) (fixes_in t, app_fxs) then (NONE, app_fxs')
+                else (SOME t, app_fxs'))
+              ts
+          in
+            if ts ~~ ts' |> forall (fn (t, t') => is_some t' orelse member (op aconv) app_fxs t) then
+              env_
+            else
+              let
+                (* val tostr = Syntax.string_of_term ctxt
+                val _ = tracing ("patternify on varapp "^Syntax.string_of_term ctxt
+                    (list_comb (Var (ixn,T), ts)) ^" results in:\n"
+                  ^"\n  fixes: "^commas (map tostr fixes)
+                  ^"\n  app_fxs: "^commas (map tostr app_fxs)
+                  ^"\n  app_fxs': "^commas (map tostr app_fxs')
+                  ^"\n  ts': "^commas (map (fn t'_opt =>
+                    case t'_opt of SOME t' => tostr t' | NONE => "NONE") ts')) *)
+                val T' = map fastype_of app_fxs'
+                  ---> map_filter (Option.map fastype_of) ts'
+                  ---> drop (length ts) (binder_types T) ---> body_type T
+                val (env_2, v') = Envir.genvar (fst ixn) (env_, T')
+                val v'_abs = list_comb (v', app_fxs' @ map_filter I ts')
+                  |> fold_rev Term.lambda ts
+              in
+                env_2 |> curry Envir.update ((ixn, T), v'_abs)
+              end
+          end
+      | t => patternify ctxt t env_)
+    [] term
+
+fun try_struct_unify ctxt (t1_0, t2_0) env = 
   let
-    fun unif_failed () = raise TryPatUnify(ctxt, (t1, t2), "try_pat_unify: pattern unification of "
-          ^str_of_normed_term ctxt t1^" and "^str_of_normed_term ctxt t2^" failed")
+    fun unif_failed () = raise TryStructUnify(ctxt, (t1_0, t2_0), "try_struct_unify: structural unification of "
+          ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
+    val (t1, t2) = pairself (Envir.norm_term env) (t1_0, t2_0)
   in
     let
       val thy = Proof_Context.theory_of ctxt
       val (tyenv2, maxidx2) = (Envir.type_env env, Envir.maxidx_of env)
         |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
       val env2 = Envir.Envir { maxidx = maxidx2, tenv = Envir.term_env env, tyenv = tyenv2 }
-      val env3 = Pattern.unify thy (t1, t2) env2
-
+      val env3 = StructUnify.unify thy (t1, t2) env2
     in
       SOME env3
+    end
+      handle
+          Pattern.Unif => unif_failed ()
+        | Type.TUNIFY => unif_failed ()
+  end
+
+fun try_pat_unify ctxt (t1_0, t2_0) env =
+  let
+    fun unif_failed () = raise TryPatUnify(ctxt, (t1_0, t2_0), "try_pat_unify: pattern unification of "
+          ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
+    val (t1_1, t2_1) = pairself (Envir.norm_term env) (t1_0, t2_0)
+    (* val relfrees = [] |> fold Term.add_frees [t1_1, t2_1] |> map Free *)
+    val (t1_2, t2_2) = (t1_1, t2_1) (* |> pairself (fold Term.lambda relfrees) *)
+    val tostr = Syntax.string_of_term ctxt
+    (* val _ = tracing ("try_pat_unify on"
+      ^"\n  "^tostr t1_1 ^"  lifted to "^tostr t1_2
+      ^"\n  "^tostr t2_1 ^"  lifted to "^tostr t2_2) *)
+  in
+    let
+      (* FIXME?: patternify buggy? *)
+      val env2 = env (* |> fold (patternify ctxt) [t1_2, t2_2] *)
+      val (t1, t2) = pairself (Envir.norm_term env2) (t1_2, t2_2)
+      val _ =
+        if t1 abeconv t1_2 andalso t2 abeconv t2_2 then ()
+        else
+          tracing ("try_pat_unify: patternified:"
+            ^"\n"^tostr t1_0 ^" = "^ tostr t1_2 ^"  ->  "^tostr t1
+            ^"\n"^tostr t2_0 ^" = "^ tostr t2_2 ^"  ->  "^tostr t2)
+      val thy = Proof_Context.theory_of ctxt
+      val (tyenv3, maxidx3) = (Envir.type_env env2, Envir.maxidx_of env2)
+        |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
+      val env3 = Envir.Envir { maxidx = maxidx3, tenv = Envir.term_env env2, tyenv = tyenv3 }
+      val env4 = Pattern.unify thy (t1, t2) env3
+    in
+      SOME env4
     end
       handle
           Pattern.Pattern => NONE
@@ -1292,13 +1397,16 @@ fun try_pat_unify ctxt (t1, t2) env =
         | Type.TUNIFY => unif_failed ()
   end
 
-fun try_solve_delayed_unifs ctxt delayed_unifs env =
-   ([], env)
-   |> fold (fn (t1_, t2_) => fn (sd_ufs, env_) =>
-          case try_pat_unify ctxt (t1_, t2_) env_ of
-            SOME env_2 => (sd_ufs, env_2)
-          | NONE => (cons (t1_, t2_) sd_ufs, env_))
-        delayed_unifs
+fun try_solve_delayed_unifs structural ctxt delayed_unifs env =
+  let val unif = if structural then try_struct_unify else try_pat_unify
+  in
+    ([], env)
+    |> fold (fn (t1_, t2_) => fn (sd_ufs, env_) =>
+           case unif ctxt (t1_, t2_) env_ of
+             SOME env_2 => (sd_ufs, env_2)
+           | NONE => (cons (t1_, t2_) sd_ufs, env_))
+         delayed_unifs
+  end
 
 
 
@@ -2074,7 +2182,9 @@ fun abstr_inst (avail_vars, avail_tvars) =
 
 
 
-
+(* TODO(refactor): realize with fold_varapps; but normalization on each step is in the way.
+     necessary if variables are sometimes partially applied, but this should not be the case
+     for freshunifvar-generated ones.  *)
 fun unlift_unifvar_occs t0 ctxt =
   let val t = norm_with_env_in_run_state ctxt t0
   in
@@ -2085,7 +2195,8 @@ fun unlift_unifvar_occs t0 ctxt =
           let
             val T' = drop (length ts) (binder_types T) ---> body_type T
             val (v', ctxt2) = genvar_on_run_state n T' ctxt
-            (* ts do not occur in v' of course, so this corresponds to unlifting *)
+            (* NB: ts do not occur in v' of course, so this corresponds to unlifting and
+               loose bounds in ts don't matter *)
             val v'_abs = v' |> fold_rev Term.lambda ts
           in
             ctxt2 |> Context.proof_map (map_env_in_run_state (curry Envir.update ((ixn, T), v'_abs)))
@@ -3564,10 +3675,10 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
             val C = norm_with_env_in_run_state ctxt_ C0
             exception ConstraintSimpFailed
             fun fail_cont ctxt_ msg =
-              let val _ = () (* tracing
+              let val _ = tracing
                 ("failed to simplify a constraint "(*^"with fixes or assumes: "*)
                 ^str_of_normed_term ctxt_ C
-                ^"\n\nbecause:\n"^msg) *)
+                ^"\n\nbecause:\n"^msg)
               in
                 raise ConstraintSimpFailed
               end
@@ -3581,9 +3692,9 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
             | SOME ([C_prf], ctxt_3) =>
                 let
                  val eq_C = (aconv_norm (norm_with_env_in_run_state ctxt_3))
-                 (* val _ = tracing ("simplied constraint "^str_of_normed_term ctxt_3 C
-                   ^" to "^commas (map (str_of_normed_term ctxt_3)
-                     (get_the_run_state (Context.Proof ctxt_3) |> #constraints))) *)
+                 val _ = tracing ("simplied constraint  "^str_of_normed_term ctxt_3 C
+                   ^"  to\n"^cat_lines (map (str_of_normed_term ctxt_3 #> curry (op ^) "  ")
+                     (get_the_run_state (Context.Proof ctxt_3) |> #constraints)))
                  val _ = replay_prf ctxt_3 (C_prf
                    |> fold_rev (impI_prf ctxt_3) (get_constraints_in_run_state ctxt_3)) (* for testing *)
                  (* val _ = tracing "replay of simplification proof done" *)
@@ -3614,17 +3725,25 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
     val env3 = get_the_env_in_run_state ctxt4
 
-    val (still_delayed_unifs, env4) =
-      (* TODO(feature): add optional fallback to FO-unif ? *)
-      try_solve_delayed_unifs ctxt4 delayed_unifs env3
+    (* TODO: after pattern unifications are pruned, try first-order unification
+      (or rather demand that type constructor applications are with ` ??)
+      and then try structural non-pattern unification *)
+    val (delayed_unifs2, env4) =
+      try_solve_delayed_unifs false ctxt4 delayed_unifs env3
       handle TryPatUnify (ctxt_, (bad_t1, bad_t2), msg) =>
         err_with_trace ctxt_ ("metarec: solving of a delayed unification problem failed: "^msg)
 
-    val ctxt5 = ctxt4 |> Context.proof_map (map_env_in_run_state (K env4))
+      (* TODO(feature): add optional fallback to FO-unif ? *)
+    val (delayed_unifs3, env5) = 
+      try_solve_delayed_unifs true ctxt4 delayed_unifs2 env4
+      handle TryStructUnify (ctxt_, (bad_t1, bad_t2), msg) =>
+        err_with_trace ctxt_ ("metarec: solving of a delayed unification problem structurally failed: "^msg)
+
+    val ctxt5 = ctxt4 |> Context.proof_map (map_env_in_run_state (K env5))
 
     val solved_delayed_unifs = delayed_unifs
       |> subtract (pairself Logic.mk_equals #> aconv_norm (norm_with_env_in_run_state ctxt5))
-           still_delayed_unifs
+           delayed_unifs3
 
     val (prf4, ctxt6) = (prf3, ctxt5) |> fold (fn (t1, t2) => fn (prf_, ctxt_) =>
          let
@@ -3638,13 +3757,13 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
     val prf5 = prf4 |> fold_rev (fn (t1, t2) =>
          let val P = Logic.mk_equals (t1, t2)
          in impI_prf ctxt6 P end)
-       still_delayed_unifs
+       delayed_unifs3
 
       (* TODO(opt): nur close_derivation machen wenn die Ableitung gross genug war ?! *)
       (* TODO(feature): try to un-normalize to original judgement? *)
     val th = replay_prf ctxt6 prf5 |> Thm.close_derivation
   in
-    ((th, oobjs), (still_delayed_unifs, constraints'))
+    ((th, oobjs), (delayed_unifs3, constraints'))
   end
 
 
@@ -5352,7 +5471,7 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
           val unchanged_delayed_unifs = delayed_unifs |> filter_out changed_unifprob
 
           val (still_delayed_unifs, env3) =
-            try_solve_delayed_unifs ctxt changed_delayed_unifs env2
+            try_solve_delayed_unifs false ctxt changed_delayed_unifs env2
           val st2 = calc_res_state env3 (still_delayed_unifs @ unchanged_delayed_unifs)
 
           val ctxt2 = ctxt |> Context.proof_map (set_run_state (SOME st2))

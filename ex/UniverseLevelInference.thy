@@ -3,6 +3,19 @@ imports "../ZFMetaRec"
 begin
 
 
+
+ML {*
+
+  val B_x = @{cpat "?B(x::i) :: i"} |> Thm.term_of
+  val prod = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
+  val env' = 
+    StructUnify.unify @{theory} (B_x, prod) (Envir.empty 1)
+  val B_x' = Envir.norm_term env' B_x |> cterm_of @{theory}
+  val prod' = Envir.norm_term env' prod |> cterm_of @{theory}
+*}
+
+
+
 (* this is an improper axiomatization of a universe hierarchy:
    we just state closure under the things we need instead of closure under
    the primitive set theoretic constructions (union, replacement etc.) *)
@@ -15,12 +28,16 @@ where
   prod_in_guniv:
     "[|  i : nat  ;  A : guniv i  ;  (!! x. x : A ==> B(x) : guniv i)  |]
      ==> (PROD x:A. B(x)) : guniv i" and
-  guniv_in_guniv: "[|  i : nat  ;  j : nat  ;  i < j |] ==> guniv i : guniv j" and
-  guniv_cumul: "[|  i : nat  ;  j : nat  ;  i le j ;  x : guniv i |] ==> x : guniv j"
-    (* TODO: guniv_cumul ist ableitbar aus guniv_in_guniv und trans_guniv *)
+  guniv_in_guniv: "[|  i : nat  ;  j : nat  ;  i < j |] ==> guniv i : guniv j"
 
 
 
+lemma guniv_cumul: "[|  i : nat  ;  j : nat  ;  i le j ;  x : guniv i |] ==> x : guniv j"
+  apply (cases "i = j") apply simp
+  apply (rule trans_guniv[of j x "guniv i"], assumption+)
+  apply (rule guniv_in_guniv, assumption+)
+  apply (rule Ord_linear_lt[of i j], simp+)
+  by (simp add: le_iff)
 
 lemma natelem_in_guniv: "i : nat ==> x : nat ==> x : guniv i"
   apply (rule trans_guniv) apply assumption+ by (rule nat_in_guniv)
@@ -33,7 +50,7 @@ definition
   ptuniv :: "i" ("univ") where
   "ptuniv == 0"
 definition (* $ is taken by ZFMetaRecSyntax, @ is taken by List_ZF *)
-  ptapp :: "i => i => i" (infixr "#" 100) where
+  ptapp :: "i => i => i" (infixl "#" 100) where
   "ptapp(f,x) == 0"
 definition
   ptlambda :: "(i => i) => i" where
@@ -85,18 +102,18 @@ lemma [MRjud 2 0]: "i le j == i le j" by simp
   
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 (* low prio rule for type inference of free variable x *)
+(* FIXME: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
+   sofort  Unifikation A == A'  durchfuehren. Entspricht also on-the-fly constraint propagation mit der
+   Typ-Constraint-Sharing-Regel von unten. Hui! *)
 lemma [MR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
     constraint (A <: guniv i)  ;  foconstraint (i <: nat)  ;  constraint (x <: A) |] ==>
   x elabto x : A"
  unfolding elabjud_def constraint_const_def constraint_typing_def .
 
-(* TODO: eta-expansion of B not necessary when introducing it as a unification variable.
-     what was the motivation for this? *)
-lemma [MR]: "[|
+lemma [MR_unchecked]: "[|
     t1 elabto t1' : T  ;
-    freshunifvar A  ;
-    !! x. freshunifvar (B(x))  ;
+    freshunifvar A  ;  freshunifvar B  ;
     unify T (PROD x:A. B(x))  ;
     t2 elabto t2' : A'  ;
     unify A A'  |] ==>
@@ -124,15 +141,15 @@ lemma [MR]: "[|
 
 lemma [MR]: "[|
     A elabto A' : guniv i  ;  foconstraint (i <: nat)  ;
-    !! x.  x elabto x : A'  ==>  B(x) elabto B'(x) : guniv j  ;
+    !! x.  x elabto x : A'  ==>  B(x) elabto B'(x) : guniv j  ;  foconstraint (j <: nat)  ;
     freshunifvar k  ;  foconstraint (k <: nat)  ;  foconstraint (i le k)  ;
     foconstraint (j le k)  |] ==>
   (PI x:A. B(x)) elabto (PROD x:A'. B'(x)) : guniv k"
-  unfolding elabjud_def foconstraint_const_def constraint_typing_def
+  unfolding elabjud_def foconstraint_const_def constraint_typing_def fresh_unifvar_const_def
   apply (rule prod_in_guniv)
   apply assumption
-  apply (rule guniv_cumul)
-  sorry
+  apply (rule guniv_cumul[of i k], assumption+)
+  by (rule guniv_cumul[of j k], assumption+)
 
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [MR_unchecked]: "[|
@@ -302,6 +319,12 @@ ML {*  elab @{context} @{term "(fun x. x)"}  *}
 
 ML {*  elab @{context} @{term "f # x"}  *}
 
+(* FIXME: bei Unifikationsproblem  ?B(t) == (PROD y:?C. ?D(y))  (konkret t:=x unten) muessen wir loesen mit
+     ?B := (% x. PROD y:?C'(x). ?D'(x, y)),   ?C := ?C'(t)    ?D := ?D'(t)
+   loesen. weiterhin brauchen wir allgemeiner strukturelle pattern unifikation (d.h. paralleler struktureller
+   Abstieg auch in non-patterns moeglich), die das beachtet und auch die bestehende patternification durchfuehrt. *)
+ML {*  elab @{context} @{term "f # x # y"}  *}
+
 ML {*
   val fixes = Variable.dest_fixes @{context} |> map snd
   val constraints = Variable.constraints_of @{context} |> fst |> Vartab.dest |> filter (fn ((n, ix), _) => ix = ~1)
@@ -323,6 +346,14 @@ ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 ML {*  elab @{context} @{term "(lam i:nat. lam x:guniv i. fun f. f # x)"} *}
 
 ML {*  elab @{context} @{term "(lam i:nat. lam x:guniv i. fun f. f ` x)"} *}
+
+(* FIXME: we need constraint propagation to combine the constraints to find the typing error *)
+ML {*  elab @{context} @{term "x # x"} *}
+
+(* fails with occurs check *)
+(* ML {*  elab @{context} @{term "(fun x. x # x)"} *} *)
+
+
 
 
 
@@ -371,15 +402,31 @@ definition
        globale Auswirkungen haben, oder nehmen wir Konfluenz an?)
      * Wahl einer minimalen Menge von Constraints die die Gesamtmenge erzeugen (modulo den Vereinfachungen) *)
 (* wie bei echten CHRs matchen wir die Regeln bloss und nutzen dann ggf. explizite Unifikation in den Premissen *)
-lemma [constraint_propag_rule]: "i < j &&& j < k ==> i < k" sorry
-lemma [constraint_propag_rule]: "i < j &&& j le k ==> i < k" sorry
-lemma [constraint_propag_rule]: "i le j &&& j < k ==> i < k" sorry
-lemma [constraint_propag_rule]: "i le j &&& j le k ==> i le k" sorry
-lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i < j &&& j < i)" sorry
+lemma [constraint_propag_rule]: "i < j &&& j < k ==> i < k"
+  apply (erule conjunctionE) by (rule Ordinal.lt_trans)
+
+lemma [constraint_propag_rule]: "i < j &&& j le k ==> i < k"
+  apply (erule conjunctionE) by (rule Ordinal.lt_trans2)
+
+lemma [constraint_propag_rule]: "i le j &&& j < k ==> i < k"
+  apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
+
+lemma [constraint_propag_rule]: "i le j &&& j le k ==> i le k"
+  apply (erule conjunctionE) by (rule Ordinal.le_trans)
+
+lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i < j &&& j < i)"
+  apply (rule Pure.conjunctionI)
+  by (simp add: universe_inconsistency_def)+
+
 
   (* NB: no try around unify. corresponds to CHR  (i <= j , j <= i) == (i = j) *)
-lemma [constraint_simp_rule]: "unify i j ==> (i le j &&& j le i)" sorry
-lemma [constraint_simp_rule]: "i le i" sorry
+lemma [constraint_simp_rule]: "[| unify i j  ;  constraint (i <: nat)  ;  constraint (j <: nat)  |] ==>
+  (i le j &&& j le i)"
+  apply (rule Pure.conjunctionI)
+
+  by (simp add: unify_const_def constraint_const_def constraint_typing_def)+
+lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
+  by (simp add: constraint_const_def constraint_typing_def)
 
 (* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
 lemma [constraint_propag_rule]: "[|  unify A A2  ;  t <: A &&& t <: A2  |] ==> True"
@@ -399,6 +446,13 @@ definition
 lemma list'_ty: "list' : (PROD i:nat. guniv i -> guniv i)"
   unfolding list'_def
   apply typecheck
+  by (rule list_in_guniv)
+
+lemma [MR]: "[|
+    foconstraint (i <: nat)  ;    A <: guniv i  |] ==>
+  (list' ` i ` A) <: guniv i"
+  unfolding foconstraint_const_def constraint_typing_def  list'_def
+  apply simp
   by (rule list_in_guniv)
 
 
@@ -463,7 +517,7 @@ lemma [MR_unchecked]: "[|
     foconstraint (i <: nat)  ;  constraint (A <: guniv i)  ;  constraint (B <: guniv i)  |] ==>
   map elabto (map' ` i ` A ` B) : (A -> B) -> list' ` i ` A -> list' ` i ` B"
   unfolding elabjud_def foconstraint_const_def constraint_const_def constraint_typing_def
-  sorry
+  by (simp add: map'_def list'_def)
 
 
 
