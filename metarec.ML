@@ -3608,10 +3608,12 @@ and constraint_simplification ctxt0 =
 and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
   let
     val thy = Proof_Context.theory_of ctxt0
+    val frees = fold Term.add_frees (pobj :: iobjs) []
     val ctxt = ctxt0
       |> add_to_msg_trace (fn () =>
            "metarec: on judgement "^quote jid^" with input ("
              ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])")
+      |> Variable.add_fixes_direct (map fst frees)
       |> fold Variable.declare_term (pobj :: iobjs)
       |> (fn ctxt => ctxt |> Context.proof_map (set_run_state (init_run_state ctxt) #> set_assms []))
 
@@ -5511,9 +5513,9 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
         let
           val ctxt2_ = ctxt |> unlift_unifvar_occs t0
           val t_ = norm_with_env_in_run_state ctxt2_ t0
-          val vars = Term.add_vars t_ [] |> map fst
+          val fovars = Term.add_vars t_ [] |> map fst
         in
-          ctxt2_ |> Context.proof_map (map_fovars_in_run_state (fn fovars => union (op =) vars fovars))
+          ctxt2_ |> Context.proof_map (map_fovars_in_run_state (union (op =) fovars))
         end
 
     val norm = norm_with_env_in_run_state ctxt2
@@ -5525,18 +5527,24 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
        have been generalized on export and which ones are unification variables in the derivation *)
     (* NB: since unification variables are applied to over the frees they can depend on this is also correct
        in the case of unification variables in rel_assms that have been instantiated *) 
-    val rel_frees0 = [] |> Term.add_frees t
     (* NB: invariant is that the assms are always wrt. the outer_ctxt *)
     (* NB: since we normed all terms and types we can use op = to compare frees *)
-    val rel_assms =
-      get_assms (Context.Proof ctxt2) |> map norm
-      |> filter_out (fn assm => null (inter (op =) (Term.add_frees assm []) rel_frees0))
-    val rel_frees = rel_frees0
-      |> union (op =) ([] |> fold Term.add_frees rel_assms)
+    val rel_frees0 =
+      if local_constraint then
+        [] |> Term.add_frees t
+      else
+        []
 
     (* val _ = tracing ("rel_frees0 are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees0)
       ^"\nrel_frees are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees)) *)
 
+    val local_frees0 = rel_local_frees ctxt2 (SOME rel_frees0) |> map Term.dest_Free
+    (* TODO(feature): do we want also transitively-relevant assms for some constraints? *)
+    val rel_assms =
+      get_assms (Context.Proof ctxt2) |> map norm
+      |> filter_out (fn assm => null (inter (op =) (Term.add_frees assm []) local_frees0))
+      |> rev
+    val rel_frees = local_frees0 |> fold Term.add_frees rel_assms
     val local_frees = rel_local_frees ctxt2 (SOME rel_frees)
     (* val _ = tracing ("local_frees are "^commas (map PolyML.makestring (*Syntax.string_of_term ctxt2*) local_frees)) *)
     

@@ -79,6 +79,9 @@ lemma natelem_in_guniv: "i : nat ==> x : nat ==> x : guniv i"
 definition
   ptuniv :: "i" ("univ") where
   "ptuniv == 0"
+definition
+  hole :: "i" ("?") where
+  "hole == 0"
 definition (* $ is taken by ZFMetaRecSyntax, @ is taken by List_ZF *)
   ptapp :: "i => i => i" (infixl "#" 100) where
   "ptapp(f,x) == 0"
@@ -142,6 +145,12 @@ lemma [MR_unchecked]: "[|
  unfolding elabjud_def constraint_const_def constraint_typing_def .
 
 lemma [MR_unchecked]: "[|
+    freshunifvar x  ;  freshunifvar A  ;  freshunifvar i  ;
+    constraint (A <: guniv i)  ;  foconstraint (i <: nat)  ;  constraint (x <: A) |] ==>
+  ? elabto x : A"
+ unfolding elabjud_def constraint_const_def constraint_typing_def .
+
+lemma [MR_unchecked]: "[|
     t1 elabto t1' : T  ;
     freshunifvar A  ;  freshunifvar B  ;
     unify T (PROD x:A. B(x))  ;
@@ -192,9 +201,10 @@ lemma [MR_unchecked]: "[|
 
 lemma [MR_unchecked]: "[|
     freshunifvar j  ;
-    foconstraint (i <: nat)  ;  foconstraint (j <: nat)  ;   foconstraint (i < j)  |] ==>
-  (guniv i) elabto (guniv i) : (guniv j)"
-  unfolding elabjud_def foconstraint_const_def constraint_typing_def
+    i elabto i' : A  ;  unify A nat  ;
+    foconstraint (i' <: nat)  ;  foconstraint (j <: nat)  ;   foconstraint (i' < j)  |] ==>
+  (guniv i) elabto (guniv i') : (guniv j)"
+  unfolding elabjud_def foconstraint_const_def constraint_typing_def unify_const_def
   by (rule guniv_in_guniv)
 
 lemma [MR]: "[|
@@ -220,6 +230,12 @@ lemma [MR]: "
     try (t :> A) ==>
   t <: A"
   by (simp add: syn_constraint_typing_def constraint_typing_def try_const_def)
+
+lemma [MR]: "
+    foconstraint (i <: nat) ==>
+  nat <: guniv i"
+  unfolding foconstraint_const_def constraint_typing_def
+  by (rule nat_in_guniv)
 
 lemma [MR]: "[|
     foconstraint (i <: nat)  ;
@@ -248,6 +264,11 @@ lemma [MR]: "[|
    because B(x) constitutes a non-pattern.
    So dependent product typing constraints t <: (PROD x:A. B(x))
    can only be created by the free variable typing rule *)
+(* TODO: when inferring the types of newly defined constants from their definition,
+   we need to postprocess occurrences  ?B ` x  in the inferred type back to  ?B2(x)
+   by ?B := (% x:A. ?B2(x)),
+   to avoid need of unification modulo ZF-beta during type inferences involving
+   the new constant *)
 lemma typ_constraint_ctxt_discharge_MR[MR]: "[|
      freshunifvar f  ;
      !! x. try (unify (appt(x)) (f ` x))  ; try (x :> A)  ;
@@ -373,12 +394,15 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 
 
-(* TODO: universe level annotations can lead to unsatisfiable first-order constraints
-     for universe levels that are used in subterms (we may not unlift them in that case).
+(* FIXME: abstracted universe level annotations lead to unsatisfiable first-order constraints
+     for universe levels that are used in subterms.
+   we may not unlift them in that case or we need local constraint discharge.
    This should be resolvable by careful local type inference? *)
-ML {*  elab @{context} @{term "(lam i:nat. lam x:guniv i. fun f. f # x)"} *}
+(* ML {*  elab @{context} @{term "(lam i:nat. lam x:guniv i. fun f. f # x)"} *} *)
 
-ML {*  elab @{context} @{term "(lam i:nat. lam x:guniv i. fun f. f ` x)"} *}
+ML {*  elab @{context} @{term "(lam x:guniv i. fun f. f # x)"} *}
+
+
 
 (* FIXME: we need constraint propagation to combine the constraints to find the typing error *)
 ML {*  elab @{context} @{term "x # x"} *}
