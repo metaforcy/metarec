@@ -115,7 +115,10 @@ fun dest_Bound (Bound i) = i
   | dest_Bound _ = error "dest_Bound"
 
 
-fun reorder_open_abss binderTs ss ss_reord body =
+(* TODO(feature): try to annotate generated abstractions with nice names from bounds and frees in ss *)
+(* ss_absord has to be in the correct abstraction order:
+     if an element occurs as a subterm of another element, it has to occur previously in ss_absord *)
+fun reorder_open_abss binderTs ss ss_absord body =
   let
     val ctxt = Name.context |> fold Term.declare_term_names
       (body :: ss @ map Logic.mk_type binderTs)
@@ -128,14 +131,14 @@ fun reorder_open_abss binderTs ss ss_reord body =
     val ss_Ts = ss |> map (curry Term.fastype_of1 binderTs)
     val ss_frees_map = ss ~~ (ss_ns ~~ ss_Ts) |> map (fn (s, (n, T)) => (s, Free(n, T)))
     val ss_frees = map snd ss_frees_map
-    val ss_frees_reord = ss_reord |> map (fn s =>
+    val ss_frees_absord = ss_absord |> map (fn s =>
       case AList.lookup (op aconv) ss_frees_map s of
         SOME sfree => sfree
-      | NONE => error ("struct_unify: internal error: no reordering Free found for a var argument"))
+      | NONE => error ("struct_unify: internal error: no reordering Free found"))
   in
     body |> subst
-    |> fold_rev (Term.lambda o subst) ss_reord
-    |> (fn abs_body => list_comb (abs_body, ss_frees_reord))
+    |> fold_rev (Term.lambda o subst) ss_absord
+    |> (fn abs_body => list_comb (abs_body, ss_frees_absord))
     |> fold_rev Term.lambda ss_frees
     |> Envir.beta_norm
   end
@@ -315,12 +318,13 @@ and cases thy (binders,env,(s,t)) = case (strip_comb s,strip_comb t) of
 
 (* NB: this is slightly conservative in that we don't recognize acceptable Bound-dependencies via (?X i) in ss
      in accordance with the Unif exception raised in proj *)
-and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
+and liftvars_over thy (ss_Ts0, ss_bnds0) ss_invsubstmap0 binders lev term env =
   case strip_comb (Envir.head_norm env term) of
     (Var (ixn, T), ts0) =>
       let
         val ss_Ts = map (apfst (Term.incr_boundvars lev)) ss_Ts0
         val ss_bnds = map (fn i => i + lev) ss_bnds0
+        val ss_invsubstmap = map (pairself (Term.incr_boundvars lev)) ss_invsubstmap0
         val ts = map (Envir.norm_term env) ts0
 
         val bnds =
@@ -345,8 +349,9 @@ and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
         val Happ = list_comb (H, map fst ss_Ts_new @ ts')
 
         val ts_reord = filter Term.is_Bound ts @ filter_out Term.is_Bound ts
-        val absHapp = Happ
-          |> reorder_open_abss (map snd binders) ts ts_reord
+        val invsubst = Term.subst_free ss_invsubstmap
+        val absHapp' = Happ |> invsubst
+          |> reorder_open_abss (map snd binders) (map invsubst ts) (map invsubst ts_reord)
 
         (* val _ = tracing ("liftvars_over "^Syntax.string_of_term_global thy (Var(ixn, T))^" with "
           ^"\n  ts="^commas (map (Syntax.string_of_term_global thy) ts)
@@ -357,49 +362,93 @@ and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
             ss_Ts)
           ^"\n  ss_new="^commas (map (fn (s, _) => Syntax.string_of_term_global thy s) ss_Ts_new)
           ^"\n  Happ="^Syntax.string_of_term_global thy Happ
-          ^"\n  Habs="^Syntax.string_of_term_global thy absHapp) *)
+          ^"\n  absHapp'="^Syntax.string_of_term_global thy absHapp') *)
 
-        val env3 = Envir.update (((ixn, T), absHapp), env2)
+        val env3 = Envir.update (((ixn, T), absHapp'), env2)
       in
-        env3
+        (Happ, env3)
       end
   | (Abs (x, T, t), []) =>
-      liftvars_over thy ((x, T) :: binders) (lev+1) (ss_Ts0, ss_bnds0) t env
+      let val (t', env2) =
+        liftvars_over thy (ss_Ts0, ss_bnds0) ss_invsubstmap0 ((x, T) :: binders) (lev+1) t env
+      in (Abs (x, T, t'), env2) end
   | (Abs _, _) => raise NotBetaNormal
   | (a, ts) =>
-      let val _ =
-        case a of
-          Bound i =>
-            if i <= lev orelse member (op =) ss_bnds0 (i - lev) then ()
-            else raise Unif
-        | _ => ()
+      let
+        val _ =
+          case a of
+            Bound i =>
+              if i <= lev orelse member (op =) ss_bnds0 (i - lev) then ()
+              else raise Unif
+          | _ => ()
+        val (ts', env2) = env
+          |> fold_map (liftvars_over thy (ss_Ts0, ss_bnds0) ss_invsubstmap0 binders lev) ts
       in
-        fold (liftvars_over thy binders lev (ss_Ts0, ss_bnds0)) ts env
+        (list_comb (a, ts'), env2)
       end
 
-and struct_inst thy binders ((F, Fty), ss0) term env =
-  if occurs (F, term, env) then (ocheck_fail thy (F,term,binders,env); raise Unif)
+and struct_inst thy binders ((F, Fty), ss0) term0 env =
+  if occurs (F, term0, env) then (ocheck_fail thy (F,term0,binders,env); raise Unif)
   else
     let
       val ss = map (Envir.norm_term env) ss0
+      val term = Envir.norm_term env term0
+
+      val ctxt = Name.context |> fold Term.declare_term_names
+        ([Var(F,Fty), term] @ ss @ map (Logic.mk_type o snd) binders)
+
+      (* val bnd_ns = Name.invent ctxt "_boundfree0" (length binders)
+      val bnd_frees = bnd_ns ~~ binders |> map (fn (n, (x, T)) => Free(x^n, T))
+      val subst_bnds = curry subst_bounds bnd_frees
+      val abs_bnds = fold (curry Term.abstract_over) bnd_frees *)
+
       fun typeof s = fastype_of1 (map snd binders, s)
         |> Envir.norm_type (Envir.type_env env)
 
       val ss_bnds = ss |> map_filter (try dest_Bound) |> distinct (op =)
       val ss_nonbnds = ss |> filter_out Term.is_Bound
         |> filter (fn s => subset (op =) (Term.loose_bnos s, ss_bnds))
-        (* TODO(feature): useful? *)
-        (* |> distinct (env_aeconv env) *)
-      val ss_reord = map Bound ss_bnds @ ss_nonbnds
-      val ss_reord_Ts = ss_reord ~~ map typeof ss_reord
 
-      val env2 = liftvars_over thy binders 0 (ss_reord_Ts, ss_bnds) term env
+      (* NB: we introduce locally fresh fix variables for the different non-bound
+         argument positions in  F $ ss  in order to lift over all argument positions
+         of F even in the case of duplicates in ss. E.g.
+           ?B x x == PROD y:?C. ?D y
+         will be solved by
+           ?B := (% z1 z2. (PROD y : ?C' z1 z2. ?D' z1 z2 y))
+           ?C := ?C' x x
+           ?D := ?D' x x  *)
+      val ss_nbnds_ns = Name.invent ctxt "_varargfree0" (length ss_nonbnds)
+      val ss_nbnds_substmap = ss_nonbnds ~~ ss_nbnds_ns |> map (fn (ss_nbnd, n') =>
+        let
+          val bnos = Term.loose_bnos ss_nbnd
+          val free = Free(n', map (nth binders #> snd) bnos ---> typeof ss_nbnd)
+        in
+          (ss_nbnd, list_comb (free, map Bound bnos))
+        end)
+      val ss_nbnds_invsubstmap = map swap ss_nbnds_substmap
+      val subst_ss = Term.subst_free ss_nbnds_substmap
+
+      val (ss', _) = ss_nbnds_substmap |> map snd
+        |> fold_map (fn s => fn rem_ss_nbnd_substs =>
+            if can dest_Bound s then (s, rem_ss_nbnd_substs)
+            else
+              case rem_ss_nbnd_substs of
+                (x :: rem_ss_nbnd_substs2) => (x, rem_ss_nbnd_substs2)
+              | _ => error ("struct_unify: internal error: no substitution free found "
+                ^"for non-bound variable argument position"))
+          ss
+      val ss'_reord = map Bound ss_bnds @ map snd ss_nbnds_substmap
+      val ss'_reord_Ts = ss'_reord ~~ map typeof ss'_reord
+      val term' = subst_ss term
+
+      val (term'2, env2) =
+        liftvars_over thy (ss'_reord_Ts, ss_bnds) ss_nbnds_invsubstmap binders 0 term' env
       val norm2 = Envir.norm_term env2
-      val term'_abs = norm2 term
-        |> reorder_open_abss (map snd binders) (map norm2 ss) (map norm2 ss_reord)
+      val term'2_abs = norm2 term'2
+        |> reorder_open_abss (map snd binders) (map norm2 ss') (map norm2 ss'_reord)
       (* NB: Fty does not have to be normed since var-clash check in Envir.lookup
          is modulo type normation *)
-      val env3 = Envir.update (((F, Fty), term'_abs), env2)
+      val env3 = Envir.update (((F, Fty), term'2_abs), env2)
     in env3 end
   
 

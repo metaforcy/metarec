@@ -5,15 +5,45 @@ begin
 
 
 ML {*
-
-  val B_x = @{cpat "?B(x::i) :: i"} |> Thm.term_of
-  val prod = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
+  val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
+  val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
   val env' = 
     StructUnify.unify @{theory} (B_x, prod) (Envir.empty 1)
   val B_x' = Envir.norm_term env' B_x |> cterm_of @{theory}
   val prod' = Envir.norm_term env' prod |> cterm_of @{theory}
 *}
 
+ML {*
+  val A1 = @{cpat "?B(x::i)"} |> Thm.term_of
+  val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
+  val env' = 
+    StructUnify.unify @{theory} (A1, A2) (Envir.empty 1)
+  val A1' = Envir.norm_term env' A1 |> cterm_of @{theory}
+  val A2' = Envir.norm_term env' A2|> cterm_of @{theory}
+*}
+
+ML {*
+  val A1 = @{cpat "?B(x::i, x) :: i"} |> Thm.term_of
+  val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
+  val env = Envir.empty 1
+  val env2 = StructUnify.unify @{theory} (A1, A2) env
+  val A1' = Envir.norm_term env2 A1 |> cterm_of @{theory}
+*}
+
+
+ML {*
+  val A1 = @{cpat "?B(x::i)"} |> Thm.term_of
+  val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
+  val B1 = @{cpat "?D(x :: i) :: i"} |> Thm.term_of
+  val B2 = @{cpat "PROD x:?E. ?F(x)"} |> Thm.term_of
+  val env = Envir.empty 1
+  val env2 = StructUnify.unify @{theory} (A1, A2) env
+  val A2' = Envir.norm_term env2 A2 |> cterm_of @{theory}
+  val B1' = Envir.norm_term env2 B1 |> cterm_of @{theory}
+  val B2' = Envir.norm_term env2 B2 |> cterm_of @{theory}
+  val env3 = StructUnify.unify @{theory} (B1, B2) env2
+  val A2'' = Envir.norm_term env3 A2 |> cterm_of @{theory}
+*}
 
 
 (* this is an improper axiomatization of a universe hierarchy:
@@ -319,11 +349,14 @@ ML {*  elab @{context} @{term "(fun x. x)"}  *}
 
 ML {*  elab @{context} @{term "f # x"}  *}
 
-(* FIXME: bei Unifikationsproblem  ?B(t) == (PROD y:?C. ?D(y))  (konkret t:=x unten) muessen wir loesen mit
-     ?B := (% x. PROD y:?C'(x). ?D'(x, y)),   ?C := ?C'(t)    ?D := ?D'(t)
-   loesen. weiterhin brauchen wir allgemeiner strukturelle pattern unifikation (d.h. paralleler struktureller
-   Abstieg auch in non-patterns moeglich), die das beachtet und auch die bestehende patternification durchfuehrt. *)
+(* NB: employs structural unification for  ?B(x) == (PROD y:?C. ?D(y)),  i.e.
+     ?B := (% x. PROD y:?C'(x). ?D'(x, y)),   ?C := ?C'(t)    ?D := ?D'(t) *)
+(* FIXME: deep guniv constraint not simplified *)
 ML {*  elab @{context} @{term "f # x # y"}  *}
+
+ML {*  elab @{context} @{term "f # x # x # x"}  *}
+
+ML {*  elab @{context} @{term "f # x # x # x # x"}  *}
 
 ML {*
   val fixes = Variable.dest_fixes @{context} |> map snd
@@ -431,6 +464,15 @@ lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
 (* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
 lemma [constraint_propag_rule]: "[|  unify A A2  ;  t <: A &&& t <: A2  |] ==> True"
   by simp
+
+
+
+
+
+(* test of postprocessing that unlifts of first-order vars (here: universe level vars) *)
+ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
+
+
 
 
 

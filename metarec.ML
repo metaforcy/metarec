@@ -280,7 +280,8 @@ type run_state = {
        during the derivation which are discharged when both terms have become patterns (or in the very and) *)
     delayed_unifs: (term * term) list,  
     (* constraints are implicit assumptions during the derivation that are always exported wrt. outer_ctxt *)
-    constraints: term list
+    constraints: term list,
+    fo_vars: indexname list
   }
 
 (* TODO(semantics): besser NormalJud in FactJud, RecJud aufteilen? *)
@@ -958,13 +959,20 @@ fun get_the_run_state gctxt =
 fun map_run_state f = map_run_info (fn (running_expl_frules, running_on_thy_lvl, run_state) =>
   (running_expl_frules, running_on_thy_lvl, f run_state))
 fun set_run_state st2 = map_run_state (K st2)
-fun init_run_state ctxt = SOME { outer_ctxt=ctxt, env=Envir.empty 1, delayed_unifs=[], constraints=[] }
+fun init_run_state ctxt =
+  SOME { outer_ctxt=ctxt, env=Envir.empty 1, delayed_unifs=[], constraints=[], fo_vars=[] }
 fun map_constraints_in_run_state f =
-  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints} =>
-    {outer_ctxt=outer_ctxt, env=env, delayed_unifs=delayed_unifs, constraints=f constraints}))
+  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints, fo_vars} =>
+    {outer_ctxt=outer_ctxt, env=env, delayed_unifs=delayed_unifs, constraints=f constraints,
+     fo_vars=fo_vars}))
 fun map_env_in_run_state f =
-  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints} =>
-    {outer_ctxt=outer_ctxt, env=f env, delayed_unifs=delayed_unifs, constraints=constraints}))
+  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints, fo_vars} =>
+    {outer_ctxt=outer_ctxt, env=f env, delayed_unifs=delayed_unifs, constraints=constraints,
+    fo_vars=fo_vars}))
+fun map_fovars_in_run_state f =
+  map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints, fo_vars} =>
+    {outer_ctxt=outer_ctxt, env=env, delayed_unifs=delayed_unifs, constraints=constraints,
+     fo_vars=f fo_vars}))
 fun get_the_env_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state |> (fn { env, ... } => env)
 fun get_constraints_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state
   |> (fn { constraints, ... } => constraints)
@@ -1182,10 +1190,7 @@ fun pattern_fun_to_env_mapper f input env =
    analysing terms *)
 fun gen_pattern_match_envctxt match norm ctxt (pat0, term0) =
   (let 
-    val { outer_ctxt, env, delayed_unifs, constraints } =
-      case get_run_state (Context.Proof ctxt) of
-        SOME st => st
-      | NONE => error ("decompose_pattern_match_envctxt: no run state set")
+    val env = get_the_env_in_run_state ctxt
 
     val (pat, term) = pairself (norm ctxt) (pat0, term0)
     val env2 = env
@@ -1226,8 +1231,7 @@ fun gen_pattern_match_envctxt match norm ctxt (pat0, term0) =
           Envir.Envir { maxidx = Envir.maxidx_of env2, tenv = tenv3, tyenv = tyenv3 }
         end
   in
-    ctxt |> Context.proof_map (set_run_state (SOME
-      { outer_ctxt=outer_ctxt, env=env3, delayed_unifs=delayed_unifs, constraints=constraints }))
+    ctxt |> Context.proof_map (map_env_in_run_state (K env3))
     |> SOME
   end)
   handle Pattern.MATCH => NONE
@@ -1555,13 +1559,9 @@ fun prf_to_display_term ctxt prfp =
 
 fun genvar_on_run_state name T ctxt =
   let
-    val {outer_ctxt, env, delayed_unifs, constraints} =
-      case get_run_state (Context.Proof ctxt) of
-        SOME st => st
-      | NONE => err_with_trace ctxt ("fresh_thm_prf: no run state set")
+    val env = get_the_env_in_run_state ctxt
     val (env2, v) = Envir.genvar name (env, T)
-    val ctxt2 = ctxt |> Context.proof_map (set_run_state (SOME {outer_ctxt=outer_ctxt, env=env2,
-      delayed_unifs=delayed_unifs, constraints=constraints}))
+    val ctxt2 = ctxt |> Context.proof_map (map_env_in_run_state (K env2))
   in
     (v, ctxt2)
   end
@@ -1569,10 +1569,7 @@ fun genvar_on_run_state name T ctxt =
 
 fun fresh_thm_prf th ctxt =
   let
-    val {outer_ctxt, env, delayed_unifs, constraints} =
-      case get_run_state (Context.Proof ctxt) of
-        SOME st => st
-      | NONE => err_with_trace ctxt ("fresh_thm_prf: no run state set")
+    val env = get_the_env_in_run_state ctxt
 
     val tvars = Term.add_tvars (prop_of th) [] |> rev
     val (tvars', ctxt2) = ctxt |> fold_map (fn ((n, _), S) =>
@@ -3643,8 +3640,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
       let val th_1 = prf |> fold_rev (impI_prf ctxt2) (map Logic.mk_equals delayed_unifs @ constraints)
         |> replay_prf ctxt2 (* for testing *)
       in
-        () (* tracing ("metarec derivation was successful (but no constraint min yet) with: "
-          ^Display.string_of_thm ctxt2 th_1) *)
+        tracing ("metarec derivation was successful (but no constraint min yet) with: "
+          ^Display.string_of_thm ctxt2 th_1)
        end
 
     (* NB: try to simplify constraints with fixes or assumes by solve_prems and replace them with the newly
@@ -3733,13 +3730,30 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
       handle TryPatUnify (ctxt_, (bad_t1, bad_t2), msg) =>
         err_with_trace ctxt_ ("metarec: solving of a delayed unification problem failed: "^msg)
 
-      (* TODO(feature): add optional fallback to FO-unif ? *)
-    val (delayed_unifs3, env5) = 
-      try_solve_delayed_unifs true ctxt4 delayed_unifs2 env4
+      (* TODO(feature): add optional fallback to FO-unif to deal with type
+           constructor polymorphism? but using (m ` a) is better anyway. *)
+      (* TODO(feature): try to be even more general and interleave
+         structural and pattern unifications *)
+      (* FIXME: if first-order unification variables (those that are present in first-order constraints)
+          have been instantiated to a lifting during structural unification, then unlift them afterwards.
+          Perhaps offer explicit this-is-a-first-order-unifvar constraints, that are simplified
+          on instantiation to this-is-a-first-order-unifvar constraints of contained unifvars *)
+    val struct_unify = true
+    val (delayed_unifs3, env5) =
+      if struct_unify then
+        try_solve_delayed_unifs true ctxt4 delayed_unifs2 env4
+      else
+        (delayed_unifs2, env4)
       handle TryStructUnify (ctxt_, (bad_t1, bad_t2), msg) =>
         err_with_trace ctxt_ ("metarec: solving of a delayed unification problem structurally failed: "^msg)
 
+    val {fo_vars, ...} = get_the_run_state (Context.Proof ctxt4)
     val ctxt5 = ctxt4 |> Context.proof_map (map_env_in_run_state (K env5))
+      |> fold (fn fo_var =>
+             case Vartab.lookup (Envir.term_env env5) fo_var of
+               SOME (_, t) => unlift_unifvar_occs t
+             | NONE => I)
+           fo_vars
 
     val solved_delayed_unifs = delayed_unifs
       |> subtract (pairself Logic.mk_equals #> aconv_norm (norm_with_env_in_run_state ctxt5))
@@ -5389,10 +5403,6 @@ fun rel_local_frees ctxt rel_frees_opt =
 fun fresh_unifvar_proc ctxt fail_cont (_, [], [outpat0]) =
   let
     val thy = Proof_Context.theory_of ctxt
-    val { outer_ctxt, env, delayed_unifs, constraints } =
-      case get_run_state (Context.Proof ctxt) of
-        SOME st => st
-      | NONE => err_with_trace ctxt ("fresh_unifvar_proc: no run state set")
 
     val norm = norm_with_env_in_run_state ctxt
     val outpat = norm outpat0
@@ -5421,7 +5431,7 @@ fun fresh_unifvar_proc ctxt fail_cont (_, [], [outpat0]) =
 fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
   let
     val thy = Proof_Context.theory_of ctxt
-    val {outer_ctxt, env, delayed_unifs, constraints} =
+    val { outer_ctxt, env, delayed_unifs, constraints, fo_vars } =
       case get_run_state (Context.Proof ctxt) of
         SOME st => st
       | NONE => err_with_trace ctxt ("unify_proc: no run state set")
@@ -5436,7 +5446,7 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
 
     fun calc_res_state env2 delayed_unifs2 =
       { outer_ctxt=outer_ctxt, env=env2, delayed_unifs=delayed_unifs2,
-        constraints=constraints }
+        constraints=constraints, fo_vars=fo_vars }
 
     fun nonpattern_cont () =
       let
@@ -5494,14 +5504,17 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
 fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
   let
     val thy = Proof_Context.theory_of ctxt
-    val {outer_ctxt, constraints, delayed_unifs, ... } =
-      case get_run_state (Context.Proof ctxt) of
-        SOME st => st
-      | NONE => err_with_trace ctxt ("constraint_gen_proc: no run state set")
 
     val ctxt2 =
       if local_constraint then ctxt
-      else ctxt |> unlift_unifvar_occs t0
+      else
+        let
+          val ctxt2_ = ctxt |> unlift_unifvar_occs t0
+          val t_ = norm_with_env_in_run_state ctxt2_ t0
+          val vars = Term.add_vars t_ [] |> map fst
+        in
+          ctxt2_ |> Context.proof_map (map_fovars_in_run_state (fn fovars => union (op =) vars fovars))
+        end
 
     val norm = norm_with_env_in_run_state ctxt2
     val t = norm t0
@@ -5547,13 +5560,14 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
 
     val intro_th = if local_constraint then Data.constraintI else Data.foconstraintI
     val (res_prf, ctxt3) = mps_match_on_freshthm_prf intro_th [t_prf] ctxt2
-    val env2 = get_the_env_in_run_state ctxt3
 
-    (* val _ = tracing ("generated constraint "^str_of_normed_term ctxt3 t') *)
+    val _ = tracing ("generated constraint "^str_of_normed_term ctxt3 t')
 
     (* TODO(feature/opt): already simplify constraints on-the-fly *)
-    val constraints2 = insert (aconv_norm (norm_with_env_in_run_state ctxt3)) t' constraints
-    val st2 = { outer_ctxt=outer_ctxt, env=env2, delayed_unifs=delayed_unifs, constraints=constraints2 }
+    fun constraints_f constraints =
+      insert (aconv_norm (norm_with_env_in_run_state ctxt3)) t' constraints
+    val st2 = Context.Proof ctxt3 |> map_constraints_in_run_state constraints_f
+      |> get_the_run_state
   in
     ((res_prf, []), SOME st2)
   end
