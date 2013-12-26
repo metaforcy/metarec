@@ -1185,6 +1185,12 @@ fun pattern_fun_to_env_mapper f input env =
   let val (tyenv2, tenv2) = f input (Envir.type_env env, Envir.term_env env)
   in Envir.Envir { maxidx = Envir.maxidx_of env, tenv = tenv2, tyenv = tyenv2 } end
 
+fun envdiff_str ctxt env1 env2 =
+  env2 |> Envir.term_env |> fold Vartab.delete (Vartab.keys (Envir.term_env env1))
+  |> Vartab.dest |> map (fn (ixn, (T, t)) =>
+    Syntax.string_of_term ctxt (Var(ixn, T))^":="^Syntax.string_of_term ctxt t)
+  |> commas
+
 (* normation of inputs is necessary now (compared to old metarec) because we don't
    keep terms fully normed per default anymore and Pattern.match does not norm while
    analysing terms *)
@@ -1193,51 +1199,20 @@ fun gen_pattern_match_envctxt match norm ctxt (pat0, term0) =
     val env = get_the_env_in_run_state ctxt
 
     val (pat, term) = pairself (norm ctxt) (pat0, term0)
+    (* val _ = tracing ("pattern matching (normed): "^Syntax.string_of_term ctxt term
+      ^" against "^Syntax.string_of_term ctxt pat) *)
     val env2 = env
       |> pattern_fun_to_env_mapper (match (Proof_Context.theory_of ctxt))
            (pat, term)
-
-    val env3 =
-      if null (inter (op =) (Term.add_vars pat []) (Term.add_vars term []))
-         andalso null (inter (op =) (Term.add_tvars pat []) (Term.add_tvars term []))
-      then (* NB: cyclic env2 can only arise if pat, term have vars or tvars in common *)
-        env2
-      else
-        let
-          (* occurs check and removing self-loops of instantiation.
-             necessary because of different notion of variable identity in the matching algorithm *)
-          val bad_Tvar_insts = Envir.type_env env2 |> Vartab.dest
-            |> filter (fn (ixn, (S, T')) =>
-                 case try Term.dest_TVar T' of
-                   SOME (ixn2, _) => ixn = ixn2
-                 | NONE =>
-                     if member (op =) (Term.add_tvarsT T' [] |> map fst) ixn then
-                       raise Pattern.MATCH
-                     else false)
-          val tyenv3 = Envir.type_env env2 |> fold (Vartab.delete o fst) bad_Tvar_insts
-          val bad_var_insts = Envir.term_env env2 |> Vartab.dest
-            |> filter (fn (ixn, (T, t')) =>
-                 case try Term.dest_Var (Envir.eta_contract t') of
-                   SOME (ixn2, _) => ixn = ixn2
-                 | NONE =>
-                     if member (op =) (Term.add_vars t' [] |> map fst) ixn then
-                       let val _ = tracing ("gen_pattern_match_envctxt: occurs check because matching "
-                         ^" produced "^Syntax.string_of_term ctxt (Var(ixn, T))^" := "
-                         ^Syntax.string_of_term ctxt t')
-                       in raise Pattern.MATCH end
-                     else false)
-          val tenv3 = Envir.term_env env2 |> fold (Vartab.delete o fst) bad_var_insts
-        in
-          Envir.Envir { maxidx = Envir.maxidx_of env2, tenv = tenv3, tyenv = tyenv3 }
-        end
+    (* val _ = tracing ("new bindings: "^envdiff_str ctxt env env2) *)
   in
-    ctxt |> Context.proof_map (map_env_in_run_state (K env3))
+    ctxt |> Context.proof_map (map_env_in_run_state (K env2))
     |> SOME
   end)
   handle Pattern.MATCH => NONE
 
 val pattern_match_envctxt =
-  gen_pattern_match_envctxt Pattern.match norm_with_env_in_run_state
+  gen_pattern_match_envctxt DecompPattern.match_w_shared_vars norm_with_env_in_run_state
 fun pattern_matches_envctxt ctxt (pats, terms) =
   SOME ctxt |> fold (fn (pat, term) => fn ctxt_opt =>
       case ctxt_opt of
@@ -3309,6 +3284,11 @@ and constraint_simplification ctxt0 =
           let
             exception UnsolvablePrem
 
+            (* val _ = tracing ("considering constraint propagation rule\n  "
+              ^Display.string_of_thm ctxt rule
+              ^"\non selected input constraint\n  "
+              ^string_of_int (fst C4head)^": "^str_of_normed_term ctxt (snd C4head)) *)
+
             val nprems =
               if is_propagation then Thm.nprems_of rule - 1
               else Thm.nprems_of rule
@@ -3360,10 +3340,24 @@ and constraint_simplification ctxt0 =
 
             fun inst_and_apply_rule cs_for_heads (constraint_graph, ctxt2) =
               case pattern_matches_envctxt ctxt2 (heads, cs_for_heads) of
-                NONE => NONE
+                NONE =>
+                  let
+                    val _ = () (* tracing ("tried application of constraint propagation rule\n  "
+                          ^Display.string_of_thm ctxt2 rule
+                          ^"\nto input constraints\n  "
+                          ^commas (map (str_of_normed_term ctxt2) cs_for_heads)
+                          ^"\nbut inputs did not match heads") *)
+                  in NONE end
               | SOME ctxt3 => 
                   (* TODO(feature): renaming of bound variables in rule to share them with input constraints *)
                   let
+                    val _ = tracing ("applied constraint propagation rule\n  "
+                          ^Display.string_of_thm ctxt3 rule
+                          ^"\nto input constraints\n  "
+                          ^commas (map (str_of_normed_term ctxt3) cs_for_heads)
+                          ^"\nSolving the following prems now:\n"
+                          ^commas (map (str_of_normed_term ctxt3) prems))
+
                     fun global_fail_cont ctxt_ msg = 
                       err_with_trace_and_facts ctxt_
                         ("failed to solve a premise in an instantiated constraint "
@@ -3372,6 +3366,7 @@ and constraint_simplification ctxt0 =
                           ^str_of_normed_term ctxt_ rl_prop
                           ^"\n\nbecause:\n"^msg)
                     fun local_fail_cont _ _ = raise UnsolvablePrem
+
 
                     val ctxt3_ = ctxt3 |> Context.proof_map (map_constraints_in_run_state
                       (K (these static_new_constraints_opt)))
@@ -3393,6 +3388,12 @@ and constraint_simplification ctxt0 =
                     val ctxt4 = ctxt4_ |> Context.proof_map (map_constraints_in_run_state
                       (K (get_constraints_in_run_state ctxt3)))
 
+                    val _ = tracing ("application of constraint propagation rule\n  "
+                          ^Display.string_of_thm ctxt4_ rule
+                          ^"\nto input constraints\n  "
+                          ^commas (map (str_of_normed_term ctxt4_) cs_for_heads)
+                          ^"\nresulted in new constraints\n  "
+                          ^commas (map (str_of_normed_term ctxt4_) new_constraints))
 
                     (* for propag rules:  input constraints ==> conjunctioned new constraints
                        for simp rules:  new_constraints ==> conjunctioned input constraints *)
@@ -3461,6 +3462,7 @@ and constraint_simplification ctxt0 =
     and add_constraint C0 implied_by_opt (constraint_graph, ctxt) = 
       let
         val C = norm_with_env_in_run_state ctxt C0 |> Envir.eta_contract
+        (* val _ = tracing ("considering constraint "^Syntax.string_of_term ctxt C) *)
 
         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
         val existing_C_opt = Net.match_term constraint_graph C
@@ -3483,6 +3485,11 @@ and constraint_simplification ctxt0 =
           (constraint_graph', ctxt)
         else
           let
+            val _ = tracing ("generated new constraint "^Syntax.string_of_term ctxt C
+              ^" implied by \n  "^
+                (case implied_by_opt of
+                  SOME prf => str_of_normed_term ctxt (prop_of_proofp prf)
+                | NONE => "nothing"))
             val ext_with_C0 = map (fn (rl, head_idx) => (rl, (head_idx, C0)))
             val pot_simp_rls = Net.match_term constraint_simp_rules_hdidx C |> ext_with_C0
             val pot_propag_rls = Net.match_term constraint_propag_rules_hdidx C |> ext_with_C0
@@ -3608,12 +3615,15 @@ and constraint_simplification ctxt0 =
 and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
   let
     val thy = Proof_Context.theory_of ctxt0
-    val frees = fold Term.add_frees (pobj :: iobjs) []
-    val ctxt = ctxt0
-      |> add_to_msg_trace (fn () =>
+    val unfxd_free_ns = fold Term.add_free_names (pobj :: iobjs) []
+      |> filter_out (Variable.is_fixed ctxt0)
+    fun inputmsg () = 
            "metarec: on judgement "^quote jid^" with input ("
-             ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])")
-      |> Variable.add_fixes_direct (map fst frees)
+             ^Syntax.string_of_term ctxt0 pobj^", ["^Library.commas (map (Syntax.string_of_term ctxt0) iobjs)^"])"
+    (* val _ = tracing ("metarec: fixing frees "^commas unfxd_free_ns^" for\n  "^inputmsg ()) *)
+    val ctxt = ctxt0
+      |> add_to_msg_trace inputmsg
+      |> Variable.add_fixes_direct unfxd_free_ns
       |> fold Variable.declare_term (pobj :: iobjs)
       |> (fn ctxt => ctxt |> Context.proof_map (set_run_state (init_run_state ctxt) #> set_assms []))
 
@@ -3714,8 +3724,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
 
     (* FIXME: loops for map elaboration?! *) 
-    val ((constraints', implied_constraints), ctxt4) = (* constraint_simplification ctxt3 *)
-       ((get_the_run_state (Context.Proof ctxt3) |> #constraints, []), ctxt3)
+    val ((constraints', implied_constraints), ctxt4) = constraint_simplification ctxt3
+       (* ((get_the_run_state (Context.Proof ctxt3) |> #constraints, []), ctxt3) *)
     val prf3 = prf2
       |> fold (fn (C, C_prf) => impI_prf ctxt4 C #> mp_rev_prf ctxt4 C_prf) implied_constraints
       |> fold_rev (impI_prf ctxt4) constraints'

@@ -400,6 +400,7 @@ ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
    This should be resolvable by careful local type inference? *)
 (* ML {*  elab @{context} @{term "(lam i:nat. lam x:guniv i. fun f. f # x)"} *} *)
 
+(* but this works *)
 ML {*  elab @{context} @{term "(lam x:guniv i. fun f. f # x)"} *}
 
 
@@ -468,6 +469,7 @@ lemma [constraint_propag_rule]: "i < j &&& j le k ==> i < k"
 lemma [constraint_propag_rule]: "i le j &&& j < k ==> i < k"
   apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
 
+(* FIXME: we need to avoid looping on  i le i &&& i le i ==> i le i *)
 lemma [constraint_propag_rule]: "i le j &&& j le k ==> i le k"
   apply (erule conjunctionE) by (rule Ordinal.le_trans)
 
@@ -475,13 +477,13 @@ lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i < j &&& j < i)"
   apply (rule Pure.conjunctionI)
   by (simp add: universe_inconsistency_def)+
 
-
   (* NB: no try around unify. corresponds to CHR  (i <= j , j <= i) == (i = j) *)
 lemma [constraint_simp_rule]: "[| unify i j  ;  constraint (i <: nat)  ;  constraint (j <: nat)  |] ==>
   (i le j &&& j le i)"
   apply (rule Pure.conjunctionI)
-
   by (simp add: unify_const_def constraint_const_def constraint_typing_def)+
+
+ (* actually a specialization of the rule above *)
 lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
   by (simp add: constraint_const_def constraint_typing_def)
 
@@ -491,11 +493,18 @@ lemma [constraint_propag_rule]: "[|  unify A A2  ;  t <: A &&& t <: A2  |] ==> T
 
 
 
+(* TODO(feature): discharge nat-upwards-joining constraints  i le k,  j le k
+   by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv i)"} *}
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv j ~> guniv i.
+  f # (guniv j) # (guniv i)"} *}
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv j ~> guniv k ~> guniv i.
+  f # (guniv j) # (guniv k) # (guniv i)"} *}
 
 
 (* test of postprocessing that unlifts of first-order vars (here: universe level vars) *)
 ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
-
 
 
 
