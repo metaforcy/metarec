@@ -132,8 +132,16 @@ definition
   [MRjud 1 1]: "syn_constraint_typing (t, A) == t : A"
 
 lemma [MRjud 2 0]: "i < j == i < j" by simp
-lemma [MRjud 2 0]: "i le j == i le j" by simp
-  
+
+definition
+  univ_less (infixl "u<" 50) where
+  [MRjud 2 0]: "univ_less(x,y) == x < y"
+
+(* NB: Ordinal.le(x,y) is just an abbreviation for x < succ(y), so we cannot reuse this *)
+definition
+  univ_leq (infixl "u<=" 50) where
+  [MRjud 2 0]: "univ_leq(x,y) == x le y"
+
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 (* low prio rule for type inference of free variable x *)
 (* FIXME?: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
@@ -183,10 +191,10 @@ lemma [MR]: "[|
 lemma [MR]: "[|
     A elabto A' : guniv i  ;  foconstraint (i <: nat)  ;
     !! x.  x elabto x : A'  ==>  B(x) elabto B'(x) : guniv j  ;  foconstraint (j <: nat)  ;
-    freshunifvar k  ;  foconstraint (k <: nat)  ;  foconstraint (i le k)  ;
-    foconstraint (j le k)  |] ==>
+    freshunifvar k  ;  foconstraint (k <: nat)  ;  foconstraint (i u<= k)  ;
+    foconstraint (j u<= k)  |] ==>
   (PI x:A. B(x)) elabto (PROD x:A'. B'(x)) : guniv k"
-  unfolding elabjud_def foconstraint_const_def constraint_typing_def fresh_unifvar_const_def
+  unfolding elabjud_def foconstraint_const_def constraint_typing_def fresh_unifvar_const_def univ_leq_def
   apply (rule prod_in_guniv)
   apply assumption
   apply (rule guniv_cumul[of i k], assumption+)
@@ -195,18 +203,18 @@ lemma [MR]: "[|
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [MR_unchecked]: "[|
     freshunifvar i  ;  freshunifvar j  ;
-    foconstraint (i <: nat)  ;  foconstraint (j <: nat)  ;   foconstraint (i < j)  |] ==>
+    foconstraint (i <: nat)  ;  foconstraint (j <: nat)  ;   foconstraint (i u< j)  |] ==>
   univ elabto (guniv i) : (guniv j)"
-  unfolding elabjud_def foconstraint_const_def constraint_typing_def
+  unfolding elabjud_def foconstraint_const_def constraint_typing_def univ_less_def
   by (rule guniv_in_guniv)
 
 
 lemma [MR_unchecked]: "[|
     freshunifvar j  ;
     i elabto i' : A  ;  unify A nat  ;
-    foconstraint (i' <: nat)  ;  foconstraint (j <: nat)  ;   foconstraint (i' < j)  |] ==>
+    foconstraint (i' <: nat)  ;  foconstraint (j <: nat)  ;   foconstraint (i' u< j)  |] ==>
   (guniv i) elabto (guniv i') : (guniv j)"
-  unfolding elabjud_def foconstraint_const_def constraint_typing_def unify_const_def
+  unfolding elabjud_def foconstraint_const_def constraint_typing_def unify_const_def univ_less_def
   by (rule guniv_in_guniv)
 
 lemma [MR]: "[|
@@ -246,14 +254,14 @@ lemma [MR]: "[|
   unfolding foconstraint_const_def constraint_typing_def syn_constraint_typing_def
   by (rule prod_in_guniv)
 
-(* NB: i,j are always universe level variables, so the constraint (i < j) cannot really
+(* NB: i,j are always universe level variables, so the constraint (i u< j) cannot really
    be solved right now and can at best be refuted if i = j *)
 (* TODO(opt): syntactic constraint subsumption would be nice to immediately get rid
     of duplicate i <: nat constraints  *)
 lemma [MR]: "[|
-    foconstraint (i <: nat) ;  foconstraint (j <: nat)  ;  foconstraint (i < j) |] ==>
+    foconstraint (i <: nat) ;  foconstraint (j <: nat)  ;  foconstraint (i u< j) |] ==>
   guniv i <: guniv j"
-  unfolding foconstraint_const_def constraint_typing_def
+  unfolding foconstraint_const_def constraint_typing_def univ_less_def
   by (rule guniv_in_guniv)
 
 (* NB: relies on removal of non-relevant fixes and assms in front of the resulting constraints.
@@ -478,31 +486,37 @@ definition
        globale Auswirkungen haben, oder nehmen wir Konfluenz an?)
      * Wahl einer minimalen Menge von Constraints die die Gesamtmenge erzeugen (modulo den Vereinfachungen) *)
 (* wie bei echten CHRs matchen wir die Regeln bloss und nutzen dann ggf. explizite Unifikation in den Premissen *)
-lemma [constraint_propag_rule]: "i < j &&& j < k ==> i < k"
+lemma [constraint_propag_rule]: "i u< j &&& j u< k ==> i u< k"
+  unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans)
 
-lemma [constraint_propag_rule]: "i < j &&& j le k ==> i < k"
+lemma [constraint_propag_rule]: "i u< j &&& j u<= k ==> i u< k"
+  unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans2)
 
-lemma [constraint_propag_rule]: "i le j &&& j < k ==> i < k"
+lemma [constraint_propag_rule]: "i u<= j &&& j u< k ==> i u< k"
+  unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
 
-(* NB: we avoid looping on  i le i &&& i le i ==> i le i *)
-lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i le j &&& j le k ==> i le k"
+(* NB: we avoid looping on  i u<= i &&& i u<= i ==> i u<= i *)
+lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i u<= j &&& j u<= k ==> i u<= k"
+  unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.le_trans)
 
-lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i < j &&& j < i)"
+lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i u< j &&& j u< i)"
   apply (rule Pure.conjunctionI)
   by (simp add: universe_inconsistency_def)+
 
   (* NB: no try around unify. corresponds to CHR  (i <= j , j <= i) == (i = j) *)
 lemma [constraint_simp_rule]: "[| unify i j  ;  constraint (i <: nat)  ;  constraint (j <: nat)  |] ==>
-  (i le j &&& j le i)"
+  (i u<= j &&& j u<= i)"
+  unfolding univ_less_def univ_leq_def
   apply (rule Pure.conjunctionI)
   by (simp add: unify_const_def constraint_const_def constraint_typing_def)+
 
  (* actually a specialization of the rule above *)
-lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
+lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i u<= i"
+  unfolding univ_less_def univ_leq_def
   by (simp add: constraint_const_def constraint_typing_def)
 
 (* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
@@ -512,7 +526,7 @@ lemma [constraint_propag_rule]: "[|  unify A A2  ; t <: A &&& t <: A2 |] ==> Tru
 
 ML {*  elab_with_expected_error "unification of * and * failed" @{context} @{term "x # x"} *}
 
-(* TODO(feature): discharge nat-upwards-joining constraints  i le k,  j le k
+(* TODO(feature): discharge nat-upwards-joining constraints  i u<= k,  j u<= k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
 ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
 
@@ -538,19 +552,33 @@ ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
 ML {*
   fun test_constraint_simp Cs =
     let
-      val ctxt0 = @{context}
+      val ctxt0 = @{context} |> fold Variable.declare_term Cs
+        |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
       val ctxt = ctxt0
         |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
         |> Context.proof_map (MetaRec.map_constraints_in_run_state (K Cs))
       val ((Cs', implied_Cs), ctxt2) = MetaRec.constraint_simplification true ctxt
+      val cert = cterm_of (Proof_Context.theory_of ctxt0)
     in
-      (Cs', map fst implied_Cs)
+      (Cs' |> map cert, map (fst #> cert) implied_Cs)
     end
 *}
 
-(* TODO: check constraint simplification of something like   i < j, j < k, i < k  to  i < j, j < k *)
 ML {*
-  test_constraint_simp [@{term "i < j"}, @{term "j < k"}, @{term "i < k"}]
+  val res = test_constraint_simp [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_constraint_simp [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
+  val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
+*}
+
+(* FIXME: i u<= k constraint not simplified.
+   employ tracing of selected rules to simplify debugging? *)
+ML {*
+  val res = test_constraint_simp [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 
 

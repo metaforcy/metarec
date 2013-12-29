@@ -3289,10 +3289,10 @@ and constraint_simplification allow_propagation ctxt0 =
           let
             exception UnsolvablePrem
 
-            (* val _ = tracing ("considering constraint propagation rule\n  "
+            val _ = tracing ("considering constraint propagation rule\n  "
               ^Display.string_of_thm ctxt rule
               ^"\non selected input constraint\n  "
-              ^string_of_int (fst C4head)^": "^str_of_normed_term ctxt (snd C4head)) *)
+              ^string_of_int (fst C4head)^": "^str_of_normed_term ctxt (snd C4head))
 
             val nprems =
               if is_propagation then Thm.nprems_of rule - 1
