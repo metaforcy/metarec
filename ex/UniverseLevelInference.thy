@@ -506,7 +506,8 @@ lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
   by (simp add: constraint_const_def constraint_typing_def)
 
 (* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
-lemma [constraint_simp_rule]: "[|  unify A A2  ; constraint (t <: A)  |] ==> (t <: A &&& t <: A2)"
+(* NB: this is not a simplification rule because we have to consider all combinations *)
+lemma [constraint_propag_rule]: "[|  unify A A2  ; constraint (t <: A)  |] ==> (t <: A &&& t <: A2)"
   by (simp add: constraint_const_def unify_const_def conjunctionI)
 
 
@@ -528,6 +529,26 @@ ML {*  elab_with_expected_error "universe_inconsistency" @{context}
 
 (* test of postprocessing that unlifts of first-order vars (here: universe level vars) *)
 ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
+
+
+
+
+
+
+ML {*
+  fun test_constraint_simp Cs =
+    let
+      val ctxt0 = @{context}
+      val ctxt = ctxt0
+        |> Context.proof_map (set_run_state (init_run_state ctxt0))
+        |> Context.proof_map (map_constraints_in_run_state (K Cs))
+      val ((Cs', implied_Cs), ctxt2) = constraint_simplification true ctxt
+    in
+      (Cs', map fst implied_Cs)
+    end
+*}
+
+
 
 
 
@@ -628,6 +649,13 @@ ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 
 
+(* TODO: typeclass examples *)
+
+
+
+
+
+
 
 (* Dinge die man beweisen sollte in einem Papier
      * Bezug zur Typisierung mit Typsystem mit nicht-triv Universenlevelausdruecken und insbesondere
@@ -668,4 +696,9 @@ ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
     * very-dependent types ueber induktive Definitionen und entsprechende Typisierungsregeln.
       Interessant oder kann das Coq auch ueber inductive Types und iota-Reduktion?
 *)
+
+
+
+
+
 
