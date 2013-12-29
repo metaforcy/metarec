@@ -507,23 +507,23 @@ lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
 
 (* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
 (* NB: this is not a simplification rule because we have to consider all combinations *)
-lemma [constraint_propag_rule]: "[|  unify A A2  ; constraint (t <: A)  |] ==> (t <: A &&& t <: A2)"
+lemma [constraint_propag_rule]: "[|  unify A A2  ; t <: A &&& t <: A2 |] ==> True"
   by (simp add: constraint_const_def unify_const_def conjunctionI)
-
 
 ML {*  elab_with_expected_error "unification of * and * failed" @{context} @{term "x # x"} *}
 
-
 (* TODO(feature): discharge nat-upwards-joining constraints  i le k,  j le k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
-ML {*  elab_with_expected_error "universe_inconsistency" @{context}
-  @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
+
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv i. f # (guniv i)"} *}
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv j ~> guniv i. f # (guniv j) # (guniv i)"} *}
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv j ~> guniv k ~> guniv i. f # (guniv j) # (guniv k) # (guniv i)"} *}
+
+
 
 
 
@@ -540,14 +540,18 @@ ML {*
     let
       val ctxt0 = @{context}
       val ctxt = ctxt0
-        |> Context.proof_map (set_run_state (init_run_state ctxt0))
-        |> Context.proof_map (map_constraints_in_run_state (K Cs))
-      val ((Cs', implied_Cs), ctxt2) = constraint_simplification true ctxt
+        |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
+        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K Cs))
+      val ((Cs', implied_Cs), ctxt2) = MetaRec.constraint_simplification true ctxt
     in
       (Cs', map fst implied_Cs)
     end
 *}
 
+(* TODO: check constraint simplification of something like   i < j, j < k, i < k  to  i < j, j < k *)
+ML {*
+  test_constraint_simp [@{term "i < j"}, @{term "j < k"}, @{term "i < k"}]
+*}
 
 
 
