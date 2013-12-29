@@ -106,16 +106,18 @@ fun match_bind(itms,binders,ixn,T,is,t) =
 
 fun first_order_match_w_shared_vars thy =
   let
-    fun mtch k instsp (pat, obj) =
-      let val (pat', obj') = (pat, obj)
-        |> pairself (Envir.head_norm (Envir.Envir{maxidx=0, tenv=snd instsp, tyenv=fst instsp}))
-      in mtch_aux k instsp (pat', obj') end
+    fun mtch k instsp (pat, obj0) =
+      let val obj = obj0
+        |> Envir.head_norm (Envir.Envir{maxidx=0, tenv=snd instsp, tyenv=fst instsp})
+      in mtch_aux k instsp (pat, obj) end
     and mtch_aux k (instsp as (tyinsts,insts)) = fn
         (Var(ixn,T), t)  =>
           if k > 0 andalso Term.is_open t then raise Pattern.MATCH
-          else 
-            (typ_match thy (T, fastype_of t) tyinsts,
-             Vartab.update_new (ixn, (T, t)) insts)
+          else
+           (case Envir.lookup' (insts, (ixn, T)) of
+             NONE => (typ_match thy (T, fastype_of t) tyinsts,
+                      Vartab.update_new (ixn, (T, t)) insts)
+           | SOME u => if Pattern.aeconv (t, u) then instsp else raise Pattern.MATCH)
       | (Free (a,T), Free (b,U)) =>
           if a=b then (typ_match thy (T,U) tyinsts, insts) else raise Pattern.MATCH
       | (Const (a,T), Const (b,U))  =>
@@ -131,15 +133,16 @@ fun first_order_match_w_shared_vars thy =
 
 
 
-(* matching were variables with same identity in pat and obj are regarded as shared *)
+(* matching were variables with same identity in pat and obj are regarded as shared
+  NB: no deep variable bindings, as this corresponds to unification, so only object is normed *)
 fun match_w_shared_vars thy (po as (pat,obj)) envir =
   let
     fun toenv (iTs,itms) = Envir.Envir {maxidx=0, tenv=itms, tyenv=iTs}
 
     (* Pre: pat and obj have same type *)
-    fun mtch binders (pat0, obj0) (env as (iTs,itms)) =
+    fun mtch binders (pat, obj0) (env as (iTs,itms)) =
       let 
-        val (pat, obj) = (pat0, obj0) |> pairself (Envir.head_norm (toenv env))
+        val obj = obj0 |> Envir.head_norm (toenv env)
       in
         case pat of
           Abs(ns,Ts,ts) =>
@@ -174,7 +177,12 @@ fun match_w_shared_vars thy (po as (pat,obj)) envir =
                       raise Pattern.MATCH)
                     else ()
                   val is = ints_of pargs
-                in (iTs,match_bind(itms,binders,ixn,T,is,obj)) end
+                in 
+                  case Envir.lookup' (itms, (ixn, T)) of
+                    NONE => (iTs,match_bind(itms,binders,ixn,T,is,obj))
+                  | SOME u => if Pattern.aeconv (obj, red u is []) then env
+                              else raise Pattern.MATCH
+                 end
             in
               case oh of
                 Var(ixn2,_) =>

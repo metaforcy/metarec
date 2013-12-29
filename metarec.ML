@@ -1194,12 +1194,18 @@ fun envdiff_str ctxt env1 env2 =
 (* normation of inputs is necessary now (compared to old metarec) because we don't
    keep terms fully normed per default anymore and Pattern.match does not norm while
    analysing terms *)
-fun gen_pattern_match_envctxt match norm ctxt (pat0, term0) =
+fun gen_pattern_match_envctxt match norm ctxt (pat, term0) =
   (let 
     val env = get_the_env_in_run_state ctxt
 
-    val (pat, term) = pairself (norm ctxt) (pat0, term0)
-    (* val _ = tracing ("pattern matching (normed): "^Syntax.string_of_term ctxt term
+    (* FIXME: don't norm pattern to avoid deep instantiations on iterating pattern matching
+         that would correspond to unification. also avoid normalization of pattern in call sites *)
+    (* val _ = tracing ("pattern matching: "^Syntax.string_of_term ctxt term0
+      ^" against "^Syntax.string_of_term ctxt pat) *)
+    (* NB: pattern is not normalized because this could lead to deep variable bindings
+         which corresponds to unification *)
+    val term = norm ctxt term0
+    (* val _ = tracing ("  (normed): "^Syntax.string_of_term ctxt term
       ^" against "^Syntax.string_of_term ctxt pat) *)
     val env2 = env
       |> pattern_fun_to_env_mapper (match (Proof_Context.theory_of ctxt))
@@ -2873,31 +2879,28 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
 
                 fun match_iter [] [] succ_cont ctxt_ = succ_cont ctxt_
                   | match_iter (iobj_pat :: rem_iobj_pats) (iobj :: rem_iobjs) succ_cont ctxt_ =
-                        (* kein eta, wird on-the-fly expandiert *)
-                      let val iobj_pat' = norm_with_env_in_run_state ctxt_ iobj_pat
-                      in
-                        if Pattern.pattern iobj_pat' then
-                           (case pattern_match_envctxt ctxt_ (iobj_pat', iobj) of
-                             NONE => first_succ rem_rules failed_rules
-                           | SOME ctxt_2 =>
-                               match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_2)
-                        else
-                          let
-                            val frees = Term.add_frees iobj_pat' []
-                            val abs_frees = fold_rev (Term.lambda o Free) frees
-                            val iobj_pat'_absd = abs_frees iobj_pat'
-                          in
-                            if Pattern.pattern iobj_pat'_absd then
-                              match_iter (iobj_pat'_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs)
-                                succ_cont ctxt_
-                            else
-                              (* fuer dieses Argument also bisher nur struktureller Abgleich uebers Netz gecheckt,
-                                 spaeter wird geprueft ob das gereicht hat.
-                                 wenn das nicht gereicht, schmeisst der sanity check die LocalFail exception
-                                 und probiert somit auch die anderen matchenden Regeln *)
-                              match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_
-                          end
-                      end
+                      if Pattern.pattern iobj_pat then
+                         (* kein eta, wird on-the-fly expandiert *)
+                         (case pattern_match_envctxt ctxt_ (iobj_pat, iobj) of
+                           NONE => first_succ rem_rules failed_rules
+                         | SOME ctxt_2 =>
+                             match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_2)
+                      else
+                        let
+                          val frees = Term.add_frees iobj_pat []
+                          val abs_frees = fold_rev (Term.lambda o Free) frees
+                          val iobj_pat_absd = abs_frees iobj_pat
+                        in
+                          if Pattern.pattern iobj_pat_absd then
+                            match_iter (iobj_pat_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs)
+                              succ_cont ctxt_
+                          else
+                            (* fuer dieses Argument also bisher nur struktureller Abgleich uebers Netz gecheckt,
+                               spaeter wird geprueft ob das gereicht hat.
+                               wenn das nicht gereicht, schmeisst der sanity check die LocalFail exception
+                               und probiert somit auch die anderen matchenden Regeln *)
+                            match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_
+                        end
               in
                 (* Implicitly degrades to structural first-order matching (which is also
                    decompose in this sense) if pobj_pat is not a pattern. *)
@@ -3208,7 +3211,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
 (* TODO(refactor): this contains an adaptation of the frules computation mechanism to propagation rules;
      can perhaps be realized with a common implementation, but the frules computation is completely ground *)
 
-and constraint_simplification ctxt0 =
+and constraint_simplification allow_propagation ctxt0 =
   let
     val gctxt0 = Context.Proof ctxt0
     val { constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, ...} =
@@ -3351,7 +3354,8 @@ and constraint_simplification ctxt0 =
               | SOME ctxt3 => 
                   (* TODO(feature): renaming of bound variables in rule to share them with input constraints *)
                   let
-                    val _ = tracing ("applied constraint propagation rule\n  "
+                    val _ = tracing ("applied constraint "
+                          ^(if is_propagation then "propagation" else "simplification")^" rule\n  "
                           ^Display.string_of_thm ctxt3 rule
                           ^"\nto input constraints\n  "
                           ^commas (map (str_of_normed_term ctxt3) cs_for_heads)
@@ -3415,33 +3419,10 @@ and constraint_simplification ctxt0 =
                       |> SOME
                     else
                       (constraint_graph, ctxt5)
-                      |> fold (fn (inp_constr, inp_constr_prf) => fn (constraint_graph_, ctxt_) =>
-                             (* TODO(refactor): some code duplication with add_constraint function *)
-                             let
-                               val eq_C = aconv_norm (norm_with_env_in_run_state ctxt_)
-
-                               (* NB: inp_constr is the corresponding instantiated part of the rule, not the
-                                    thing contained in the net, therefore we have to norm and eta-reduce it *)
-                               val (C, existing_prf_opt) =
-                                 case
-                                   Net.match_term constraint_graph_
-                                     (Envir.eta_contract (norm_with_env_in_run_state ctxt_ inp_constr))
-                                   |> filter (fn (C', _) => eq_C (C', inp_constr))
-                                 of
-                                   [] => err_with_trace ctxt_ ("internal error on appliation of constraint rule: "
-                                     ^"we could not find some input constraint in the constraint graph")
-                                 | ((C, existing_prf_opt) :: _) => (C, existing_prf_opt)
-
-                               val constraint_graph_2 =
-                                 if is_some existing_prf_opt then
-                                   constraint_graph_
-                                 else
-                                   constraint_graph_ |> Net.delete_term (apsnd fst #> eq_C) (C, C)
-                                   |> Net.insert_term (pairself fst #> eq_C) (C, (C, SOME inp_constr_prf))
-                             in
-                               (constraint_graph_2, ctxt_)
-                             end)
-                           concls_prfs
+                      |> fold (fn (inp_constr, inp_constr_prf) =>
+                           (* NB: since inp_constr always already exists in the constraint graph,
+                              this just ensures a proof for it is registered *)
+                           add_constraint inp_constr (SOME inp_constr_prf)) concls_prfs
                       |> fold (fn new_constr => add_constraint new_constr NONE) new_constraints
                       |> SOME
                   end
@@ -3492,7 +3473,10 @@ and constraint_simplification ctxt0 =
                 | NONE => "nothing"))
             val ext_with_C0 = map (fn (rl, head_idx) => (rl, (head_idx, C0)))
             val pot_simp_rls = Net.match_term constraint_simp_rules_hdidx C |> ext_with_C0
-            val pot_propag_rls = Net.match_term constraint_propag_rules_hdidx C |> ext_with_C0
+            val pot_propag_rls =
+              if allow_propagation then
+                Net.match_term constraint_propag_rules_hdidx C |> ext_with_C0
+              else []
 
             (* val _ = tracing ("add_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
 
@@ -3724,7 +3708,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
 
     (* FIXME: loops for map elaboration?! *) 
-    val ((constraints', implied_constraints), ctxt4) = constraint_simplification ctxt3
+    val ((constraints', implied_constraints), ctxt4) = constraint_simplification true ctxt3
        (* ((get_the_run_state (Context.Proof ctxt3) |> #constraints, []), ctxt3) *)
     val prf3 = prf2
       |> fold (fn (C, C_prf) => impI_prf ctxt4 C #> mp_rev_prf ctxt4 C_prf) implied_constraints

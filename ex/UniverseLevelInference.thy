@@ -4,6 +4,7 @@ begin
 
 
 
+
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
@@ -135,9 +136,10 @@ lemma [MRjud 2 0]: "i le j == i le j" by simp
   
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 (* low prio rule for type inference of free variable x *)
-(* FIXME: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
-   sofort  Unifikation A == A'  durchfuehren. Entspricht also on-the-fly constraint propagation mit der
-   Typ-Constraint-Sharing-Regel von unten. Hui! *)
+(* FIXME?: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
+   sofort  Unifikation A == A'  durchfuehren. Entspricht also on-the-fly constraint simplification mit der
+   Typ-Constraint-Sharing-Regel von unten. Problematisch weil constraint discharge nur global am Ende
+   erfolgen kann. *)
 lemma [MR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
     constraint (A <: guniv i)  ;  foconstraint (i <: nat)  ;  constraint (x <: A) |] ==>
@@ -361,6 +363,25 @@ ML {*
   fun elab ctxt t =
     exception_trace (fn () =>
       MetaRec.metarec_fully_discharged ctxt "UniverseLevelInference.elabjud_jud" (t, []) |> fst)
+
+  fun elab_with_expected_error exp_err_match ctxt t =
+    let
+      val err_msg =
+        (let
+          val _ = MetaRec.metarec_fully_discharged ctxt "UniverseLevelInference.elabjud_jud" (t, [])
+        in NONE end)
+        handle ERROR msg => SOME msg
+    in
+      if not (is_some err_msg) then
+        error "we expected elaboration to fail"
+      else if not (match_string exp_err_match (the err_msg)) then
+        error ("elaboration failed as expected, but error message did not match:\n\n"
+          ^the err_msg)
+      else
+        let val _ = Output.writeln ("elaboration failed as expected. error message follows:\n\n"
+          ^the err_msg^"\n\n")
+        in () end
+    end
 *}
 (* NB: exception traces seem better with deactivated debugging *)
 
@@ -394,7 +415,7 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 
 
-(* FIXME: abstracted universe level annotations lead to unsatisfiable first-order constraints
+(* FIXME?: abstracted universe level annotations lead to unsatisfiable first-order constraints
      for universe levels that are used in subterms.
    we may not unlift them in that case or we need local constraint discharge.
    This should be resolvable by careful local type inference? *)
@@ -405,11 +426,8 @@ ML {*  elab @{context} @{term "(lam x:guniv i. fun f. f # x)"} *}
 
 
 
-(* FIXME: we need constraint propagation to combine the constraints to find the typing error *)
-ML {*  elab @{context} @{term "x # x"} *}
-
 (* fails with occurs check *)
-(* ML {*  elab @{context} @{term "(fun x. x # x)"} *} *)
+ML {*  elab_with_expected_error "unification of * and * failed" @{context} @{term "(fun x. x # x)"} *}
 
 
 
@@ -469,8 +487,8 @@ lemma [constraint_propag_rule]: "i < j &&& j le k ==> i < k"
 lemma [constraint_propag_rule]: "i le j &&& j < k ==> i < k"
   apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
 
-(* FIXME: we need to avoid looping on  i le i &&& i le i ==> i le i *)
-lemma [constraint_propag_rule]: "i le j &&& j le k ==> i le k"
+(* NB: we avoid looping on  i le i &&& i le i ==> i le i *)
+lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i le j &&& j le k ==> i le k"
   apply (erule conjunctionE) by (rule Ordinal.le_trans)
 
 lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i < j &&& j < i)"
@@ -488,19 +506,24 @@ lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i le i"
   by (simp add: constraint_const_def constraint_typing_def)
 
 (* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
-lemma [constraint_propag_rule]: "[|  unify A A2  ;  t <: A &&& t <: A2  |] ==> True"
-  by simp
+lemma [constraint_simp_rule]: "[|  unify A A2  ; constraint (t <: A)  |] ==> (t <: A &&& t <: A2)"
+  by (simp add: constraint_const_def unify_const_def conjunctionI)
 
+
+ML {*  elab_with_expected_error "unification of * and * failed" @{context} @{term "x # x"} *}
 
 
 (* TODO(feature): discharge nat-upwards-joining constraints  i le k,  j le k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
-ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
-ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv i)"} *}
-ML {*  elab @{context} @{term "lam f : guniv i ~> guniv j ~> guniv i.
-  f # (guniv j) # (guniv i)"} *}
-ML {*  elab @{context} @{term "lam f : guniv i ~> guniv j ~> guniv k ~> guniv i.
-  f # (guniv j) # (guniv k) # (guniv i)"} *}
+ML {*  elab_with_expected_error "universe_inconsistency" @{context}
+  @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
+ML {*  elab_with_expected_error "universe_inconsistency" @{context}
+  @{term "lam f : guniv i ~> guniv i. f # (guniv i)"} *}
+ML {*  elab_with_expected_error "universe_inconsistency" @{context}
+  @{term "lam f : guniv i ~> guniv j ~> guniv i. f # (guniv j) # (guniv i)"} *}
+ML {*  elab_with_expected_error "universe_inconsistency" @{context}
+  @{term "lam f : guniv i ~> guniv j ~> guniv k ~> guniv i. f # (guniv j) # (guniv k) # (guniv i)"} *}
+
 
 
 (* test of postprocessing that unlifts of first-order vars (here: universe level vars) *)
