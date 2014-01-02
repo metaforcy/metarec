@@ -101,6 +101,15 @@ translations
   "fun x. f"  == "CONST ptlambda(%x. f)"
   "PI x:A. B" == "CONST ptprod(A, %x. B)"
 
+definition
+  pteq (infixl "===" 30) where
+  "pteq(x,y) == 0"
+
+definition
+  typed_eq ("_ ===[_] _") where
+  "typed_eq(x,A,y) == if (x = y) then 1 else 0"
+
+
 (* we use ~> because -> is already taken for the proper set-theoretic simple function space *)
 abbreviation
   ptsimplefun :: "i => i => i" (infixr "~>" 60) where
@@ -153,6 +162,14 @@ lemma [MR_unchecked]: "[|
     constraint (A <: guniv i)  ;  foconstraint (i <: nat)  ;  constraint (x <: A) |] ==>
   x elabto x : A"
  unfolding elabjud_def constraint_const_def constraint_typing_def .
+
+lemma [MR]: "[|
+    t1 elabto t1' : T  ;
+    t2 elabto t2' : T'  ;
+    unify T T' |] ==>
+  (t1 === t2) elabto (t1' ===[T] t2') : bool"
+  unfolding bool_def elabjud_def typed_eq_def
+  by simp
 
 lemma [MR_unchecked]: "[|
     freshunifvar x  ;  freshunifvar A  ;  freshunifvar i  ;
@@ -486,6 +503,13 @@ definition
        globale Auswirkungen haben, oder nehmen wir Konfluenz an?)
      * Wahl einer minimalen Menge von Constraints die die Gesamtmenge erzeugen (modulo den Vereinfachungen) *)
 (* wie bei echten CHRs matchen wir die Regeln bloss und nutzen dann ggf. explizite Unifikation in den Premissen *)
+
+(* relevant for constraint subsumption of  i u<= j *)
+lemma [constraint_propag_rule]: "i u< j ==> i u<= j"
+  unfolding univ_less_def univ_leq_def
+  by (rule Ordinal.leI)
+  
+
 lemma [constraint_propag_rule]: "i u< j &&& j u< k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans)
@@ -550,9 +574,9 @@ ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
 
 
 ML {*
-  fun test_constraint_simp Cs =
+  fun test_constraint_simp ctxt0 Cs =
     let
-      val ctxt0 = @{context} |> fold Variable.declare_term Cs
+      val ctxt0 = ctxt0 |> fold Variable.declare_term Cs
         |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
       val ctxt = ctxt0
         |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
@@ -565,24 +589,398 @@ ML {*
 *}
 
 ML {*
-  val res = test_constraint_simp [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 
 ML {*
-  val res = test_constraint_simp [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
+  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
   val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
 *}
 
-(* FIXME: i u<= k constraint not simplified.
-   employ tracing of selected rules to simplify debugging? *)
 ML {*
-  val res = test_constraint_simp [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
+  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_constraint_simp @{context} [@{prop "i u<= j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u<= k"}, @{prop "k u< l"}, @{prop "i u< l"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 
 
 
+
+definition
+  dict_ty (infixl "dictof" 50) where
+  [MRjud 1 1]: "dict_ty(d,C) == d : C"
+
+
+definition
+  monoid where
+   "monoid(A,e,m) == e : A  &  m : A -> A -> A
+     & (ALL x:A. ALL y:A. ALL z:A. m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z)
+     & (ALL x:A. m ` x ` e = x) & (ALL x:A. m ` e ` x = x)"
+
+definition
+  monoids where
+  "monoids(A) == { <e, m> : (A * (A -> A -> A)). monoid(A,e,m) }"
+
+lemma monoidI: "e : A ==> m : A -> A -> A ==>
+   (!! x y z. x:A ==> y:A ==> z:A ==> m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z) ==>
+   (!! x. x:A ==> m ` x ` e = x) ==>
+   (!! x. x:A ==> m ` e ` x = x) ==>
+   monoid(A,e,m)"
+  by (simp add: monoid_def)
+
+lemma monoidsI: "e : A ==> m : A -> A -> A ==>
+   (!! x y z. x:A ==> y:A ==> z:A ==> m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z) ==>
+   (!! x. x:A ==> m ` x ` e = x) ==>
+   (!! x. x:A ==> m ` e ` x = x) ==>
+   <e, m> dictof monoids(A)"
+  by (simp add: monoids_def monoid_def dict_ty_def)
+
+definition
+  monoid_neutral where
+  "monoid_neutral == fst"
+
+definition
+  monoid_mult where
+  "monoid_mult == snd"
+
+lemma monoid_unfold: "mon dictof monoids(A) ==> monoid(A, monoid_neutral(mon), monoid_mult(mon))"
+  apply (simp add: monoids_def monoid_neutral_def monoid_mult_def dict_ty_def)
+  apply (erule conjE)
+  apply (erule splitE, assumption)
+  by simp
+
+lemma monoidsI_via_laws: "m : A * (A -> A -> A) ==> monoid(A, monoid_neutral(m), monoid_mult(m)) ==> m dictof monoids(A)"
+  apply (simp add: dict_ty_def monoids_def monoid_def)
+  apply (erule SigmaE)
+  by (simp add: monoid_neutral_def monoid_mult_def)
+
+
+lemma monoid_lawsD: assumes mon: "monoid(A,e,m)"
+  shows "e : A"
+    and "m : A -> A -> A"
+    and "(!! x y z. x:A ==> y:A ==> z:A ==>
+       m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z)"
+    and "(!! x. x:A ==> m ` x ` e = x)"
+    and "(!! x. x:A ==> m ` e ` x = x)"
+  apply (insert mon)
+  by (simp add: monoid_def)+
+
+lemma monoids_lawsD: assumes m: "m dictof monoids(A)"
+  shows "monoid_neutral(m) : A"
+    and "monoid_mult(m) : A -> A -> A"
+    and "(!! x y z. x:A ==> y:A ==> z:A ==>
+       monoid_mult(m) ` x ` (monoid_mult(m) ` y ` z) = monoid_mult(m) ` (monoid_mult(m) ` x ` y) ` z)"
+    and "(!! x. x:A ==> monoid_mult(m) ` x ` monoid_neutral(m) = x)"
+    and "(!! x. x:A ==> monoid_mult(m) ` monoid_neutral(m) ` x = x)"
+  by (simp add: dict_ty_def monoid_unfold[OF m, simplified monoid_def])+
+
+
+
+
+definition
+  group where
+  "group(A,e,m,inv) == monoid(A,e,m)
+     & inv : A -> A
+     & (ALL x:A. m ` x ` (inv ` x) = e) & (ALL x:A. m ` (inv ` x) ` x = x)"
+
+lemma groupI: "inv : A -> A ==>
+   monoid(A,e,m) ==>
+   (!! x. x:A ==> m ` x ` (inv ` x) = e) ==>
+   (!! x. x:A ==> m ` (inv ` x) ` x = x) ==>
+   group(A,e,m,inv)"
+  by (simp add: group_def)
+
+lemma groupI2: "e : A ==> m : A -> A -> A ==> inv : A -> A ==>
+   (!! x y z. x:A ==> y:A ==> z:A ==> m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z) ==>
+   (!! x. x:A ==> m ` x ` e = x) ==>
+   (!! x. x:A ==> m ` e ` x = x) ==>
+   (!! x. x:A ==> m ` x ` (inv ` x) = e) ==>
+   (!! x. x:A ==> m ` (inv ` x) ` x = x) ==>
+   group(A,e,m,inv)"
+   by (simp add: group_def monoid_def)
+
+definition
+  groups where
+  "groups(A) == { <e, m, inv> : (A * (A -> A -> A) * (A -> A)). group(A,e,m,inv) }"
+
+lemma group_dict_ty: "g dictof groups(A) ==> g : A * (A -> A -> A) * (A -> A)"
+  by (simp add: dict_ty_def groups_def)
+
+lemma groupsI: "e : A ==> m : A -> A -> A ==> inv : A -> A ==>
+   (!! x y z. x:A ==> y:A ==> z:A ==> m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z) ==>
+   (!! x. x:A ==> m ` x ` e = x) ==>
+   (!! x. x:A ==> m ` e ` x = x) ==>
+   (!! x. x:A ==> m ` x ` (inv ` x) = e) ==>
+   (!! x. x:A ==> m ` (inv ` x) ` x = x) ==>
+   <e, m, inv> dictof groups(A)"
+  by (simp add: groups_def group_def monoid_def dict_ty_def)
+
+
+definition
+  group_neutral where
+  "group_neutral == fst"
+
+definition
+  group_mult where
+  "group_mult(g) = fst (snd (g))"
+
+definition
+  group_inv where
+  "group_inv(g) = snd (snd (g))"
+
+lemma group_unfold: "g dictof groups(A) ==> group(A, group_neutral(g), group_mult(g), group_inv(g))"
+  apply (simp add: groups_def group_neutral_def group_mult_def group_inv_def dict_ty_def)
+  apply (erule conjE)
+  apply (erule splitE, assumption)
+  apply (erule splitE[where A="A -> A -> A", where B="% _. A -> A"], simp)
+  by simp
+
+lemma group_lawsD: assumes g: "group(A,e,m,i)"
+  shows "e : A"
+    and "m : A -> A -> A"
+    and "i : A -> A"
+    and "(!! x y z. x:A ==> y:A ==> z:A ==>
+       m ` x ` (m ` y ` z) = m ` (m ` x ` y) ` z)"
+    and "(!! x. x:A ==> m ` x ` e = x)"
+    and "(!! x. x:A ==> m ` e ` x = x)"
+    and "(!! x. x:A ==> m ` x ` (i ` x) = e)"
+    and "(!! x. x:A ==> m ` (i ` x) ` x = x)"
+  apply (insert g)
+  by (simp add: group_def monoid_def)+
+
+lemma groups_lawsD: assumes g: "g dictof groups(A)"
+  shows "group_neutral(g) : A"
+    and "group_mult(g) : A -> A -> A"
+    and "group_inv(g) : A -> A"
+    and "(!! x y z. x:A ==> y:A ==> z:A ==>
+       group_mult(g) ` x ` (group_mult(g) ` y ` z) = group_mult(g) ` (group_mult(g) ` x ` y) ` z)"
+    and "(!! x. x:A ==> group_mult(g) ` x ` group_neutral(g) = x)"
+    and "(!! x. x:A ==> group_mult(g) ` group_neutral(g) ` x = x)"
+    and "(!! x. x:A ==> group_mult(g) ` x ` (group_inv(g) ` x) = group_neutral(g))"
+    and "(!! x. x:A ==> group_mult(g) ` (group_inv(g) ` x) ` x = x)"
+  by (simp add: dict_ty_def group_unfold[OF g, simplified group_def monoid_def])+
+
+definition
+  monoid_of_group
+  where "monoid_of_group(g) = <group_neutral(g), group_mult(g)>"
+
+lemma groups_are_monoids: "g dictof groups(A) ==> monoid_of_group(g) dictof monoids(A)"
+  apply (rule monoidsI_via_laws)
+  apply (simp add: monoid_of_group_def)
+  apply (rule conjI)
+  apply (rule groups_lawsD, assumption)+
+  apply (drule group_unfold)
+  by (simp add: group_def monoid_of_group_def
+    group_neutral_def group_mult_def monoid_neutral_def monoid_mult_def)
+
+lemma group_is_monoid: "group(A,e,m,inv) ==> monoid(A,e,m)"
+  by (simp add: group_def)
+
+definition
+  prod_group_neutral where
+  "prod_group_neutral(A,B,eA,eB) ==<eA, eB>"
+
+definition
+  prod_group_mult where
+  "prod_group_mult(A,B,mA,mB) == lam x:A*B. lam y:A*B. <mA ` fst(x) ` fst(y), mB ` snd(x) ` snd(y)>"
+
+definition
+  prod_group_inv where
+  "prod_group_inv(A, B, invA, invB) == lam x:A*B. <invA ` fst(x), invB ` snd(x)>"
+
+definition
+  prod_group where
+  "prod_group(A, B, gA, gB) = <
+      prod_group_neutral(A, B, group_neutral(gA), group_neutral(gB)),
+      prod_group_mult(A, B, group_mult(gA), group_mult(gB)),
+      prod_group_inv(A, B, group_inv(gA), group_inv(gB))>"
+
+
+lemma prod_group_neutral_simp: "group_neutral (prod_group(A,B,gA,gB)) == prod_group_neutral(A,B,group_neutral(gA),group_neutral(gB))"
+  by (simp add: group_neutral_def prod_group_def prod_group_neutral_def)
+lemma prod_group_mult_simp:"group_mult (prod_group(A,B,gA,gB)) == prod_group_mult(A,B,group_mult(gA),group_mult(gB))"
+  by (simp add: group_mult_def prod_group_def prod_group_mult_def)
+lemma prod_group_inv_simp:"group_inv (prod_group(A,B,gA,gB)) == prod_group_inv(A,B,group_inv(gA),group_inv(gB))"
+  by (simp add: group_inv_def prod_group_def prod_group_inv_def)
+
+
+lemma prod_group_in_groups: assumes gA: "gA dictof groups(A)" and gB: "gB dictof groups(B)"
+    shows "prod_group(A,B,gA,gB) dictof groups(A*B)"
+  unfolding prod_group_def  prod_group_neutral_def prod_group_mult_def prod_group_inv_def
+  apply (rule groupsI)
+   apply (rule, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply (typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply (rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   thm groups_lawsD(2)[OF gA]
+   apply (simp only: beta groups_lawsD(2)[OF gA])
+   apply (subst beta, typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply (subst beta, typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply simp
+   apply (rule conjI)
+   apply (rule groups_lawsD[OF gA], typecheck+)
+   apply (rule groups_lawsD[OF gB], typecheck+)
+
+   apply (subst beta, assumption)
+   apply (subst beta, typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply simp
+   apply (erule SigmaE, simp)
+   apply (rule conjI)
+   apply (rule groups_lawsD[OF gA], typecheck+)
+   apply (rule groups_lawsD[OF gB], typecheck+)
+
+   apply (subst beta, typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply (subst beta, assumption)
+   apply simp
+   apply (erule SigmaE, simp)
+   apply (rule conjI)
+   apply (rule groups_lawsD[OF gA], typecheck+)
+   apply (rule groups_lawsD[OF gB], typecheck+)
+
+   apply (subst beta, assumption)
+   apply (subst beta, typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply simp
+   apply (erule SigmaE, simp)
+   apply (rule conjI)
+   apply (rule groups_lawsD[OF gA], typecheck+)
+   apply (rule groups_lawsD[OF gB], typecheck+)
+
+   apply (subst beta, typecheck, rule groups_lawsD[OF gA], rule groups_lawsD[OF gB])
+   apply (subst beta, assumption)
+   apply simp
+   apply (erule SigmaE, simp)
+   apply (rule conjI)
+   apply (rule groups_lawsD[OF gA], typecheck+)
+   by (rule groups_lawsD[OF gB], typecheck+)
+
+
+lemma monoid_prod: assumes A1mon: "monoid(A1,e1,m1)" and A2mon: "monoid(A2,e2,m2)"
+  shows "monoid(A1*A2,prod_group_neutral(A1,A2,e1,e2), prod_group_mult(A1,A2,m1,m2))"
+  unfolding prod_group_neutral_def prod_group_mult_def
+  apply (rule monoidI)
+  apply (typecheck, rule monoid_lawsD[OF A1mon], rule monoid_lawsD[OF A2mon])
+  apply (typecheck add: monoid_lawsD(2)[OF A1mon] monoid_lawsD(2)[OF A2mon])
+  apply (subst beta, assumption)
+  apply (subst beta, typecheck add: monoid_lawsD(2)[OF A1mon] monoid_lawsD(2)[OF A2mon])+
+  apply simp
+  apply (rule conjI)
+  apply (rule monoid_lawsD[OF A1mon], typecheck)
+  apply (rule monoid_lawsD[OF A2mon], typecheck)
+  apply (subst beta, typecheck add: monoid_lawsD(2)[OF A1mon] monoid_lawsD(2)[OF A2mon])+
+  apply (rule monoid_lawsD(1)[OF A1mon], rule monoid_lawsD(1)[OF A2mon])
+  apply (erule SigmaE, simp)
+  apply (rule conjI)
+  apply (rule monoid_lawsD[OF A1mon], typecheck)
+  apply (rule monoid_lawsD[OF A2mon], typecheck)
+  apply (subst beta, typecheck add: monoid_lawsD(2)[OF A1mon] monoid_lawsD(2)[OF A2mon])+
+  apply (rule monoid_lawsD(1)[OF A1mon], rule monoid_lawsD(1)[OF A2mon])
+  apply (subst beta, typecheck add: monoid_lawsD(2)[OF A1mon] monoid_lawsD(2)[OF A2mon])+
+  apply simp
+  apply (erule SigmaE, simp)
+  apply (rule conjI)
+  apply (rule monoid_lawsD[OF A1mon], typecheck)
+  by (rule monoid_lawsD[OF A2mon], typecheck)
+
+
+ lemma group_prod: assumes
+  g1: "group(A1,e1,m1,i1)" and g2: "group(A2,e2,m2,i2)"
+ shows "group(A1 * A2, prod_group_neutral(A1,A2,e1,e2),
+    prod_group_mult(A1,A2,m1,m2), prod_group_inv(A1,A2,i1,i2))"
+  apply (rule groupI)
+  apply (simp add: prod_group_inv_def, typecheck, rule group_lawsD(3)[OF g1], rule group_lawsD(3)[OF g2])
+  apply (rule monoid_prod[OF group_is_monoid[OF g1] group_is_monoid[OF g2]])
+  unfolding prod_group_mult_def prod_group_inv_def prod_group_neutral_def
+  apply (subst beta, typecheck)
+  apply (subst beta, typecheck, rule group_lawsD(3)[OF g1], rule group_lawsD(3)[OF g2])
+  apply (erule SigmaE, simp)
+  apply (rule conjI)
+  apply (rule group_lawsD[OF g1], assumption)
+  apply (rule group_lawsD[OF g2], assumption)
+  apply (subst beta, typecheck,  rule group_lawsD(3)[OF g1], rule group_lawsD(3)[OF g2])
+  apply (subst beta, assumption)+
+  apply simp
+  apply (erule SigmaE, simp)
+  apply (rule conjI)
+  apply (rule group_lawsD[OF g1], assumption)
+  by (rule group_lawsD[OF g2], assumption)
+  
+
+
+
+
+definition
+  gmult where
+  "gmult == 0"
+definition
+  gunit where
+  "gunit == 0"
+definition
+  ginv where
+  "ginv == 0"
+
+
+lemma [MR_unchecked]: "[|
+    freshunifvar i  ;  freshunifvar A  ;  freshunifvar d ; 
+    foconstraint (i <: nat)  ;  constraint (A <: guniv i)  ;
+    constraint (d dictof groups(A)) |] ==>
+  gmult elabto (group_mult(d)) : A -> A -> A"
+  apply (simp add: elabjud_def constraint_const_def)
+  by (rule groups_lawsD)
+
+lemma [MR_unchecked]: "[|
+    freshunifvar i  ;  freshunifvar A  ;  freshunifvar d  ;
+    foconstraint (i <: nat)  ;  constraint (A <: guniv i)  ;
+    constraint (d dictof groups(A)) |] ==>
+  gunit elabto (group_neutral(d)) : A"
+  apply (simp add: elabjud_def constraint_const_def)
+  by (rule groups_lawsD)
+
+lemma [MR_unchecked]: "[|
+    freshunifvar i  ;  freshunifvar A  ;  freshunifvar d  ;
+    foconstraint (i <: nat)  ;  constraint (A <: guniv i)  ;
+    constraint (d dictof groups(A)) |] ==>
+  ginv elabto (group_inv(d)) : A -> A"
+  apply (simp add: elabjud_def constraint_const_def)
+  by (rule groups_lawsD)
+
+lemma [constraint_simp_rule]: "[|
+    freshunifvar dA  ;  freshunifvar dB  ;
+    unify d (prod_group(A,B,dA,dB))  ;
+    constraint (dA dictof groups(A))  ;
+    constraint (dB dictof groups(B))  |] ==>
+  d dictof groups(A * B)"
+  apply (simp add: unify_const_def constraint_const_def)
+  by (rule prod_group_in_groups)
+
+(* NB: not a constraint simplification rule because we have to consider all combinations (d1,d2) *)
+lemma dict_sharing[constraint_propag_rule]: "
+   [|  unify d1 d2  ;  d1 dictof C &&& d2 dictof C  |] ==> True"
+  by simp
+
+
+(* FIXME: constraints  ?i27 <: nat, ?A30 <: guniv ?i27, ?d33 dictof groups(?A30)
+    are not absorbed after they become unified via type_sharing, dict_sharing constraint propagation rules *)
+ML {*
+  elab @{context} @{term "gmult # x # y === gmult # x # (gmult # y # gunit)"}
+*}
+
+
+ML {*
+  val pats = [@{cpat "?d dictof groups(A * B)"},
+    @{cpat "?d' dictof monoids(A)"}] |> map (Thm.term_of #> FOLogic.mk_Trueprop)
+  val res = test_constraint_simp  @{context} pats
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+  
 
 
 (* examples *)

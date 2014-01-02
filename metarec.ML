@@ -3277,7 +3277,8 @@ and constraint_simplification allow_propagation ctxt0 =
     *)
 
 
-    fun gen_with_pot_rules is_propagation pot_rules_with_C4head (constraint_graph0, ctxt0) = 
+    fun gen_with_pot_rules is_propagation
+        pot_rules_with_C4head (constraint_graph0, ctxt0) = 
       let
         (* NB: only the first successful simplification rule is applied *)
         (* NB: eta-expanded for local polymorphism *)
@@ -3428,23 +3429,36 @@ and constraint_simplification allow_propagation ctxt0 =
                     (* for propag rules:  (new constraint i, proof of (input constraints ==> new constraint i))_i
                        for simp rules:  (input constraint i, proof of (new_constraints ==> input constraint i))_i *)
                     val (concls_prfs, ctxt6) = conj_concl_extr_prfs disch_prf ctxt5
+
+                    (* NB: determination of existing constraints that have been instantiated now relies on the facts that
+                         * constraints in the constraint graph are fully normalized 
+                         * type unification variables are not instantiated during this derivation process *)
+                    val inst_old_Cs = constraint_graph |> Net.content |> map fst
+                      |> filter (fn C => Term.add_vars C [] |> exists (fn ixnT =>
+                           Envir.lookup (get_the_env_in_run_state ctxt6, ixnT) |> is_some))
+                    
+                    val (constraint_graph2, ctxt7) = (constraint_graph, ctxt6)
+                      |> fold (fn inst_old_C => reg_constraint true inst_old_C NONE NONE)
+                           inst_old_Cs
                   in
                     if is_propagation then
-                      (constraint_graph, ctxt6)
+                      (constraint_graph2, ctxt7)
                       |> fold (fn (new_constr, new_constr_prf) => 
                              if new_constr aconv (Data.mk_Trueprop Data.True) then
                                I
                              else
-                               add_constraint new_constr (SOME rl_prop) (SOME new_constr_prf))
+                               reg_constraint false new_constr (SOME rl_prop) (SOME new_constr_prf))
                            concls_prfs
                       |> SOME
                     else
-                      (constraint_graph, ctxt6)
+                      (constraint_graph2, ctxt7)
                       |> fold (fn (inp_constr, inp_constr_prf) =>
-                           (* NB: since inp_constr always already exists in the constraint graph,
-                              this just ensures a proof for it is registered *)
-                           add_constraint inp_constr (SOME rl_prop) (SOME inp_constr_prf)) concls_prfs
-                      |> fold (fn new_constr => add_constraint new_constr (SOME rl_prop) NONE) new_constraints
+                             (* NB: since inp_constr always already exists in the constraint graph,
+                                this just ensures a proof for it is registered *)
+                             reg_constraint false inp_constr (SOME rl_prop) (SOME inp_constr_prf))
+                           concls_prfs
+                      |> fold (fn new_constr => reg_constraint false new_constr (SOME rl_prop) NONE)
+                           new_constraints
                       |> SOME
                   end
               end
@@ -3462,30 +3476,40 @@ and constraint_simplification allow_propagation ctxt0 =
 
 
     (* TODO(feature): tracking of serveral implications leading to a constraint *)
-    and add_constraint C0 origin_rule_app_opt implied_by_opt (constraint_graph, ctxt) = 
+    (* NB: force_reconsideration does *NOT* affect the constraints that are generated from this one,
+         because the ones that are affected by an instantiation after their generation are all
+         collected determined directly from the constraint graph *)
+    and reg_constraint force_reconsideration C0
+        origin_rule_app_opt implied_by_opt (constraint_graph, ctxt) = 
       let
         val C = norm_with_env_in_run_state ctxt C0
         val C_eta = C |> Envir.eta_contract
         (* val _ = tracing ("considering constraint "^Syntax.string_of_term ctxt C) *)
 
         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
-        val existing_C_opt = Net.match_term constraint_graph C_eta
+        val existing_C_entries = Net.match_term constraint_graph C_eta
           |> filter (fn (C', _) => eq_C (C', C))
-          |> try hd
-        val exists_already = is_some existing_C_opt
-        val implied_by_already = existing_C_opt |> Option.map (snd #> is_some)
+        val exists_already = not (null existing_C_entries)
+        val implied_by_already_opt = existing_C_entries |> map_filter snd |> try hd 
+
+        fun readd_C_with implied_by_opt_ =
+          Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
+          #> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt_))
 
         val constraint_graph' =
           if exists_already then
-            (if the implied_by_already orelse not (is_some implied_by_opt) then
-              constraint_graph
+            (if is_some implied_by_already_opt orelse not (is_some implied_by_opt) then
+              (if force_reconsideration then
+                (* to keep C normalized in net and to achieve absorption after instantiation *)
+                constraint_graph |> readd_C_with implied_by_already_opt
+              else
+                constraint_graph)
             else
-              constraint_graph |> Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
-              |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt)))
+              constraint_graph |> readd_C_with implied_by_opt)
           else
             constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt))
       in
-        if exists_already then
+        if exists_already andalso not force_reconsideration then
           (constraint_graph', ctxt)
         else
           let
@@ -3505,7 +3529,7 @@ and constraint_simplification allow_propagation ctxt0 =
                 Net.match_term constraint_propag_rules_hdidx C_eta |> ext_with_C0
               else []
 
-            (* val _ = tracing ("add_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
+            (* val _ = tracing ("reg_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
 
             (* val _ = tracing ("pot_frules for new fact \n"
               ^ Display.string_of_thm ctxt2 fact
@@ -3527,13 +3551,13 @@ and constraint_simplification allow_propagation ctxt0 =
      (* constraint store with tracking which other constraints optionally imply this constraint *)
     val constraint_graph0 = Net.empty : (term * proof_pack option) Net.net
     val (constraint_graph', ctxt') = (constraint_graph0, ctxt0)
-      |> fold (fn C => add_constraint C NONE NONE) constraints0
+      |> fold (fn C => reg_constraint false C NONE NONE) constraints0
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
 
     (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
        if a constraint is not simplified according to the constraint graph, it has a self-dependency;
-       we locally give up when discovering cycles and share dependency results *)
+       when discovering cycles we locally give up and share dependency results *)
     fun calc_dependencies C0 (walked, calced) =
       let
         val C = norm_with_env_in_run_state ctxt' C0
@@ -3588,7 +3612,10 @@ and constraint_simplification allow_propagation ctxt0 =
                 end
       end
 
-    val constraints0_deps = constraints0 |> map (fn C =>
+
+    val constraints0_nodups = constraints0 |> distinct eq_C
+
+    val constraints0_deps = constraints0_nodups |> map (fn C =>
       let
         val ((deps, prf), (walked, _)) = calc_dependencies C (Net.empty, Net.empty)
         val used = union eq_C deps (Net.content walked)
@@ -3601,14 +3628,14 @@ and constraint_simplification allow_propagation ctxt0 =
       else if constraints0_deps |> exists (fn (C', (_, _, used')) =>
           not (eq_C (C, C')) andalso member eq_C used' C andalso member eq_C used C')
       then
-        (* mutually dependent *original* constraints are both retained,
+        (* mutually dependent *original* constraints C, C' are both retained,
            even if they have both been simplified further
            (i.e. they are both not terminal in the constraint graph) *)
         NONE
       else
         SOME (C, (deps, prf)))
 
-    val constraints' = constraints0 |> subtract eq_C (map fst implied_constraints)
+    val constraints' = constraints0_nodups |> subtract eq_C (map fst implied_constraints)
       |> fold (union eq_C) (map (fn (_, (deps, _)) => deps) implied_constraints)
 
     val implied_constraints_res = implied_constraints
