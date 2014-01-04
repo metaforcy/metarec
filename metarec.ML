@@ -1191,19 +1191,18 @@ fun envdiff_str ctxt env1 env2 =
     Syntax.string_of_term ctxt (Var(ixn, T))^":="^Syntax.string_of_term ctxt t)
   |> commas
 
-(* normation of inputs is necessary now (compared to old metarec) because we don't
-   keep terms fully normed per default anymore and Pattern.match does not norm while
-   analysing terms *)
+(* NB: normation of term to be matched is necessary now (compared to old metarec) because we don't
+     keep terms fully normed per default anymore and Pattern.match does not norm while
+     analysing terms.
+     We don't norm pattern to avoid deep instantiations on iterating pattern matching
+     that would correspond to unification. we therefore also avoid normalization of pattern
+     in call sites *)
 fun gen_pattern_match_envctxt match norm ctxt (pat, term0) =
   (let 
     val env = get_the_env_in_run_state ctxt
 
-    (* FIXME: don't norm pattern to avoid deep instantiations on iterating pattern matching
-         that would correspond to unification. also avoid normalization of pattern in call sites *)
     (* val _ = tracing ("pattern matching: "^Syntax.string_of_term ctxt term0
       ^" against "^Syntax.string_of_term ctxt pat) *)
-    (* NB: pattern is not normalized because this could lead to deep variable bindings
-         which corresponds to unification *)
     val term = norm ctxt term0
     (* val _ = tracing ("  (normed): "^Syntax.string_of_term ctxt term
       ^" against "^Syntax.string_of_term ctxt pat) *)
@@ -1359,7 +1358,8 @@ fun try_pat_unify ctxt (t1_0, t2_0) env =
       ^"\n  "^tostr t2_1 ^"  lifted to "^tostr t2_2) *)
   in
     let
-      (* FIXME?: patternify buggy? *)
+      (* FIXME?: patternify buggy? structural unification seems more useful
+           than patternification anyway and they interact badly *)
       val env2 = env (* |> fold (patternify ctxt) [t1_2, t2_2] *)
       val (t1, t2) = pairself (Envir.norm_term env2) (t1_2, t2_2)
       val _ =
@@ -3282,6 +3282,13 @@ and constraint_simplification allow_propagation ctxt0 =
       let
         (* NB: only the first successful simplification rule is applied *)
         (* NB: eta-expanded for local polymorphism *)
+        (* TODO(feature?): consider all head combinations and all potential rules when
+             simplifying constraints. At least those that lead to simplifications of
+             unsimplified constraints. But this is a performance cost and performance
+             is the only reason to prefer simplification rules
+               prems ==> (constraint new_C_i)_i ==> heads conj
+             over propagations rules
+               prems ==> heads conj ==> (new_C_i)_i conj *)
         fun fold_poss_rule_ress f =
           if is_propagation then fold_with_change_tracking f
           else fold_upto_first_change f
@@ -3290,10 +3297,10 @@ and constraint_simplification allow_propagation ctxt0 =
           let
             exception UnsolvablePrem
 
-            val _ = tracing ("considering constraint propagation rule\n  "
+            (* val _ = tracing ("considering constraint propagation rule\n  "
               ^Display.string_of_thm ctxt rule
               ^"\non selected input constraint\n  "
-              ^string_of_int (fst C4head)^": "^str_of_normed_term ctxt (snd C4head))
+              ^string_of_int (fst C4head)^": "^str_of_normed_term ctxt (snd C4head)) *)
 
             val nprems =
               if is_propagation then Thm.nprems_of rule - 1
@@ -3341,8 +3348,8 @@ and constraint_simplification allow_propagation ctxt0 =
                   Net.unify_term constraint_graph (Envir.eta_contract head)
                   |> filter (fn (C', _) => pattern_match_envctxt ctxt2 (head, C') |> is_some)
                   |> map fst
-                val _ = tracing ("lookup for head "^Syntax.string_of_term ctxt2 head
-                  ^" returned\n  "^commas (map (str_of_normed_term ctxt2) res))
+                (* val _ = tracing ("lookup for head "^Syntax.string_of_term ctxt2 head
+                  ^" returned\n  "^commas (map (str_of_normed_term ctxt2) res)) *)
               in res end
             val cs_for_heads_posprod = heads0 |> map_index (fn (i,head) =>
                  let val (headidx, C) = C4head
@@ -3351,8 +3358,8 @@ and constraint_simplification allow_propagation ctxt0 =
                    else lookup head
                  end)
                |> list_amb
-            val _ = tracing ("cs_for_heads_posprod: \n"
-              ^cat_lines (cs_for_heads_posprod |> map (commas o (map (str_of_normed_term ctxt2)))))
+            (* val _ = tracing ("cs_for_heads_posprod: \n"
+              ^cat_lines (cs_for_heads_posprod |> map (commas o (map (str_of_normed_term ctxt2))))) *)
 
 
             fun inst_and_apply_rule cs_for_heads i (constraint_graph, ctxt2) =
@@ -3375,13 +3382,13 @@ and constraint_simplification allow_propagation ctxt0 =
               | SOME ctxt4 => 
                   (* TODO(feature): renaming of bound variables in rule to share them with input constraints *)
                   let
-                    val _ = tracing (string_of_int i^":  applying constraint "
+                    (* val _ = tracing (string_of_int i^":  applying constraint "
                           ^(if is_propagation then "propagation" else "simplification")^" rule\n  "
                           ^Display.string_of_thm ctxt4 rule
                           ^"\nto input constraints\n  "
                           ^commas (map (str_of_normed_term ctxt4) cs_for_heads)
                           ^"\nSolving the following prems now:\n"
-                          ^commas (map (str_of_normed_term ctxt4) prems))
+                          ^commas (map (str_of_normed_term ctxt4) prems)) *)
 
                     fun global_fail_cont ctxt_ msg = 
                       err_with_trace_and_facts ctxt_
@@ -3413,13 +3420,13 @@ and constraint_simplification allow_propagation ctxt0 =
                     val ctxt5 = ctxt5_ |> Context.proof_map (map_constraints_in_run_state
                       (K (get_constraints_in_run_state ctxt4)))
 
-                    val _ = tracing ("applied constraint "
+                    (* val _ = tracing ("applied constraint "
                           ^(if is_propagation then "propagation" else "simplification")^" rule\n  "
                           ^Display.string_of_thm ctxt5_ rule
                           ^"\nto input constraints\n  "
-                          ^commas (map (str_of_normed_term ctxt5_) cs_for_heads)
+                          ^commas (map (str_of_normed_term ctxt4) cs_for_heads)
                           ^"\nresulted in new constraints\n  "
-                          ^commas (map (str_of_normed_term ctxt5_) new_constraints))
+                          ^commas (map (str_of_normed_term ctxt5_) new_constraints)) *)
 
                     (* for propag rules:  input constraints ==> conjunctioned new constraints
                        for simp rules:  new_constraints ==> conjunctioned input constraints *)
@@ -3436,6 +3443,11 @@ and constraint_simplification allow_propagation ctxt0 =
                     val inst_old_Cs = constraint_graph |> Net.content |> map fst
                       |> filter (fn C => Term.add_vars C [] |> exists (fn ixnT =>
                            Envir.lookup (get_the_env_in_run_state ctxt6, ixnT) |> is_some))
+
+                    (* val _ = if null inst_old_Cs then ()
+                      else
+                        tracing ("the following existing constraints have been instantiated:\n"
+                          ^commas (inst_old_Cs |> map (Syntax.string_of_term ctxt6))) *)
                     
                     val (constraint_graph2, ctxt7) = (constraint_graph, ctxt6)
                       |> fold (fn inst_old_C => reg_constraint true inst_old_C NONE NONE)
@@ -3484,36 +3496,52 @@ and constraint_simplification allow_propagation ctxt0 =
       let
         val C = norm_with_env_in_run_state ctxt C0
         val C_eta = C |> Envir.eta_contract
-        (* val _ = tracing ("considering constraint "^Syntax.string_of_term ctxt C) *)
+        (* val _ = tracing ((if force_reconsideration then "forced to re" else "")
+          ^"considering constraint "^Syntax.string_of_term ctxt C) *)
+          (*^"\n  constraint graph contains\n "
+          ^commas (Net.content constraint_graph |> map (fst #> Syntax.string_of_term ctxt))*)
 
         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
         val existing_C_entries = Net.match_term constraint_graph C_eta
           |> filter (fn (C', _) => eq_C (C', C))
+        (* val _ = tracing ("existing_C_entries are:\n"
+          ^cat_lines (existing_C_entries |> map (fst #> str_of_normed_term ctxt))) *)
         val exists_already = not (null existing_C_entries)
         val implied_by_already_opt = existing_C_entries |> map_filter snd |> try hd 
 
         fun readd_C_with implied_by_opt_ =
-          Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
-          #> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt_))
+          constraint_graph
+          |> fold (fn (C', _) =>
+               (* NB: deletion from net expects precise term, not an instantiation of it,
+                    so we cannot use C_eta for this.
+                  We use deletion that is tolerant of non-existing C' because there can be serveral
+                  distinct C' with the same key-approximation, which are now identified with C and are
+                  thus all pruned by the first such net deletion *)
+               Net.delete_term_safe (apsnd fst #> eq_C) (Envir.eta_contract C', C'))
+             existing_C_entries
+          |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt_))
 
         val constraint_graph' =
           if exists_already then
             (if is_some implied_by_already_opt orelse not (is_some implied_by_opt) then
               (if force_reconsideration then
                 (* to keep C normalized in net and to achieve absorption after instantiation *)
-                constraint_graph |> readd_C_with implied_by_already_opt
+                readd_C_with implied_by_already_opt
               else
                 constraint_graph)
             else
-              constraint_graph |> readd_C_with implied_by_opt)
+              readd_C_with implied_by_opt)
           else
             constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt))
       in
         if exists_already andalso not force_reconsideration then
-          (constraint_graph', ctxt)
+          let val _ = () (* tracing ("constraint "^Syntax.string_of_term ctxt C^" exists already") *)
+          in
+            (constraint_graph', ctxt)
+          end
         else
           let
-            val _ = tracing ("generated new constraint "^Syntax.string_of_term ctxt C
+            (* val _ = tracing ("generated new constraint "^Syntax.string_of_term ctxt C
               ^" implied by \n  "^
                 (case implied_by_opt of
                   SOME prf => str_of_normed_term ctxt (prop_of_proofp prf)
@@ -3521,7 +3549,7 @@ and constraint_simplification allow_propagation ctxt0 =
               ^"\n  originating from "
                 ^(case origin_rule_app_opt of
                    SOME rl => str_of_normed_term ctxt rl
-                 | NONE => "initial constraints"))
+                 | NONE => "initial constraints or instantiation of existing constraint")) *)
             val ext_with_C0 = map (fn (rl, head_idx) => (rl, (head_idx, C0)))
             val pot_simp_rls = Net.match_term constraint_simp_rules_hdidx C_eta |> ext_with_C0
             val pot_propag_rls =
@@ -3554,6 +3582,23 @@ and constraint_simplification allow_propagation ctxt0 =
       |> fold (fn C => reg_constraint false C NONE NONE) constraints0
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
+
+    val constraints0_varixns = [] |> fold Term.add_vars constraints0 |> map fst
+    val envdiff = get_the_run_state (Context.Proof ctxt') |> #env |> Envir.term_env |> Vartab.dest
+      |> filter (fn (ixn, _) => member (op =) constraints0_varixns ixn)
+      |> subtract (pairself fst #> (op =))
+           (get_the_run_state (Context.Proof ctxt0) |> #env |> Envir.term_env |> Vartab.dest)
+    val _ = tracing ("resulting instantiation is:\n  "
+      ^commas (envdiff |> map (fn (ixn, (T, t)) =>
+         Syntax.string_of_term ctxt' (Var(ixn,T)) ^ " := "
+         ^ str_of_normed_term ctxt' t)))
+    val _ = tracing ("resulting constraint graph is:\n"
+      ^cat_lines (Net.content constraint_graph'
+        |> map (fn (C, implied_by_opt) =>
+             "  "^str_of_normed_term ctxt' C ^"  implied by  "
+             ^(case implied_by_opt of
+                NONE => "nothing"
+              | SOME prf => str_of_normed_term ctxt' (prop_of_proofp prf)))))
 
     (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
        if a constraint is not simplified according to the constraint graph, it has a self-dependency;
@@ -3762,7 +3807,6 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
 
 
-    (* FIXME: loops for map elaboration?! *) 
     val ((constraints', implied_constraints), ctxt4) = constraint_simplification true ctxt3
        (* ((get_the_run_state (Context.Proof ctxt3) |> #constraints, []), ctxt3) *)
     val prf3 = prf2
@@ -3783,12 +3827,6 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
       (* TODO(feature): add optional fallback to FO-unif to deal with type
            constructor polymorphism? but using (m ` a) is better anyway. *)
-      (* TODO(feature): try to be even more general and interleave
-         structural and pattern unifications *)
-      (* FIXME: if first-order unification variables (those that are present in first-order constraints)
-          have been instantiated to a lifting during structural unification, then unlift them afterwards.
-          Perhaps offer explicit this-is-a-first-order-unifvar constraints, that are simplified
-          on instantiation to this-is-a-first-order-unifvar constraints of contained unifvars *)
     val struct_unify = true
     val (delayed_unifs3, env5) =
       if struct_unify then
@@ -3798,6 +3836,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
       handle TryStructUnify (ctxt_, (bad_t1, bad_t2), msg) =>
         err_with_trace ctxt_ ("metarec: solving of a delayed unification problem structurally failed: "^msg)
 
+    (* NB: if first-order unification variables (those that are present in first-order constraints)
+        could have been instantiated to a lifting during structural unification, so unlift them now. *)
     val {fo_vars, ...} = get_the_run_state (Context.Proof ctxt4)
     val ctxt5 = ctxt4 |> Context.proof_map (map_env_in_run_state (K env5))
       |> fold (fn fo_var =>
@@ -4434,7 +4474,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                        ctxt3
                      end)
                    gen_brules
-                (* FIXME Fakten als Regeln auch einfuegen bevor die
+                (* FIXME?: Fakten als Regeln auch einfuegen bevor die
                     Rekursion angestossen wird? *)
               |> fold (gen_add_fact local_run expl_frules_opt false) gen_facts
             end

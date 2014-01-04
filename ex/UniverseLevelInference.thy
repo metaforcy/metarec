@@ -288,7 +288,8 @@ lemma [MR]: "[|
 (* NB: only realizes contextual discharge of typing constraints,
      because x :> A is only issued for fixes x.
    Discharging dependent B(x) to (PROD x:A. B(x)) does not work easily
-   because B(x) constitutes a non-pattern.
+   because B(x) constitutes a non-pattern. We would also have to ensure
+   an acyclic type-dependency-ordering of the arguments to B to allow this discharge.
    So dependent product typing constraints t <: (PROD x:A. B(x))
    can only be created by the free variable typing rule *)
 (* TODO: when inferring the types of newly defined constants from their definition,
@@ -612,6 +613,13 @@ ML {*
   val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u<= k"}, @{prop "k u< l"}, @{prop "i u< l"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
+
+
+
+
+
+(* examples *)
+
 
 
 
@@ -961,14 +969,15 @@ lemma [constraint_simp_rule]: "[|
   apply (simp add: unify_const_def constraint_const_def)
   by (rule prod_group_in_groups)
 
+lemma [constraint_propag_rule]: "d dictof groups(A) ==> monoid_of_group(d) dictof monoids(A)"
+  by (rule groups_are_monoids)
+
 (* NB: not a constraint simplification rule because we have to consider all combinations (d1,d2) *)
 lemma dict_sharing[constraint_propag_rule]: "
    [|  unify d1 d2  ;  d1 dictof C &&& d2 dictof C  |] ==> True"
   by simp
 
 
-(* FIXME: constraints  ?i27 <: nat, ?A30 <: guniv ?i27, ?d33 dictof groups(?A30)
-    are not absorbed after they become unified via type_sharing, dict_sharing constraint propagation rules *)
 ML {*
   elab @{context} @{term "gmult # x # y === gmult # x # (gmult # y # gunit)"}
 *}
@@ -977,13 +986,19 @@ ML {*
 ML {*
   val pats = [@{cpat "?d dictof groups(A * B)"},
     @{cpat "?d' dictof monoids(A)"}] |> map (Thm.term_of #> FOLogic.mk_Trueprop)
-  val res = test_constraint_simp  @{context} pats
-  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+  val res = exception_trace (fn () => test_constraint_simp  @{context} pats)
+  val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
 *}
   
 
 
-(* examples *)
+
+
+
+
+
+
+
 
 (* note that this is still slightly improper since we reuse Larry's list operator instead
    of a proper type constructor formulation
@@ -1079,7 +1094,6 @@ ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 
 
-(* TODO: typeclass examples *)
 
 
 
