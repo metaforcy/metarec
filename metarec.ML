@@ -3055,19 +3055,6 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
   
   
 
-    (* TODO(feature): customizable constraint solvers that can see many interrelated constraints at once *)
-    (* sketch of universelevel-constraint-solver
-         * for each constraint i<j, i<=j put an edge i -> j in a graph
-         * find strongly-connected components in graph in some topological order
-         * check that each component is only pseudo-cyclic, i.e. cycles only consist of <= edges
-           otherwise error
-         * instantiate each pseudo-cycle to one of the variables, e.g.. i1 <= i2 <= i1
-           is eliminated by instantiating i2 := i1
-         * find the irreducable paths between the components
-         * keep only the constraints that form the edges walked by those irreducable paths
-           and show that the other constraints area implied the the irreducable ones via
-           transitivity
-    *)
     (* TODO(feature): allgemeine Constraintmengen-Minimierung
           (reicht fuer Typklassen und Universenlevel-Inferenz)
       * vereinfache die aus metarec-Ableitungen entstandenen Constraints mit metarec zu implikational
@@ -3140,9 +3127,10 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
           Vereinfachung(dual zu Propagierung): bei Anwendung einer Vereinfacungsregel auf mehrere Constraints
           werden deren Fixes vereinigt und deren Annahme-Mengen geschnitten und die vereinfachten Constraints
           erhalten diese vereinigten Fixes und geschnittenen Annahmen. Die Vereinfachungsregel
-            [| guard G1 ;  ... ; guard Gk |] ==> [| R1 ; ... ; Rn |] ==> H1 &&& .. &&& Hm 
+            [| G1 ;  ... ; Gk ; constraint R1 ; ... ; constraint Rn |] ==> H1 &&& .. &&& Hm 
           wird also geliftet zu
-            [| guard lftd G1 ;  ... ; guard lftd Gk |] ==> [| lftd R1 ; ... ; lftd Rn |] ==> lftd H1 &&& .. &&& lftd Hm 
+            [| lftd G1 ;  ... ; lftd Gk ; lftd (constraint R1) ; ... ; lftd (constraint Rn) |]
+            ==> lftd H1 &&& .. &&& lftd Hm 
           wobei lftd die vereinigten Fixes und geschnittenen Annahmen voranstellt und vorkommende Unifvar
           ueber die vereinigten Fixes lifted.
           Die H1, .., Hm werden vor Regelanwendung dann so *verstaerkt*, dass sie die vereinigten Fixes und
@@ -3150,7 +3138,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
 
           In der tracking-Tabelle stehen die Constraints dann ohne Fixes und Annahmen, d.h. mit loose bounds.
 
-          Aber erstmal behandeln wir nur den haeufigen Fall der scheinbar immer bei
+          ABER ERSTMAL behandeln wir nur den haeufigen Fall der scheinbar immer bei
           Universenlevel- und Typklassen-Inferenz vorliegt:
             die Annahmen werden nur zur Vereinfachung von Constraints genutzt die waehrend der metarec-Ableitung
             weiter instantiiert wurden und die Fixes von Constraints werden nur in Unifvar-Applikationen genutzt.
@@ -3159,7 +3147,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
             generiert werden, wo also lokale Annahmen und Fixes keine Rollen spielen duerfen.
 
             Also gehen wir wie folgt vor:
-              * Vereinfachung der die Constraints unter ihren Fixes und Annahmen.
+              * Vereinfachung der Constraints unter ihren Fixes und Annahmen.
               * Entfernung der Annahmen der resultierenden vereinfachten Constraints.
               * Unliften der Unifvar in den resultierenden Constraints (durch Instantiierung mit frischen
                 ungelifteten Unifvar)
@@ -3182,8 +3170,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
           statt
             H1, .., Hm <=> G1, .., Gn | R1, .., Rk
           nutze ich
-            [| guard G1 ; ... ; guard Gn |] ==> [| R1 ; ... ; Rn |] ==> H1 &&& ... &&& Hm 
-            (guard marker zur Abgrenzung)
+            [| G1 ; ... ; Gn ; constraint R1 ; ... ; constraint Rn |] ==> H1 &&& ... &&& Hm 
 
         Vorteil gegenueber CHRs:
           * Vereinfachungsregeln sind semantisch keine Gleichheiten sondern reverse Implikationen.

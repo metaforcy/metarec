@@ -820,18 +820,6 @@
         !! x_1 ... x_n. x1:A1 ==> .. ==> x_n:A_n(x1 .. x_n-1) ==> t'(x_1 .. x_n) : B(x_1 .. x_n)
 
 
-   * Constraint-Handling rules bzw. Variante davon um Constraints zu loesen und zu minimieren:
-       biete Propagierungsregeln und metarec-artige Rueckwaertsregeln an
-       Backtracking? Unifikation oder Matching? Verbindung zu Forward rules und metarec?
-     erstmal ohne Zertifizierung die Ableitung finden:
-       * starte mit den initialen Constraints C_0,
-       * bauen einen Hypergraph auf der angibt welche Constraints welche anderen mit welcher
-         Regel in welcher Instantiierung implizieren
-       * suche nach minimaler Menge C_min an Constraints von der aus die initialen Constraints aus erreichbar sind
-       * Zeige C_min ==> C_0 ueber Anwendung der Regelinstantiierungen mit der die Kanten des Hypergraphs
-         beschriftet sind
-
-
 
 
   * soft-typisierte hoeherstufige Unifikationsvariablen (mit delay von non-pattern unifications)
@@ -841,12 +829,22 @@
     Die Unifikationen wohl auch besser erstmal ganz explizit als  unify t1 t2  judgement
     das zunaechst mal die synthetisierten Typen von t1, t2 unifiziert, dann t1 und t2 selbst. Vermutlich
     sollte man auch das Typsynthesejudgement fuer Terme mit Unifikationvariablen vorgeben.
+
+  * solve_prems umbenennen und aufteilen in solve_goal und solve_goals und dass so aus
+    dem toplevel metarec Aufruf nutzen
+  * metarec auf mehrere Judgement-Goals um Typinferenz mehrerer Propositionen
+    mit Sharing von Variablen zu ermoeglichen
+  * metarec-basierte Typinferenz als Isabelle-Termelaborationsphase registrieren
+    (Constraints ueber spezielle Implikationen nach aussen kommunizieren)
+  * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten Typinferenz
+    als Annahmen im Kontext zu interpretieren
+
+
 *)
 
 
 
 (* DONE
-
 
 
     * lokale forward rules (ALREADY DONE, aber ein bisschen anders?)
@@ -878,4 +876,17 @@
       * statt lokalen schematische Variablen in lokalen brules werden lokale Quantoren genutzt,
         und alle vorkommenden schematischen Variablen und Typvariablen muessen im Kontext 
         der Regel available sein
+
+    * Verallgemeinerte Constraint-Handling rules um Constraints zu loesen und zu minimieren:
+        biete multi-headed Propagierungsregeln und backward-Simplifizierungsregeln
+        mit metarec-Premissen (inbesondere Unifikation) an
+      Ausfuehrung:
+        * starte mit den initialen Constraints C_0,
+        * bauen einen Hypergraph auf der angibt welche Constraints durch welche anderen
+          impliziert werden mit Beweisterm dazu
+        * finde Teilmenge von C_0 die ueber die Implikationen im Hypergraph die
+          Gesamtmenge C_0 impliziert. Sich wechselseitig-implizierende Constraints in C_0
+          bleiben dabei erhalten
+
+
 *)
