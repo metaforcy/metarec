@@ -286,7 +286,14 @@ fun unif thy binders (s,t) env = case (Envir.head_norm env s, Envir.head_norm en
 and cases thy (binders,env,(s,t)) = case (strip_comb s,strip_comb t) of
        ((Var(F,Fty),ss),(Var(G,Gty),ts)) =>
           if F = G then 
-            flexflex1(env,binders,F,Fty,ints_of' env ss,ints_of' env ts)
+            (flexflex1(env,binders,F,Fty,ints_of' env ss,ints_of' env ts)
+            handle Pattern =>
+              if env_abeconv env (s, t) then env
+              else
+                error ("struct_unify: non-patterns with same head."
+                ^" structural instantiation would lead to cyclic instantiation here.\n\n"
+                ^Syntax.string_of_term_global thy s^"\n"
+                ^Syntax.string_of_term_global thy t))
             (* NB: structural instantiation would lead to cyclic instantiation here *)
           else
             (flexflex2(env,binders,F,Fty,ints_of' env ss,G,Gty,ints_of' env ts)

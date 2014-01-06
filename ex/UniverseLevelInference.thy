@@ -284,7 +284,11 @@ lemma [MR]: "[|
 (* NB: relies on removal of non-relevant fixes and assms in front of the resulting constraints.
       Cannot be realized as an constraint simplification rule that is executed
       as part of the propagation machinery, because the fixes, assms context has to
-      be gone then already. *)
+      be gone then already.
+   E.g. in
+      (fun x. fun y. f x y) elabto (lam x:A. lam y:B(x). f x y) : A -> B(x) -> C(x)
+   we encounter the constraint  (!! x. x:A ==> B(x) :> guniv ?i)
+   which has to be simplified to  B : A -> guniv ?i  *)
 (* NB: only realizes contextual discharge of typing constraints,
      because x :> A is only issued for fixes x.
    Discharging dependent B(x) to (PROD x:A. B(x)) does not work easily
@@ -297,6 +301,7 @@ lemma [MR]: "[|
    by ?B := (% x:A. ?B2(x)),
    to avoid need of unification modulo ZF-beta during type inferences involving
    the new constant *)
+(* TODO(feature): concrete name of f should be similiar to name of appt *)
 lemma typ_constraint_ctxt_discharge_MR[MR]: "[|
      freshunifvar f  ;
      !! x. try (unify (appt(x)) (f ` x))  ; try (x :> A)  ;
@@ -415,16 +420,23 @@ ML {*  elab @{context} @{term "x :: i"}  *}
 
 ML {*  elab @{context} @{term "(fun x. x)"}  *}
 
+(* NB: no typing constraint sharing of  ?A22 <: guniv ?i39,  ?A22 <: guniv ?i16  yet*)
 ML {*  elab @{context} @{term "f # x"}  *}
 
 (* NB: employs structural unification for  ?B(x) == (PROD y:?C. ?D(y)),  i.e.
      ?B := (% x. PROD y:?C'(x). ?D'(x, y)),   ?C := ?C'(t)    ?D := ?D'(t) *)
-(* FIXME: deep guniv constraint not simplified *)
+(* FIXME: deep guniv constraint not completely simplified *)
 ML {*  elab @{context} @{term "f # x # y"}  *}
 
-ML {*  elab @{context} @{term "f # x # x # x"}  *}
+(* FIXME: in the contextual discharge of typing constraints we introduce
+    ZF-applications instead of meta applications on (new) unification variables.
+    Structural unification cannot deal with them of course. *)
+(* ML {*  elab @{context} @{term "f # x # x # x"}  *} *)
 
-ML {*  elab @{context} @{term "f # x # x # x # x"}  *}
+(* FIXME: in the contextual discharge of typing constraints we introduce
+    ZF-applications instead of meta applications on (new) unification variables.
+    Structural unification cannot deal with them of course. *)
+(* ML {*  elab @{context} @{term "f # x # x # x # x"}  *} *)
 
 ML {*
   val fixes = Variable.dest_fixes @{context} |> map snd
@@ -544,12 +556,18 @@ lemma [constraint_simp_rule]: "constraint (i <: nat) ==> i u<= i"
   unfolding univ_less_def univ_leq_def
   by (simp add: constraint_const_def constraint_typing_def)
 
-(* TODO: entsprechendes um Sharing von Dictionaries gleicher Typklassenapplikationen zu erzwingen *)
 (* NB: this is not a simplification rule because we have to consider all combinations *)
 lemma [constraint_propag_rule]: "[|  unify A A2  ; t <: A &&& t <: A2 |] ==> True"
   by (simp add: constraint_const_def unify_const_def conjunctionI)
 
+
+
 ML {*  elab_with_expected_error "unification of * and * failed" @{context} @{term "x # x"} *}
+
+(* NB: now the guniv constraints for ?A22 have been unified due to the constraint sharing rule *)
+ML {*  elab @{context} @{term "f # x"}  *}
+
+
 
 (* TODO(feature): discharge nat-upwards-joining constraints  i u<= k,  j u<= k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)

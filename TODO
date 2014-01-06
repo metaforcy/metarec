@@ -830,14 +830,22 @@
     das zunaechst mal die synthetisierten Typen von t1, t2 unifiziert, dann t1 und t2 selbst. Vermutlich
     sollte man auch das Typsynthesejudgement fuer Terme mit Unifikationvariablen vorgeben.
 
+
+
   * solve_prems umbenennen und aufteilen in solve_goal und solve_goals und dass so aus
     dem toplevel metarec Aufruf nutzen
   * metarec auf mehrere Judgement-Goals um Typinferenz mehrerer Propositionen
     mit Sharing von Variablen zu ermoeglichen
   * metarec-basierte Typinferenz als Isabelle-Termelaborationsphase registrieren
     (Constraints ueber spezielle Implikationen nach aussen kommunizieren)
-  * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten Typinferenz
-    als Annahmen im Kontext zu interpretieren
+  * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten
+    Typinferenz als Annahmen im Kontext zu interpretieren
+  * verzoegerte non-pattern Unifikationen doch besser vor Constraint-Vereinfachung durchfuehren,
+    damit Vereinfachung auf den erfolgten Instantiierungen durchgefuehrt wird.
+    Positiver Einfluss von Unifikationen waehrend der Constraint-Vereinfachung auf die
+    Problem-Komplexitaet der verzoegerten non-pattern Unifikationen ist ja recht unwahrscheinlich.
+    Beste Loesung waere wohl vor und nach der Loesung der verzoegerten Unifikationsproblemen
+    die Constraints zu minimieren.
 
 
 *)
