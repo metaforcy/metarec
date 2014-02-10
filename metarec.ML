@@ -116,14 +116,20 @@ fun exact_freeze_props_thaw_thms props ctxt =
     val vars = fold Term.add_vars props []
     val tvars = fold Term.add_tvars props []
 
-    (* TODO(correctness): if some fx_n ends with "_" we might get a problem with
+    (* NB: we avoid fx_n ending with "_", to avoid problem with
        Name.clean_index generating unexpecting variables
        for the fixed frees in Term_Subst.generalize in Thm.generalize *)
-    val ((fxvar_ns, fxTvar_ns), ctxt2) = ctxt
-      |> Variable.variant_fixes (map (fst #> fst) vars)
-      ||>> Variable.variant_fixes (map (fst #> fst) tvars)
+    val ((fxvar_ns, fxTvar_ns), ctxt2) = ctxt |> Variable.set_body false
+      |> Variable.variant_fixes (map (fst #> fst #> Name.clean) vars)
+      ||>> Variable.variant_fixes (map (fst #> fst #> Name.clean) tvars)
+      ||> Variable.restore_body ctxt
     val var_fixing = vars ~~ fxvar_ns
     val tvar_fixing = tvars ~~ fxTvar_ns
+
+    (* val _ = tracing ("exact_freeze_props_thaw_thms: var_fixing is  "
+      ^commas (var_fixing |> map (fn ((ixn, T), fx_n) =>
+        Syntax.string_of_term ctxt2 (Var (ixn, T)) ^":="^ 
+        Syntax.string_of_term ctxt2 (Free(fx_n, T))))) *)
 
     val tvar_fixing_inst = tvar_fixing |> map (fn ((ixn, S), fx_n) => ((ixn, S), TFree(fx_n, S)))
     val freezeT = Term_Subst.instantiateT tvar_fixing_inst
@@ -139,11 +145,20 @@ fun exact_freeze_props_thaw_thms props ctxt =
         val thaw_reinstT = tvar_fixing |> map (fn ((ixn, S), fx_n) => (((fx_n, maxidx'), S), TVar(ixn, S)))
           (* NB: T is already reinstantiated *)
         val thaw_reinst = var_fixing |> map (fn ((ixn, T), fx_n) => (((fx_n, maxidx'), T), Var(ixn, T)))
+        val th_gen = th |> Thm.generalize (map snd tvar_fixing, map snd var_fixing) maxidx'
+        val th_reinst = th_gen 
+          |> Thm.instantiate
+               (thaw_reinstT |> map (fn (ixnS, T) => pairself certT (TVar ixnS, T)),
+                thaw_reinst |> map (fn (ixnT, t) => pairself cert (Var ixnT, t)))
+        (* val _ = tracing ("thaw_th of exact_freeze_props_thaw_thms: thaw_reinst is "
+          ^commas (thaw_reinst |> map (fn (ixnT, t) =>
+             Syntax.string_of_term ctxt2 (Var ixnT) ^ ":=" ^ Syntax.string_of_term ctxt2 t))
+          ^"\n  th is "^Display.string_of_thm ctxt2 th
+          ^"\n  maxidx' is "^string_of_int maxidx'
+          ^"\n  th_gen is "^Display.string_of_thm ctxt2 th_gen
+          ^"\n  th_reinst is "^Display.string_of_thm ctxt2 th_gen) *)
       in
-        th |> Thm.generalize (map snd tvar_fixing, map snd var_fixing) maxidx'
-        |> Thm.instantiate
-             (thaw_reinstT |> map (fn (ixnS, T) => pairself certT (TVar ixnS, T)),
-              thaw_reinst |> map (fn (ixnT, t) => pairself cert (Var ixnT, t)))
+        th_reinst
       end
   in
     ((map freeze props, thaw_th), ctxt2)
@@ -964,7 +979,8 @@ fun map_run_state f = map_run_info (fn (running_expl_frules, running_on_thy_lvl,
   (running_expl_frules, running_on_thy_lvl, f run_state))
 fun set_run_state st2 = map_run_state (K st2)
 fun init_run_state ctxt =
-  SOME { outer_ctxt=ctxt, env=Envir.empty 1, delayed_unifs=[], constraints=[], fo_vars=[] }
+  SOME { outer_ctxt=ctxt, env=Envir.empty (Variable.maxidx_of ctxt),
+    delayed_unifs=[], constraints=[], fo_vars=[] }
 fun map_constraints_in_run_state f =
   map_run_state (Option.map (fn {outer_ctxt, env, delayed_unifs, constraints, fo_vars} =>
     {outer_ctxt=outer_ctxt, env=env, delayed_unifs=delayed_unifs, constraints=f constraints,
@@ -986,7 +1002,12 @@ fun get_constraints_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state
   |> (fn { constraints, ... } => constraints)
 fun get_delayed_unifs_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state
   |> (fn { delayed_unifs, ... } => delayed_unifs)
-fun norm_with_env_in_run_state ctxt = Envir.norm_term (get_the_env_in_run_state ctxt)
+fun norm_with_env_in_run_state ctxt t =
+  Envir.norm_term (get_the_env_in_run_state ctxt) t
+  handle TYPE (msg, Ts, ts) =>
+    raise TYPE ("exception while norming "^Syntax.string_of_term ctxt t^":  "^msg, Ts, ts)
+    
+  
 
 
 fun str_of_normed_term ctxt = Syntax.string_of_term ctxt o norm_with_env_in_run_state ctxt
@@ -1232,6 +1253,8 @@ fun pattern_matches_envctxt ctxt (pats, terms) =
         SOME ctxt_ => pattern_match_envctxt ctxt_ (pat, term)
       | NONE => NONE)
     (pats ~~ terms)
+(* FIXME: decompose_match with identification of variables that are shared in object and pattern,
+     as in pattern_match_envctxt ?! *)
 val decompose_pattern_match_envctxt =
   gen_pattern_match_envctxt DecompPattern.decompose_match norm_with_env_in_run_state
 
@@ -1333,6 +1356,25 @@ fun patternify ctxt term env =
       | t => patternify ctxt t env_)
     [] term
 
+(* TODO(feature?): structural (oder sogar auch pattern?) unification modulo ZF-beta
+       wobei wir Mischformen wie  ?f(args) ` otherargs  ignorieren
+     dazu:
+       * die Terme ZF-beta-normalisieren
+         (braucht dann metarec typechecking im Kontext des Unifikationsproblems,
+          der dann auch als Premissen mitverwaltet werden muss)
+         (optional weil wir ja nur ueber contextual discharge von type constraints
+          ZF-normale ZF-beta Applikationen einfuehren)
+       * Subterme ?f ` args durch ?F(args) ersetzen
+       * strukturelle Unifikation durchfuehren
+       * wenn ?F instantiiert wurde
+         dann setzen wir ?f := (lam x_i : A_i .. . ?F(xs))
+         wobei   arg_i :> A_i
+         (A_i := {arg_i} hilft nicht viel wenn ?f auch andere Vorkommen hat)
+
+     Hauptanwendungszweck ist Verarbeitung der ZF-Applikationen die durch die
+     mengenwertige contextual discharge Regel entstehen. Das :> judgement muss
+     also input des metarec functors werden.
+*)
 fun try_struct_unify ctxt (t1_0, t2_0) env = 
   let
     fun unif_failed () = raise TryStructUnify(ctxt, (t1_0, t2_0), "try_struct_unify: structural unification of "
@@ -1554,6 +1596,7 @@ fun genvar_on_run_state name T ctxt =
     val env = get_the_env_in_run_state ctxt
     val (env2, v) = Envir.genvar name (env, T)
     val ctxt2 = ctxt |> Context.proof_map (map_env_in_run_state (K env2))
+    (* val _ = tracing ("generated fresh var: "^Syntax.string_of_term ctxt2 v) *)
   in
     (v, ctxt2)
   end
@@ -1571,10 +1614,14 @@ fun fresh_thm_prf th ctxt =
     val tvars_inst = tvars ~~ tvars'
     val instT = (Term_Subst.instantiateT tvars_inst)
 
+
     val vars = Term.add_vars (prop_of th) [] |> rev
     val vars' = (vars |> map (apsnd instT))
     val (vars'', ctxt3) = ctxt2 |> fold_map (fn ((n, _), T') =>
       genvar_on_run_state n T') vars'
+
+    (* val _ = tracing ("fresh_thm_prf generated fresh vars: "^
+      commas (map (Syntax.string_of_term ctxt3) vars'')) *)
 
     val vars_inst = vars' ~~ vars''
   in
@@ -1624,7 +1671,8 @@ fun allI_prf ctxt (x, T) (ProofPack (prop, prf, assms)) =
     case assms |> find_first (fn assm => member (op =) (Term.add_frees (norm assm) []) (x, normT T)) of
       SOME bad_assm =>
         err_with_trace ctxt ("internal error: fix over "^Syntax.string_of_term ctxt free^" failed: "
-          ^"assumption "^str_of_normed_term ctxt bad_assm^" contains it")
+          ^"assumption "^str_of_normed_term ctxt bad_assm^" contains it\n"
+          ^"proposition is "^str_of_normed_term ctxt prop)
     | NONE =>
         (* NB: we have to norm T and prop because prop can contain matching
            variables of rules that have been instantiated already (and matching
@@ -1825,12 +1873,13 @@ fun replay_prf ctxt prfp =
     val tvars = add_tvars_prf ctxt prfp []
     val ctxt2 = ctxt |> declare_prf prfp
 
-    (* TODO(correctness): if some fx_n ends with "_" we might get a problem with
+    (* NB: we avoid fx_n ending with "_", to avoid problem with
        Name.clean_index generating unexpecting variables
        for the fixed frees in Term_Subst.generalize in Thm.generalize *)
-    val ((fxvar_ns, fxTvar_ns), _) = ctxt2
-      |> Variable.variant_fixes (map (fst #> fst) vars)
-      ||>> Variable.variant_fixes (map (fst #> fst) tvars)
+    val ((fxvar_ns, fxTvar_ns), _) = ctxt2 |> Variable.set_body false
+      |> Variable.variant_fixes (map (fst #> fst #> Name.clean) vars)
+      ||>> Variable.variant_fixes (map (fst #> fst #> Name.clean) tvars)
+      ||> Variable.restore_body ctxt2
     val var_fixing = vars ~~ fxvar_ns
     val tvar_fixing = tvars ~~ fxTvar_ns
     val fxenv = Envir.merge (get_the_env_in_run_state ctxt2,
@@ -2412,6 +2461,12 @@ and add_assm_terms_internal assms0 ctxt =
         val prf = unsafe_exact_thm_prf R_th_disch
           |> fold (mp_rev_prf ctxt3 o assumption_prf) assms_used_thawed
           |> fold_rev (allI_prf ctxt_2) (map (snd #> Term.dest_Free) loc_var_fixing)
+
+        (* val _ = tracing ("constructed local rule "^str_of_normed_term ctxt_2 (prop_of_proofp prf)
+          ^"\n  out of forall-elimd rule generated from fixed assumptions "^Display.string_of_thm ctxt_2 R_th
+          ^"\n  R_th_disch is "^Display.string_of_thm ctxt_2 R_th_disch
+          ^"\n  ng_assms are "^commas (map (str_of_normed_term ctxt_2) ng_assms)
+          ^"\n  ng_assms_fxd are "^commas (map (str_of_normed_term ctxt_2) ng_assms_fxd)) *)
       in
         (LocalRule prf, ctxt_2)
       end
@@ -2465,7 +2520,10 @@ and add_assm checked th ctxt =
          und die bereits bestehenden Unifvar geshared werden *)
     val rule =
       if null (Logic.strip_params (prop_of th)) then th
-      else Thm.forall_elim_vars 0 th
+      else
+        (* TODO(correctness): should we use maxidx from ctxt?
+          but (local) rules are freshified right before their application anyway *)
+        Thm.forall_elim_vars 0 th
     val prop = prop_of rule
     val is_rule = gen_check_rule checked checked ctxt prop |> is_some
     val is_fact = is_rule andalso null (Logic.strip_imp_prems prop) andalso ground prop 
@@ -2502,7 +2560,8 @@ and add_assm checked th ctxt =
 and solve_prems_standalone global_fail_cont local_fail_cont rule prems ctxt0 =
   let
     val run_st0_opt = get_run_state (Context.Proof ctxt0)
-    val ctxt = ctxt0 |> Context.proof_map (set_run_state (init_run_state ctxt0) #> set_assms [])
+    val ctxt0_decld_prems = ctxt0 |> fold Variable.declare_term prems (* NB: for correct maxidx *)
+    val ctxt = ctxt0 |> Context.proof_map (set_run_state (init_run_state ctxt0_decld_prems) #> set_assms [])
     val (prfps, ctxt2) = solve_prems true true global_fail_cont local_fail_cont (prop_of rule) prems ctxt
     val ths = map (replay_prf ctxt2) prfps
 
@@ -2540,8 +2599,9 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule_
                wenn P2 von P1 abhaengt
              BTW: C wird automatisch im um die Pi erweiterten Kontext gerewritet *)
         val prem2 = norm_with_env_in_run_state ctxt prem
-        (* val _ = tracing ("solve_prem on "^Syntax.string_of_term ctxt prem2) *)
         fun act_rule () = norm_with_env_in_run_state ctxt rule_prop
+        (* val _ = tracing ("solve_prem on "^Syntax.string_of_term ctxt prem2
+          ^"\n  towards  "^Syntax.string_of_term ctxt (act_rule ())) *)
 
         (* TODO(tuning): use Subgoal.focus to prove prem
              but how to deal with implicit normalization?
@@ -2657,6 +2717,11 @@ and solve_prems topcall allow_lthy_transf global_fail_cont local_fail_cont rule_
                        ((prf', map (norm_with_env_in_run_state disch_ctxt2') oobjs), disch_ctxt2')
                      end)
 
+              (* NB: since oobj_pats_of_prem are normed, this can constitute a unification
+                 due to deep matching, if a matching variable in one of the patterns has 
+                 already been instantiated to a unification variable *)
+              (* TODO(feature): allow selective control over this unification behaviour
+                   or move to purely matching semantics *)
               val disch_ctxt3 =
                 case pattern_matches_envctxt disch_ctxt2 (map param_lam_lift oobj_pats_of_prem, map param_lam_lift oobjs) of
                   SOME disch_ctxt3 => disch_ctxt3
@@ -2810,56 +2875,12 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
 
             fun ext_rl_tr ctxt_ = add_to_rule_trace (K (prop_of_proofp proofp')) ctxt
 
-            val ctxt6 = ctxt5 |> fold (fn (iobj_of_rule0, iobj0) => fn ctxt_ =>
-                if Pattern.pattern iobj_of_rule0 then ctxt_
-                else
-                  let
-                    val norm = norm_with_env_in_run_state ctxt_
-                    val (iobj_of_rule, iobj) = pairself norm (iobj_of_rule0, iobj0)
-                    val frees = Term.add_frees iobj_of_rule [] |> map Free
-                    val abs_frees = fold_rev Term.lambda frees
-                    val iobj_of_rule_absd = abs_frees iobj_of_rule
-                  in
-                    (* iobj_of_rule  und  iobj  beta-normal, s.o. *)
-                    (* TODO(feature): instead of checking against pattern, just allow usual
-                        fall back to first-order pattern matching via Pattern.match *)
-                    if Pattern.pattern iobj_of_rule_absd then 
-                      case pattern_match_envctxt ctxt_ (iobj_of_rule_absd, abs_frees iobj) of
-                        SOME ctxt_2 => ctxt_2
-                      | NONE => raise LocalFail (ext_rl_tr ctxt_, "metarec_worker: refinement check of non-primary input failed:\n"
-                          ^"  "^str_of_normed_term ctxt_ iobj
-                          ^"\ndoes not match\n"
-                          ^"  "^str_of_normed_term ctxt_ iobj_of_rule)
-                    (* else if iobj_of_rule aconv iobj then
-                      ctxt_
-                    else if can Term.dest_Var (Term.head_of iobj_of_rule) then
-                      let val ctxt_2 = unlift_unifvar_occs (Term.head_of iobj_of_rule) ctxt_
-                      in
-                        case pattern_match_envctxt ctxt_2 (iobj_of_rule_absd, abs_frees iobj) of
-                          SOME ctxt_3 => ctxt_3
-                        | NONE => raise LocalFail (ext_rl_tr ctxt_2,
-                            "metarec_worker: refinement check of non-primary input failed "
-                            ^"(even after unlifting of matching side head):\n"
-                            ^"  "^str_of_normed_term ctxt_2 iobj
-                            ^"\ndoes not match\n"
-                            ^"  "^str_of_normed_term ctxt_2 iobj_of_rule)
-                      end *)
-                    else
-                      err_with_trace (ext_rl_tr ctxt_)
-                        ("metarec_worker: input expression "^Syntax.string_of_term ctxt_ iobj_of_rule
-                        ^" in rule still not a pattern after instantiation with synthesized information "
-                        ^" and the input got instantiated to\n  "
-                        ^Syntax.string_of_term ctxt_ iobj)
-                  end)
-              (iobjs_of_rule' ~~ iobjs)
-            
-
-            val res = proofp' |> fold (mp_rev_prf ctxt6) solved_prems
+            val res = proofp' |> fold (mp_rev_prf ctxt5) solved_prems
             (* val _ = tracing ("metarec_worker: after discharge of rule premises \n"
-              ^str_of_normed_term ctxt6 (prop_of_proofp res)) *)
-            val oobjs_of_rule'' = oobjs_of_rule' |> map (norm_with_env_in_run_state ctxt6)
+              ^str_of_normed_term ctxt5 (prop_of_proofp res)) *)
+            val oobjs_of_rule'' = oobjs_of_rule' |> map (norm_with_env_in_run_state ctxt5)
           in
-            ((res, oobjs_of_rule''), ctxt6)
+            ((res, oobjs_of_rule''), ctxt5)
           end
 
 
@@ -2887,6 +2908,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
               let
                 (* beta normal wg add_rule *)
                 val (proofp, ctxt2) = ctxt |> fresh_proofp_of_rule rule
+                (* val _ = tracing ("freshified rule: "^str_of_normed_term ctxt2 (prop_of_proofp proofp)) *)
                 val (pobj_pat, iobj_pats, _) = proofp |> prop_of_proofp
                   |> Logic.strip_imp_concl |> jud_matcher |> the
 
@@ -2903,19 +2925,28 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                              match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_2)
                       else
                         let
-                          val frees = Term.add_frees iobj_pat []
+                          (* NB: we do not avoid deep pattern matching against unification variables ATM.
+                               For this we would have to make sure that only those matching variables
+                               that only occur in arguments of non-patterns are normed wrt the
+                               current instantiation *)
+                          val iobj_pat' = norm_with_env_in_run_state ctxt_ iobj_pat
+                          val frees = Term.add_frees iobj_pat' []
                           val abs_frees = fold_rev (Term.lambda o Free) frees
-                          val iobj_pat_absd = abs_frees iobj_pat
+                          val iobj_pat'_absd = abs_frees iobj_pat'
                         in
-                          if Pattern.pattern iobj_pat_absd then
-                            match_iter (iobj_pat_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs)
+                          if Pattern.pattern iobj_pat'_absd then
+                            match_iter (iobj_pat'_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs)
                               succ_cont ctxt_
                           else
-                            (* fuer dieses Argument also bisher nur struktureller Abgleich uebers Netz gecheckt,
-                               spaeter wird geprueft ob das gereicht hat.
-                               wenn das nicht gereicht, schmeisst der sanity check die LocalFail exception
-                               und probiert somit auch die anderen matchenden Regeln *)
-                            match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_
+                            first_succ rem_rules failed_rules
+                            (* NB: kein verzoegertes Matching auf non-pattern Inputs in
+                               nicht-primaerer Position mehr. Machte Probleme wegen
+                               Nachinstantiierung von in den Premissen der Regel
+                               generierten Constraints fuehren was ggf. zur
+                               unvollstaendigen Quantifikation ueber ihre relevanten Fixes fuehrt.
+                               Kann man bei Bedarf ja mit
+                                 [| ... ; match non_pat against B |] ==> J .. B outs
+                               in Regeln simulieren *)
                         end
               in
                 (* Implicitly degrades to structural first-order matching (which is also
@@ -3630,7 +3661,8 @@ and constraint_simplification allow_propagation ctxt0 =
                         Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
                       sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
                       Eintrag mit Vereinfachungsbeweis zum Constraint finden.
-                      Sollte das auch beim Anlegen dieser Eintraege waehrend der Propagierung so gemacht werden? *)
+                      Sollte das auch beim Anlegen dieser Eintraege waehrend der Propagierung so gemacht werden? 
+                      Ist mittlerweile schon so? *)
                   val implied_by_opt =
                     case Net.match_term constraint_graph' C_eta
                       |> filter (fn (C', _) => eq_C (C', C))
@@ -3915,7 +3947,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
     val (prf4, ctxt5) =  metarec_constraint_simp true prf3 ctxt4
 
-    (* NB: we always need a final pass for structural unifications after the last constraint simplification pass *)
+    (* NB: we always need a final pass for structural unifications after the last constraint simplification pass.
+         Still necessary now that contextual discharge of typing constraints works without unification? *)
     val (prf5, ctxt6) = metarec_structural_unifications true prf4 ctxt5
 
     (* val _ = tracing ("replaying final proof for  "^str_of_normed_term ctxt6 (prop_of_proofp prf5)) *)
