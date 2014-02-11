@@ -115,6 +115,8 @@ fun dest_Bound (Bound i) = i
   | dest_Bound _ = error "dest_Bound"
 
 
+(* TODO(feature): use variants of the names of bounds from abstractions instead of boundfree
+     and use variants of the names of frees/vars in ss *)
 fun reorder_open_abss binderTs ss ss_reord body =
   let
     val ctxt = Name.context |> fold Term.declare_term_names
@@ -405,7 +407,7 @@ and struct_inst thy binders ((F, Fty), ss0) term env =
       val term'_abs = norm2 term
         |> reorder_open_abss (map snd binders) (map norm2 ss) (map norm2 ss_reord)
       (* NB: Fty does not have to be normed since var-clash check in Envir.lookup
-         is modulo type normation *)
+         is modulo type normalization *)
       val env3 = Envir.update (((F, Fty), term'_abs), env2)
     in env3 end
   

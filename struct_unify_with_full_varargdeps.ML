@@ -447,7 +447,7 @@ and struct_inst thy binders ((F, Fty), ss0) term0 env =
       val term'2_abs = norm2 term'2
         |> reorder_open_abss (map snd binders) (map norm2 ss') (map norm2 ss'_reord)
       (* NB: Fty does not have to be normed since var-clash check in Envir.lookup
-         is modulo type normation *)
+         is modulo type normalization *)
       val env3 = Envir.update (((F, Fty), term'2_abs), env2)
     in env3 end
   

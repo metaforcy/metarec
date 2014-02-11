@@ -1220,7 +1220,7 @@ fun envdiff_str ctxt env1 env2 =
     Syntax.string_of_term ctxt (Var(ixn, T))^":="^Syntax.string_of_term ctxt t)
   |> commas
 
-(* NB: normation of term to be matched is necessary now (compared to old metarec) because we don't
+(* NB: normalization of term to be matched is necessary now (compared to old metarec) because we don't
      keep terms fully normed per default anymore and Pattern.match does not norm while
      analysing terms.
      We don't norm pattern to avoid deep instantiations on iterating pattern matching
@@ -2226,23 +2226,56 @@ fun abstr_inst (avail_vars, avail_tvars) =
      necessary if variables are sometimes partially applied, but this should not be the case
      for freshunifvar-generated ones.  *)
 fun unlift_unifvar_occs t0 ctxt =
-  let val t = norm_with_env_in_run_state ctxt t0
+  let
+    (* from Pure/term.ML *)
+    fun term_name (Const (x, _)) = Long_Name.base_name x
+      | term_name (Free (x, _)) = x
+      | term_name (Var ((x, _), _)) = x
+      | term_name _ = Name.uu;
+
+    fun unlift boundsTs t0 ctxt =
+      let val t = norm_with_env_in_run_state ctxt t0
+      in
+        case Term.strip_comb t of
+          (v as Var(ixn as (n, _), T), ts) =>
+            if forall Term.is_Bound ts then ctxt
+            else 
+              let
+                (* TODO(feature?): more generally only unlift over those arguments that
+                   correspond to local fixes? *)
+                val typeof = curry Term.fastype_of1 (map snd boundsTs)
+                fun name_of_bnd (Bound i) = nth boundsTs i |> fst
+                  | name_of_bnd _ = error "internal error: name_of_bnd: not a bound"
+
+                val ts_bnds = ts |> filter Term.is_Bound
+                val ts_bnds_ns = Name.context
+                  |> fold Term.declare_term_names (v :: ts @ map Logic.mk_type (map snd boundsTs))
+                  |> fold_map Name.variant (map name_of_bnd ts_bnds)
+                  |> fst
+                val bnds_frees = ts_bnds_ns ~~ map typeof ts_bnds |> map Free
+                val ts_bnds_to_frees = ts_bnds ~~ bnds_frees
+
+                val T' = map typeof ts_bnds ---> drop (length ts) (binder_types T) ---> body_type T
+                val (v', ctxt2) = genvar_on_run_state n T' ctxt
+                (* NB: ts_nonbnds do not occur in v' of course, so this corresponds to unlifting and
+                   loose bounds in ts don't matter *)
+                val v'_abs = Term.list_comb(v', bnds_frees) |> fold_rev (fn t => fn body =>
+                    let val t' = case AList.lookup (op =) ts_bnds_to_frees t of
+                        SOME free => free
+                      | NONE => t
+                    in
+                      Abs(term_name t', typeof t', Term.abstract_over (t', body))
+                    end)
+                  ts
+              in
+                ctxt2 |> Context.proof_map (map_env_in_run_state (curry Envir.update ((ixn, T), v'_abs)))
+              end
+        | (Abs(n, T, t2), []) => unlift ((n,T) :: boundsTs) t2 ctxt
+        | (Abs _, _) => error ("unlift_unifvar_occs: internal error: term not beta normal")
+        | (a, ts) => ctxt |> fold (unlift boundsTs) ts
+      end
   in
-    case Term.strip_comb t of
-      (v as Var(ixn as (n, _), T), ts) =>
-        if null ts then ctxt
-        else 
-          let
-            val T' = drop (length ts) (binder_types T) ---> body_type T
-            val (v', ctxt2) = genvar_on_run_state n T' ctxt
-            (* NB: ts do not occur in v' of course, so this corresponds to unlifting and
-               loose bounds in ts don't matter *)
-            val v'_abs = v' |> fold_rev Term.lambda ts
-          in
-            ctxt2 |> Context.proof_map (map_env_in_run_state (curry Envir.update ((ixn, T), v'_abs)))
-          end
-    | (Abs(_, _, t2), []) => unlift_unifvar_occs t2 ctxt
-    | (a, ts) => ctxt |> fold unlift_unifvar_occs ts
+    unlift [] t0 ctxt
   end
 
 
@@ -3735,6 +3768,10 @@ and metarec_constraint_simp final_C_simp prf ctxt =
          with as few fixes and assumes as possible.  *)
     (* NB: checking if fixes and assumes of constraints have become non-relevant due to later unifications
          eliminating them in this case already happens if they are newly generated from their solve_prems call *)
+
+    val _ = tracing ("metarec_constraint_simp started on constraints  "^
+      commas (map (str_of_normed_term ctxt) constraints))
+
     val (prf2, ctxt2) = (prf, ctxt) |> fold (fn C0 => fn (prf_, ctxt_) =>
         if false (* null (Logic.strip_params C0) andalso null (Logic.strip_assums_hyp C0) *) then
           (prf_, ctxt_)
@@ -3829,18 +3866,39 @@ and metarec_structural_unifications final_unifs prf ctxt =
       handle TryStructUnify (ctxt_, (bad_t1, bad_t2), msg) =>
         err_with_trace ctxt_ ("metarec: solving of a delayed unification problem structurally failed: "^msg)
 
-    (* NB: if first-order unification variables (those that are present in first-order constraints)
-        could have been instantiated to a lifting during structural unification, so unlift them now. *)
-    val {fo_vars, ...} = get_the_run_state (Context.Proof ctxt)
-    val ctxt2 = ctxt |> Context.proof_map (map_env_in_run_state (K env3))
-      |> fold (fn fo_var =>
-             case Vartab.lookup (Envir.term_env env3) fo_var of
-               SOME (_, t) => unlift_unifvar_occs t
-             | NONE => I)
-           fo_vars
-
     val solved_delayed_unifs = delayed_unifs3 |> filter snd |> map fst
     val unsolved_delayed_unifs = delayed_unifs3 |> filter_out snd |> map fst
+
+    (* val _ =
+      let
+        val envdiff = env3 |> Envir.term_env |> Vartab.dest
+          |> subtract (pairself fst #> (op =)) (Envir.term_env env |> Vartab.dest)
+      in 
+        tracing ("unification pass solved delayed unification problems\n  "
+        ^commas (solved_delayed_unifs |> (map
+          (Logic.mk_equals #> Envir.norm_term env #> Syntax.string_of_term ctxt)))
+        ^"\nresulting in term instantiations:\n  "
+        ^commas (envdiff |> map (fn (ixn, (T, t)) =>
+           Syntax.string_of_term ctxt (Var(ixn,T)) ^ " := "
+           ^ str_of_normed_term ctxt t)))
+      end *)
+
+    (* NB: if first-order unification variables could have been instantiated
+       to a lifting during structural unification, so do transitive unlifting now. *)
+    val {fo_vars, ...} = get_the_run_state (Context.Proof ctxt)
+    val ctxt2 = ctxt |> Context.proof_map (map_env_in_run_state (K env3))
+      |> fold (fn fo_var => fn ctxt_ =>
+             case Vartab.lookup (Envir.term_env env3) fo_var of
+               SOME (_, t) =>
+                 let val _ = () (* tracing ("unlifting unification variables in instantiation "
+                    ^"of first order variable:   "
+                    ^Syntax.string_of_term ctxt_ (Var (fo_var, Term.fastype_of t))
+                    ^" := "^str_of_normed_term ctxt_ t) *)
+                 (* NB: we rely on env-normalization of t inside unlift_unifvar_occs *)
+                 in unlift_unifvar_occs t ctxt_ end
+             | NONE => ctxt_)
+           fo_vars
+
 
     val (prf2, ctxt3) = (prf, ctxt2) |> fold (fn (t1, t2) => fn (prf_, ctxt_) =>
          let
@@ -5580,7 +5638,10 @@ fun rel_local_frees ctxt rel_frees_opt =
 
 
 
-(* TODO(opt): first-order Unifikationsvariablen anbieten die nicht von lokalen Fixes abhaengen koennen *)
+(* TODO(feature,opt): first-order Unifikationsvariablen anbieten die nicht
+     von lokalen Fixes abhaengen koennen. Ist aber im wesentlichen schon mit
+     lokalen Constraints geloest (hier allerdings keine transitive first-order
+     Forderung entlang von Instantiierungsketten) *)
 fun fresh_unifvar_proc ctxt fail_cont (_, [], [outpat0]) =
   let
     val thy = Proof_Context.theory_of ctxt
@@ -5699,9 +5760,9 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
         let
           val ctxt2_ = ctxt |> unlift_unifvar_occs t0
           val t_ = norm_with_env_in_run_state ctxt2_ t0
-          val fovars = Term.add_vars t_ [] |> map fst
+          (* val fovars = Term.add_vars t_ [] |> map fst *)
         in
-          ctxt2_ |> Context.proof_map (map_fovars_in_run_state (union (op =) fovars))
+          ctxt2_ (* |> Context.proof_map (map_fovars_in_run_state (union (op =) fovars)) *)
         end
 
     val norm = norm_with_env_in_run_state ctxt2
@@ -5711,20 +5772,24 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
 
     (* NB: we don't use Variable.export because we would then have to identify which Vars
        have been generalized on export and which ones are unification variables in the derivation *)
-    (* NB: since unification variables are applied to over the frees they can depend on this is also correct
+    (* NB: since unification variables are applied to the frees they can depend on this is also correct
        in the case of unification variables in rel_assms that have been instantiated *) 
     (* NB: invariant is that the assms are always wrt. the outer_ctxt *)
     (* NB: since we normed all terms and types we can use op = to compare frees *)
-    val rel_frees0 =
-      if local_constraint then
-        [] |> Term.add_frees t
-      else
-        []
+    val rel_frees0 = [] |> Term.add_frees t
 
-    (* val _ = tracing ("rel_frees0 are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees0)
-      ^"\nrel_frees are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees)) *)
+    (* val _ = tracing ("rel_frees0 are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees0)) *)
 
     val local_frees0 = rel_local_frees ctxt2 (SOME rel_frees0) |> map Term.dest_Free
+
+    val _ =
+      if local_constraint orelse null local_frees0 then ()
+      else
+        err_with_trace ctxt2 ("constraint_gen_proc: first-order constraint "
+          ^str_of_normed_term ctxt t0^" contains local fixes "^
+          commas (map (Syntax.string_of_term ctxt2 o Free) local_frees0)
+          ^" after unlifting to "^str_of_normed_term ctxt2 t)
+
     (* TODO(feature): do we want also transitively-relevant assms for some constraints? *)
     val rel_assms =
       get_assms (Context.Proof ctxt2) |> map norm
@@ -5732,7 +5797,9 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
       |> rev
     val rel_frees = local_frees0 |> fold Term.add_frees rel_assms
     val local_frees = rel_local_frees ctxt2 (SOME rel_frees)
-    (* val _ = tracing ("local_frees are "^commas (map PolyML.makestring (*Syntax.string_of_term ctxt2*) local_frees)) *)
+
+    (* val _ = tracing ("rel_frees are "^commas (map (Syntax.string_of_term ctxt2 o Free) rel_frees)
+       ^"\nlocal_frees are "^commas (map (Syntax.string_of_term ctxt2) local_frees)) *)
     
     (* val _ =
       if local_constraint orelse null local_frees then ()
