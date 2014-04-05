@@ -43,6 +43,9 @@ sig
 
   val prf_displayT : typ
   val app_prf_displayt : term -> term -> term
+
+  val protect_eta_redex_var_const : typ -> term
+  val protect_eta_redex_var_def : thm (* protect_eta_redex_var t == t *)
 end
 
 
@@ -210,6 +213,34 @@ val mark_eta_redexes =
  in
    mark_eta_redexes_hlp []
  end
+
+fun protect_eta_redexes_cv ctxt ct =
+  case Thm.term_of ct of
+    _ $ _ => ct |> Conv.comb_conv (protect_eta_redexes_cv ctxt)
+  | Abs(_, _, _) => ct |>
+      (Conv.abs_conv (fn (_, ctxt2) => protect_eta_redexes_cv ctxt2) ctxt
+      then_conv (fn ct =>
+        case Thm.term_of ct of
+          Abs(_, _, t' $ Bound 0) =>
+            if Term.is_dependent t' then Conv.all_conv ct
+            else
+              (ctxt, ct) |-> Conv.abs_conv (fn _ =>
+                  Conv.arg_conv (Conv.rewr_conv (Thm.symmetric Data.protect_eta_redex_var_def)))
+        | _ => Conv.all_conv ct))
+  | _ => Conv.all_conv ct
+
+val unprotect_eta_redexes =
+  Conv.bottom_conv (fn _ => Conv.try_conv (Conv.rewr_conv Data.protect_eta_redex_var_def))
+
+fun protected_eta_redexes_thmmap ctxt f th =
+  let
+    val th_prot = Conv.fconv_rule (protect_eta_redexes_cv ctxt) th
+    val th_prot' = f th_prot
+  in
+    Conv.fconv_rule (unprotect_eta_redexes ctxt) th_prot'
+  end
+
+
 
 
 val beta_eta_convert = Conv.fconv_rule Drule.beta_eta_conversion
@@ -3951,13 +3982,6 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
       ^(Variable.constraints_of ctxt |> fst |> Vartab.dest |> filter (fn ((n, ix), _) => ix = ~1)
         |> map (fn ((n, _), t) => Free(n,t) |> Syntax.string_of_term ctxt) |> commas)) *)
 
-    val {judgements, ...} = get_current_ruledata (Context.Proof ctxt)
-    val jud_maker =
-      case lookup_judgement_analyzer judgements jid of
-        SOME (_, jud_maker, _) => jud_maker
-      | NONE => err_with_trace ctxt ("metarec: judgment "^quote jid^" not known")
-
-    val cert = cterm_of thy
     val pobj' = normalize_term ctxt pobj
     val iobjs' = map (normalize_term ctxt) iobjs
 

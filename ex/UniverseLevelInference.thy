@@ -20,7 +20,7 @@ ML {*
   val env' = 
     StructUnify.unify @{theory} (A1, A2) (Envir.empty 1)
   val A1' = Envir.norm_term env' A1 |> cterm_of @{theory}
-  val A2' = Envir.norm_term env' A2|> cterm_of @{theory}
+  val A2' = Envir.norm_term env' A2 |> cterm_of @{theory}
 *}
 
 ML {*
@@ -138,98 +138,44 @@ definition
   elabjud :: "i => i => i => o" ("_ elabto _ : _") where
   [MRjud 1 2]: "elabjud(t, t', A) == t' : A"
 definition
+  elabs_const :: "i => i => o" ("elabs _ _") where
+  [MRjud 1 1]: "elabs ts ts'_As ==
+    length(ts) = length(ts'_As)
+    & (ALL <t',A> : set_of_list(ts'_As). t' : A)"
+definition
   printsasjud :: "i => i => o" ("_ printsas _ ") where
   [MRjud 1 1]: "printsasjud(t, t') == True"
+definition
+  synthty_const :: "i => i => o" ("_ synthty _") where
+  [MRjud 1 1]: " t synthty A == t : A"
 
 
-ML {*
-  local
-    fun dest_jud_name t =
-      case MetaRec.decompose_judgement (Context.Proof @{context}) t of
-        SOME (jud, _) => jud
-      | NONE => error ("internal error in lookup of judgement name in  "
-          ^Syntax.string_of_term @{context} t)
-  in
-    val elabjud_n = dest_jud_name @{prop "t elabto t' : A"}
-    val printsasjud_n = dest_jud_name @{prop "t' printsas t"}
-  end
+lemma elab_to_synthty_rewr: "t elabto t' : A' == t' synthty A'"
+  by (simp add: elabjud_def synthty_const_def)
 
-*}
+lemma true_mimp_rewr: "(True ==> PROP P) == PROP P"
+ by simp
 
-(* TODO(feature): bei Ueberlappungen der printsas Regeln warnen *)
-ML {*
-  local
-    val {judgements, ...} = MetaRec.get_current_ruledata (Context.Proof @{context})
+lemma refl_unif_mimp_rewr: "(unify t t ==> PROP P) == PROP P"
+  apply (simp add: unify_const_def)
+  apply rule
+  apply simp
+  by simp
 
-    val mk_printsas = MetaRec.lookup_judgement_analyzer judgements printsasjud_n
-      |> the |> #2
-
-    fun dest_elab_jud t =
-      case MetaRec.decompose_judgement (Context.Proof @{context}) t of
-        SOME (jud, (pseudo_t, [], [elab_t, _])) =>
-          if jud = elabjud_n then SOME (pseudo_t, elab_t)
-          else NONE
-      | _ => NONE
-    fun opt_inv_elab_jud t : term option =
-      dest_elab_jud t |> Option.map (fn (pseudo_t, elab_t) =>
-        mk_printsas @{theory} (elab_t, [], [pseudo_t]))
-
-    fun opt_inv_elab_hhf ctxt prop =
-      let
-        val (param_fresh_ns, ctxt2) = ctxt |> Variable.variant_fixes
-          (map fst (Logic.strip_params prop))
-        val (params, body) = MetaRec.strip_alls param_fresh_ns prop
-        val (prems, concl) = Logic.strip_horn body
-        val prems' = prems |> map_filter (opt_inv_elab_hhf ctxt2)
-      in
-        case opt_inv_elab_jud concl of
-          SOME concl' =>
-            let val prop' = Logic.list_implies (prems', concl')
-              |> fold_rev Logic.all params
-            in SOME prop' end
-        | NONE => NONE
-      end
-  in
+lemma freshunifvar_triv_rewr: "(freshunifvar x) == Trueprop(True)"
+  by (simp add: fresh_unifvar_const_def)
 
 
-  fun derive_printsas_rule ctxt elab_rl =
-     let val ctxt2 = ctxt |> Variable.declare_thm elab_rl
-     in
-       case opt_inv_elab_hhf ctxt2 (prop_of elab_rl) of
-         SOME goal =>
-           let
-             val ss = simpset_of ctxt2 |> Simplifier.add_simp @{thm printsasjud_def}
-             val th = Goal.prove ctxt2 [] [] goal (fn _ => Simplifier.simp_tac ss 1)
-           in
-             th
-           end
-       | _ => error ("not an elaboration rule:  "
-         ^Display.string_of_thm ctxt2 elab_rl)
-     end    
-
-  fun elabMR_decl_attr checked = Scan.lift (Scan.option Parse.int
-    >> (fn prio_opt => fn (gctxt, elab_rl) =>
-       let
-         val prio = the_default 0 prio_opt
-         val ctxt = Context.proof_of gctxt
-         val printsas_rl = derive_printsas_rule ctxt elab_rl
-         val _ =
-           case gctxt of (* to avoid output for each local theory layer *)
-             Context.Theory _ => Output.writeln ("generated printing rule\n  "
-               ^Display.string_of_thm ctxt printsas_rl^"\n")
-           | _ => ()
-         val add_rule = if checked then MetaRec.add_rule else MetaRec.add_rule_unchecked
-         val gctxt2 = gctxt |> fold (add_rule prio) [elab_rl, printsas_rl]
-       in (SOME gctxt2, SOME elab_rl) end))
-  end
-*}
+ML_file "elab_rule_processing.ML"
 
 
 setup {*
-  Attrib.setup (Binding.name "elabMR") (elabMR_decl_attr true)
+  Attrib.setup (Binding.name "elabMR") (ElabRuleProcessing.elabMR_decl_attr true)
     "Declaration of elaboration metarec clauses"
-  #> Attrib.setup (Binding.name "elabMR_unchecked") (elabMR_decl_attr false)
+  #> Attrib.setup (Binding.name "elabMR_unchecked") (ElabRuleProcessing.elabMR_decl_attr false)
     "Declaration of unchecked elaboration metarec clauses"
+  #> Attrib.setup (Binding.name "constraint_moding_rewrite") 
+       ElabRuleProcessing.constraint_moding_rewr_decl_attr "Declaration of constraint moding rewrite rules"
 *}
 
 
@@ -247,6 +193,12 @@ definition
   syn_constraint_meta_typ :: "'a::{} => ('a => prop) => prop" ("_ ::> _") where
   [MRjud 1 1]: "syn_constraint_meta_typ (t, A) == A(t)"
 
+
+lemma [constraint_moding_rewrite]: "(constraint (t <: A)) == Trueprop(t synthty A)"
+  by (simp add: synthty_const_def constraint_const_def constraint_typing_def)
+lemma [constraint_moding_rewrite]: "(foconstraint (t <: A)) == Trueprop(t synthty A)"
+  by (simp add: synthty_const_def foconstraint_const_def constraint_typing_def)
+
 lemma [MRjud 2 0]: "i < j == i < j" by simp
 
 definition
@@ -263,10 +215,10 @@ definition
 
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 (* low prio rule for type inference of free variable x *)
-(* FIXME?: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
+(* TODO(opt)?: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
    sofort  Unifikation A == A'  durchfuehren. Entspricht also on-the-fly constraint simplification mit der
-   Typ-Constraint-Sharing-Regel von unten. Problematisch weil constraint discharge nur global am Ende
-   erfolgen kann. *)
+   Typ-Constraint-Sharing-Regel von unten. Problematisch weil discharge der Annahmen zu den
+   constraints nur global am Ende der metarec Ableitung erfolgen kann. *)
 (* NB: in the case of atomic terms that are opqapue to type inference,
      we only use foconstraints, so fresh unifvar A is does not depend on local context.
      This is essential in order to avoid a context-dependent typing constraint for x,
@@ -294,6 +246,7 @@ lemma [elabMR]: "[|
   unfolding bool_def elabjud_def typed_eq_def
   by simp
 
+
 (* NB: no printsas rule for this, rule for printing variables is used instead  *)
 lemma [MR_unchecked]: "[|
     freshunifvar x  ;  freshunifvar A  ;  freshunifvar i  ;
@@ -312,6 +265,9 @@ lemma [elabMR_unchecked]: "[|
   by (rule apply_type)
 
 
+
+
+
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [elabMR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
@@ -321,6 +277,9 @@ lemma [elabMR_unchecked]: "[|
   unfolding elabjud_def fresh_unifvar_const_def
   by (rule lam_type)
 
+
+
+
 (* NB: not elabMR registered to avoid overlapping printsas rule with rule above *)
 lemma [MR]: "[|
     A elabto A' : guniv i  ;
@@ -328,6 +287,7 @@ lemma [MR]: "[|
   (lam x:A. t(x)) elabto (lam x:A'. t'(x)) : (PROD x:A'. B(x))"
   unfolding elabjud_def fresh_unifvar_const_def
   by (rule lam_type)
+
 
 
 
@@ -342,6 +302,7 @@ lemma [elabMR]: "[|
   apply assumption
   apply (rule guniv_cumul[of i k], assumption+)
   by (rule guniv_cumul[of j k], assumption+)
+
 
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [elabMR_unchecked]: "[|
@@ -370,6 +331,17 @@ lemma [elabMR]: "[|
     freshunifvar i  ;  foconstraint (i <: univlvl)  |] ==>
   univlvl elabto univlvl : (guniv i)"
   apply (subst univlvl_def, subst univlvl_def) by (rule natelab)
+
+
+lemma [MR]: "
+  elabs Nil Nil"
+  by (simp add: elabs_const_def)
+
+lemma [MR]: "[|
+    t elabto t' : A  ;
+    elabs ts ts'_As  |] ==>
+  elabs (Cons(t, ts)) (Cons(<t',A>, ts'_As))"
+  by (simp add: elabs_const_def elabjud_def)
 
 
 
@@ -625,8 +597,8 @@ ML {*
   fun elab ctxt t =
     exception_trace (fn () =>
       let
-        val (th, [elab_t, _]) = MetaRec.metarec_fully_discharged ctxt elabjud_n (t, [])
-        val (_, [t']) = MetaRec.metarec_fully_discharged ctxt printsasjud_n
+        val (th, [elab_t, _]) = MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.elabjud_n (t, [])
+        val (_, [t']) = MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.printsasjud_n
           (elab_t, [])
         val _ =
           if t aconv t' then ()
@@ -636,6 +608,14 @@ ML {*
       in
         th
       end)
+
+  
+  fun elabs ctxt ts =
+    exception_trace (fn () =>
+      let
+        val ts_list = zfy_list ts
+        val (th, [ts'_As_t]) = MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.elabsjud_n (ts_list, [])
+      in th end)
 
   fun elab_with_expected_error exp_err_match ctxt t =
     let
@@ -731,6 +711,13 @@ ML {*  elab @{context} @{term "(fun f. fun x. bla(x))"}  *}
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
+
+
+
+ML {*  elab @{context} @{term "f # (fun g. g # x) # y"}  *}
+
+ML {*  elab @{context} @{term "(fun f. f # (fun y. (fun x. (fun g. g # x)) # y))"}  *}
+
 
 
 (* FIXME?: abstracted universe level annotations lead to unsatisfiable first-order constraints
@@ -851,6 +838,12 @@ ML {*  elab @{context} @{term "f # x"}  *}
 
 (* NB: now the universe constraints get unified due to the constraint sharing rule *)
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
+
+
+ML {*  elabs @{context} [@{term "x :: i"}, @{term "x # y"}] *}
+
+
+
 
 
 (* TODO(feature): discharge univlvl-upwards-joining constraints  i u<= k,  j u<= k
@@ -1402,7 +1395,27 @@ ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 
 
+(* meta-theory ist schon in der Coq-Literatur abgedeckt:
+     atomare Constraints <-> algebraische Constraints in
+        Herberlin - Type inference with algebraic universes in CiC
+     Universe-Polymorphism in   Sozeau - Universe Polymorphism in Coq
+*)
 
+(* Unifikations-Hack entspricht moeglich der Entscheidbarkeit
+   eines groesseren Fragments das pattern-Unifikation umfasst:
+     gefunden wird die allgemeinste Substitution die die Terme
+     unifiziert (nach betaeta-Normalisierungs-Preprocessing),
+     modulo beta-eta in Patterns
+     und "shallow" (nicht in Argumenten von non-pattern Variablen-Applikationen)
+     betaeta Reduktionen in non-patterns.
+   I.a. also nicht modulo "deep" betaeta Reduktionen der
+   aussubstituierten Terme, weil hier koennte dann sowas wie
+      (% i. ?B (?X i)) == (% i. i)
+   mit ?B := (% i. i), ?X := (% i. i)
+   geloest werden unter Nutzung der "tiefen" Reduktion ?X i = i.
+   Bei meiner strukturellen Unifikation ist das hingegen nicht
+   loesbar ("weil i nicht direkt in ?B verfuegbar, sondern nur als ?X i").
+*)
 
 
 (* Dinge die man beweisen sollte in einem Papier

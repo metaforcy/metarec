@@ -153,6 +153,10 @@ lemma matchoutI: "matchout t t"
   by (simp add: matchout_const_def)
   
 
+definition
+  protect_eta_redex_var where
+  "protect_eta_redex_var t == t"
+
 
 ML {*
   val max_polym = singleton (Variable.polymorphic @{context});
@@ -205,6 +209,11 @@ ML {*
 
     val prf_displayT = @{typ "bool"}
     fun app_prf_displayt t1 t2 = t1 $ t2
+
+    fun protect_eta_redex_var_const ty =
+      Const(@{const_name protect_eta_redex_var},
+        Sign.const_instance @{theory} (@{const_name protect_eta_redex_var}, [ty]))
+    val protect_eta_redex_var_def = @{thm protect_eta_redex_var_def}
   );
 *}
 

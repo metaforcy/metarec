@@ -240,6 +240,10 @@ definition
   "t1 $ t2 == t1(t2)"
 
 
+definition
+  protect_eta_redex_var where
+  "protect_eta_redex_var(t) == t"
+
 
 
 
@@ -305,6 +309,11 @@ ML {*
 
     val prf_displayT = @{typ "i"}
     fun app_prf_displayt t1 t2 = @{term "ZF.apply"} $ t1 $ t2
+
+    fun protect_eta_redex_var_const ty =
+      Const(@{const_name protect_eta_redex_var},
+        Sign.const_instance @{theory} (@{const_name protect_eta_redex_var}, [ty]))
+    val protect_eta_redex_var_def = @{thm protect_eta_redex_var_def}
   );
 *}
 
@@ -312,5 +321,17 @@ ML {*
 
 setup {* MetaRec.setup *}
 
+
+
+ML {*
+
+  fun zfy_list (t :: ts) = @{term Cons} $ t $ zfy_list ts
+    | zfy_list [] = @{term Nil}
+
+  fun metaize_list (Const (@{const_name Cons}, _) $ t $ ts) =
+        t :: metaize_list ts
+    | metaize_list (Const (@{const_name Nil}, _)) = []
+
+*}
 
 end
