@@ -4039,8 +4039,10 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
     val th = replay_prf ctxt6 prf5 |> Thm.close_derivation
 
     val {delayed_unifs=delayed_unifs', constraints=constraints', ...} = get_the_run_state (Context.Proof ctxt6)
+    (* NB: oobjs can be instantiated further now, due to further unifications *)
+    val oobjs' = oobjs |> map (norm_with_env_in_run_state ctxt6) 
   in
-    ((th, oobjs), (delayed_unifs' |> filter_out snd |> map fst, constraints'))
+    ((th, oobjs'), (delayed_unifs' |> filter_out snd |> map fst, constraints'))
   end
 
 

@@ -1,5 +1,5 @@
 theory UniverseLevelInference
-imports "../ZFMetaRec"
+imports "../ZFMetaRec" "../DmitriySubtyping"
 begin
 
 
@@ -674,6 +674,7 @@ ML {*  elab @{context} @{term "f # x # x # x"}  *}
 
 ML {*  elab @{context} @{term "f # x # x # x # x"}  *}
 
+
 ML {*
   val fixes = Variable.dest_fixes @{context} |> map snd
   val constraints = Variable.constraints_of @{context} |> fst |> Vartab.dest |> filter (fn ((n, ix), _) => ix = ~1)
@@ -711,7 +712,6 @@ ML {*  elab @{context} @{term "(fun f. fun x. bla(x))"}  *}
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
-
 
 
 ML {*  elab @{context} @{term "f # (fun g. g # x) # y"}  *}
@@ -841,6 +841,17 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
 
 ML {*  elabs @{context} [@{term "x :: i"}, @{term "x # y"}] *}
+
+(* test of smash unification ?B(x) == ?B(y) *)
+ML {* elab @{context} @{term "f # x === f # y"} *}
+
+(* FIXME: types of f,g appear to be too general from mutual x,y dependency lifting;
+     guniv constraint not simplifiable;
+     important constraints are   ?B(x) == ?B2(y),  f : PROD x:?A. ?B(x),  g : PROD y:?A2. ?B2(y)
+       x : ?A,  y : ?A2
+     struct unify of ?B(x) == ?B2(y)  results in ?B2 := (% y. ?B3(x,y)), ?B := (% x. ?B3(x,y)).
+     smash-unifying in flexflex2 case would result in  ?B := ?B2 := (% _. ?B3) *)
+ML {* elab @{context} @{term "f # x === g # y"} *}
 
 
 
@@ -1389,9 +1400,95 @@ ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 
 
+ML_file "../isar_integration.ML"
+
+
+definition
+  constraintimp :: "prop => prop => prop" (infixr "=C=>" 1) where
+  "constraintimp(P,Q) == (PROP P ==> PROP Q)"
+
+definition
+  elabbrack :: "i => o" where
+  "elabbrack(pt) == True"
+(* Dmitriy saves *)
+declare [[coercion "elabbrack :: i => o"]]
+
+definition
+  truenessbrack :: "i => o" where
+  "truenessbrack(t) == (t = 1)"
+(* TODO: invisible printing of truenessbrack *)
 
 
 
+ML {*
+  fun mk_truenessbrack t = @{term truenessbrack} $ t
+  fun dest_elabbrack (Const (@{const_name elabbrack}, _) $ t) = t
+    | dest_elabbrack t = raise TERM ("dest_elabbrack", [t])
+  fun mk_constraintimp P1 P2 = @{term constraintimp} $ P1 $ P2
+*}
+
+ML {*
+  fun elab_infer ts0 ctxt =
+    let
+      (* TODO: elaborate under Trueprops, elabbracks *)
+      val _ = tracing ("input of inference: "^commas (ts0 |> map (Syntax.string_of_term ctxt)))
+
+      (* FIXME: hackish *)
+      val ts = ts0 |> filter_out (can Logic.dest_type) 
+      val metaty_constraints = ts0 |> filter (can Logic.dest_type)
+    in
+      if null ts orelse
+        (* FIXME: hackish because have to ignore meta implications etc *)
+        (ts |> exists (fn t =>
+          not (can FOLogic.dest_Trueprop t)
+          orelse not (can dest_elabbrack (FOLogic.dest_Trueprop t))))
+      then
+        NONE
+      else
+        let
+          val ts_uncoerced = map (FOLogic.dest_Trueprop #> dest_elabbrack) ts
+          val ts_term = zfy_list ts_uncoerced
+          val ((th, [ts'_As_term]), (delayed_unifs, constraints)) =
+            MetaRec.metarec ctxt ElabRuleProcessing.elabsjud_n (ts_term, [])
+           
+          val _ = tracing ("elaboration theorem:   "^Display.string_of_thm ctxt th)
+          val t1' :: ts' = metaize_list ts'_As_term
+            |> map (metaize_pair #> fst #> mk_truenessbrack #> FOLogic.mk_Trueprop)
+
+          val vars = [] |> fold Term.add_vars
+           (t1' :: ts' @ map Logic.mk_equals delayed_unifs @ constraints)
+          val unconstrain = fold_rev mk_constraintimp
+            (map Logic.mk_equals delayed_unifs @ constraints)
+            (* information about unification variables not really important
+               because automatic exports revarifies *)
+            (* @ map (mk_freshunifvar o Var) vars) *)
+          (* minor FIXME: unvarify could potentially lead to Free name collisions  *)
+          val unvarify_with_idxs = map_aterms
+            (fn Var((n,ix), T) => Free(n ^ string_of_int ix, T)
+              | t => t)
+          (* fix unification variables, because checking does not allow schematic variables *)
+          val unconstrained_ts' = unconstrain t1' :: ts' |> map (unvarify_with_idxs) 
+
+          val _ = tracing ("elaborated\n  "^commas (ts |> map (Syntax.string_of_term ctxt))
+            ^"\nto\n  "^commas (unconstrained_ts' |> map (Syntax.string_of_term ctxt)))
+        in
+          (* FIXME: we assume that type constaints go last *)
+          SOME (unconstrained_ts' @ metaty_constraints, ctxt)
+        end
+    end
+*}
+
+setup {*
+  Context.theory_map
+    (Syntax_Phases.term_check' ~100 "elab_infer" elab_infer)
+*}
+
+
+ML {*
+  Syntax.check_term @{context} @{prop "f # x === f # y"} |> cterm_of @{theory}
+*}
+
+lemma "f # x === f # y"
 
 
 

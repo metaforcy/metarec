@@ -332,6 +332,18 @@ ML {*
         t :: metaize_list ts
     | metaize_list (Const (@{const_name Nil}, _)) = []
 
+
+  fun zfy_pair (t1, t2) = @{term ZF.Pair} $ t1 $ t2
+
+  fun metaize_pair (Const (@{const_name ZF.Pair}, _) $ t1 $ t2) = (t1, t2)
+    | metaize_pair _ = error ("metaize_pair: not a pair")
+
+  fun mk_freshunifvar t =
+    let val T = fastype_of t
+    in
+      Const(@{const_name fresh_unifvar_const}, @{typ i} --> T --> @{typ prop})
+        $ @{term 0} $ t
+    end
 *}
 
 end

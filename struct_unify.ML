@@ -292,14 +292,32 @@ and cases thy (binders,env,(s,t)) = case (strip_comb s,strip_comb t) of
             handle Pattern =>
               if env_abeconv env (s, t) then env
               else
-                error ("struct_unify: non-patterns with same head."
-                ^" structural instantiation would lead to cyclic instantiation here.\n\n"
-                ^Syntax.string_of_term_global thy s^"\n"
-                ^Syntax.string_of_term_global thy t))
-            (* NB: structural instantiation would lead to cyclic instantiation here *)
+                (* NB: structural instantiation would lead to cyclic instantiation in this case *)
+                (* we employ opportunistic smash unification because this situation occurs
+                   prominently in type inference for e.g.  f # x === f # y,  as this results
+                   in constraints  ?B(x) == ?B(y),  f : (PROD x:?A. ?B(x)),  x : ?A,  y : ?A,
+                   which we smash-unify via ?B := (% _. ?B2) *)
+                let
+                  val Fty' = Fty |> Envir.norm_type (Envir.type_env env)
+                  val smashed_binderTs = take (length ss) (Term.binder_types Fty')
+                  val (env', var) = Envir.genvar (fst F)
+                    (env, drop (length ss) (Term.binder_types Fty') ---> Term.body_type Fty')
+                  val smashing_abss = var |> fold_rev (fn T => fn t => Abs("", T, t)) smashed_binderTs
+                  val env'' = Envir.update (((F,Fty'), smashing_abss), env')
+                in
+                  env''
+                end)
           else
             (flexflex2(env,binders,F,Fty,ints_of' env ss,G,Gty,ints_of' env ts)
              handle Pattern => 
+               (* FIXME: smash unification seems to be more approapriate, to avoid
+                   overly general type inference in e.g.  f # x == g # y
+                   (especially since structural unification is only employed
+                   on maximally-delayed unifications)
+                   But if ss subset ts (or symmetrically), we should reduce to the
+                   variable with less dependencies (i.e. generalizing
+                   the treatment in pattern unification), so that e.g.
+                   f # x == g # x results in f, g : (PROD x:A. B(x)) *)
                if Term_Ord.indexname_ord (G,F) = LESS then
                  struct_inst thy binders ((F,Fty), ss) t env
                else
