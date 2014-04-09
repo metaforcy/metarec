@@ -1,3 +1,4 @@
+
 theory UniverseLevelInference
 imports "../ZFMetaRec" "../DmitriySubtyping"
 begin
@@ -152,6 +153,10 @@ definition
 
 lemma elab_to_synthty_rewr: "t elabto t' : A' == t' synthty A'"
   by (simp add: elabjud_def synthty_const_def)
+
+(* TODO: restrict to variables x *)
+lemma [impl_frule]: "x synthty A ==> x elabto x : A"
+  by (simp add: synthty_const_def elabjud_def)
 
 lemma true_mimp_rewr: "(True ==> PROP P) == PROP P"
  by simp
@@ -1400,7 +1405,6 @@ ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 
 
-ML_file "../isar_integration.ML"
 
 
 definition
@@ -1425,7 +1429,16 @@ ML {*
   fun dest_elabbrack (Const (@{const_name elabbrack}, _) $ t) = t
     | dest_elabbrack t = raise TERM ("dest_elabbrack", [t])
   fun mk_constraintimp P1 P2 = @{term constraintimp} $ P1 $ P2
+  fun dest_constraintimp (Const (@{const_name constraintimp}, _) $ P1 $ P2) = (P1, P2)
+    | dest_constraintimp t = raise TERM ("dest_constraintimp", [t])
+  fun dest_constraintimps P =
+    case try dest_constraintimp P of
+      SOME (C, P2) => dest_constraintimps P2 |> apfst (cons C)
+    | NONE => ([], P)
 *}
+
+ML_file "../isar_integration.ML"
+
 
 ML {*
   fun elab_infer ts0 ctxt =
@@ -1488,7 +1501,29 @@ ML {*
   Syntax.check_term @{context} @{prop "f # x === f # y"} |> cterm_of @{theory}
 *}
 
-lemma "f # x === f # y"
+
+
+lemma assumes "x === y" shows "f # x === f # y"
+proof -
+  ML_prf {* Assumption.all_assms_of @{context} *}
+
+  have "y === x"
+    ML_prf {* Assumption.all_assms_of @{context} *}
+    sorry
+  have "f === f"
+    ML_prf {* Assumption.all_assms_of @{context} *}
+    sorry
+
+  {
+    assume "y === z"
+    have "z === z"
+      ML_prf {* Assumption.all_assms_of @{context} *}
+      sorry
+  }
+
+  show "f # x === f # y"
+    sorry
+qed
 
 
 

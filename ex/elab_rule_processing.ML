@@ -4,7 +4,7 @@ structure ElabRuleProcessing =
 struct
 
 
-  structure ElabRuleProcessingData = Generic_Data(
+  structure Data = Generic_Data(
     type T = { constraint_moding_rewrites : thm Item_Net.T }
     val empty = {constraint_moding_rewrites = Item_Net.init Thm.eq_thm_prop
       (Thm.lhs_of #> Thm.term_of #> single)}
@@ -205,7 +205,7 @@ struct
         case MetaRec.decompose_judgement gctxt (Thm.term_of ct) of
             SOME (jud, (_, _, _)) =>
               let
-                val pot_rews = Item_Net.retrieve (ElabRuleProcessingData.get gctxt
+                val pot_rews = Item_Net.retrieve (Data.get gctxt
                   |> #constraint_moding_rewrites) (Thm.term_of ct)
                 val _ = () (* tracing ("pot_rews: "^commas (pot_rews |> map (Display.string_of_thm ctxt2))) *)
               in
@@ -286,7 +286,7 @@ struct
        in (SOME gctxt2, SOME elab_rl) end))
 
   fun constraint_moding_rewr_decl_attr x = x |> Scan.lift (Scan.succeed (fn (gctxt, th) =>
-    (gctxt |> ElabRuleProcessingData.map (fn {constraint_moding_rewrites} =>
+    (gctxt |> Data.map (fn {constraint_moding_rewrites} =>
       {constraint_moding_rewrites = constraint_moding_rewrites |> Item_Net.update th}) |> SOME, 
     SOME th)))
 

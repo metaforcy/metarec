@@ -4,6 +4,34 @@ structure IsarIntegration = struct
 
 
 
+fun assume_constraints ts ctxt =
+  let
+    val constraints = []
+      |> fold (dest_constraintimps #> fst #> union (op =)) ts
+    val unconstrained_ts = ts |> map (dest_constraintimps #> snd)
+    val (bound_assms0, ctxt2) = ctxt
+      (* TODO(correctness): auto_fixes necessary as in element.ML:init ? *)
+      |> Proof_Context.add_assms_i Assumption.assume_export
+           (constraints |> map (fn C => ((Binding.empty, []), [(C, [])])))
+    val assms0 = bound_assms0 |> maps (fn (_, assms_) => assms_)
+    val assms = assms0 |> map (fn assm =>
+      let
+        val assmC = @{thm constraintI} OF [assm]
+        val moding_rewr_net = ElabRuleProcessing.Data.get (Context.Proof ctxt)
+          |> #constraint_moding_rewrites 
+        val pot_rews = Item_Net.retrieve moding_rewr_net (prop_of assmC)
+        val assmC_rewr = assmC |> Conv.fconv_rule (Conv.try_conv (Conv.rewrs_conv pot_rews))
+      in
+        assmC_rewr
+      end)
+    val ctxt3 = ctxt2 |> fold (MetaRec.add_assm true) assms
+    val _ = tracing ("assume_constaints: assumed  "^commas (map (Syntax.string_of_term ctxt3) constraints))
+    (* val _ = tracing ("Assumption.all_prems_of: "^commas (map (Display.string_of_thm ctxt3) (Assumption.all_prems_of ctxt3))) *)
+  in
+    (unconstrained_ts, ctxt3)
+  end
+
+
 
 
 (* adapted from expression.ML *)
@@ -316,19 +344,12 @@ fun prep_full_context_statement
           |> declare_elem prep_vars_elem raw_elem
           |> Context_Position.restore_visible ctxt;
         val elems' = parse_elem parse_typ parse_prop ctxt' raw_elem;
-        (* TODO: assume typing constraints and fix unification typ variables of Assumes in elems',
-            thereby computing (elems'', ctxt'') *)
       in (elems', ctxt') end;
 
-    (* TODO: after check_autofix, assume typing constraints and fix unification
-          variables and thusly compute (concl', ctxt')
-        NB: the checking context is thrown away inside check_autofix as usual,
-          only the autofixes result in context extensions *)
     fun prep_concl raw_concl (insts, elems, ctxt) =
       let
         val concl = parse_concl parse_prop ctxt raw_concl;
-      in check_autofix insts elems concl ctxt end;
-
+      in check_autofix insts elems concl ctxt end
     val fors = prep_vars_inst fixed ctxt1 |> fst;
     val ctxt2 = ctxt1 |> Proof_Context.add_fixes fors |> snd;
     val (_, insts', ctxt3) = fold prep_insts_cumulative raw_insts (0, [], ctxt2);
@@ -380,15 +401,48 @@ end;
 
 local
 
-fun prep_statement prep activate raw_elems raw_concl context =
+(* fold_burrow_fst : ('a list -> 's -> 'b list * 's) -> ('a * 'c) list -> 's -> ('b * 'c) list * 's *)
+fun fold_burrow_fst f xs st =
+  let
+    val (as_, cs) = split_list xs
+    val (bs, st2) = f as_ st
+  in (bs ~~ cs, st2) end
+
+(* filter_split : ('a -> bool) -> 'a list -> 'a list * 'a list * ('a list -> 'a list -> 'a list) *)
+fun filter_split p (x :: xs) =
+   let val ((ys, zs), recomb) = filter_split p xs
+   in
+     if p x then
+       ((x :: ys, zs),
+        fn (y' :: ys') => fn zs' => y' :: (recomb ys' zs'))
+     else
+       ((ys, x :: zs),
+        fn ys' => fn (z' :: zs') => z' :: (recomb ys' zs'))
+   end
+  | filter_split p [] = (([], []), (fn ys' => fn zs' => []))
+
+
+fun prep_statement prep activate raw_elems raw_concl ctxt = (*changes*)
   let
     val ((_, _, elems, concl), _) =
       prep {strict = true, do_close = false, fixed_frees = true}
-        ([], []) I raw_elems raw_concl context;
-    val (_, context') = context
+        ([], []) I raw_elems raw_concl ctxt;
+
+    val ((assm_elems, nonassm_elems), recomb_elems) = elems
+      |> filter_split (fn Element.Assumes _ => true | _ => false)
+    val elem_css = assm_elems |> map (fn Element.Assumes assms_ => map snd assms_)
+    val (css', ctxt2) = ctxt |>
+      (* TODO(correctness): also process patterns?! but they are not even checked by check_autofix ... *)
+      (fold_burrow o fold_burrow o fold_burrow_fst) assume_constraints (elem_css @ [concl])
+    val (elem_css2, [concl2]) = chop (length elem_css) css'
+    val assm_elems2 = (assm_elems ~~ elem_css2) |> map (fn (Element.Assumes asms, css) =>
+      (asms ~~ css) |> map (fn ((b, _), cs) => (b, cs)) |> Element.Assumes)
+    val elems2 = recomb_elems assm_elems2 nonassm_elems
+
+    val (_, ctxt3) = ctxt2
       |> Proof_Context.set_stmt true
-      |> fold_map activate elems;
-  in (concl, context') end;
+      |> fold_map activate elems2;
+  in (concl2, ctxt3) end;
 
 in
 
@@ -554,6 +608,197 @@ end;
 
 
 
+(* adapted from proof_context.ML *)
+
+
+
+(* propositions with patterns *)
+
+local
+
+fun simult_matches ctxt (t, pats) =
+  (case Seq.pull (Unify.matchers (Proof_Context.theory_of ctxt) (map (rpair t) pats)) of
+    NONE => error "Pattern match failed!"
+  | SOME (env, _) => Vartab.fold (fn (v, (_, t)) => cons (v, t)) (Envir.term_env env) []);
+
+fun prep_propp mode prep_pats prep_props args ctxt =(*changes*)
+  let
+    fun prep (_, raw_pats) (ctxt, prop :: props) =
+      let val ctxt' = Variable.declare_term prop ctxt
+      in ((prop, prep_pats (Proof_Context.set_mode Proof_Context.mode_pattern ctxt') raw_pats), (ctxt', props)) end;
+
+    val raw_props = maps (map fst) args
+    val (props, ctxt2) =
+      ctxt |> Proof_Context.set_mode mode
+      |> prep_props raw_props
+      |> apsnd (Proof_Context.restore_mode ctxt)
+
+    val (propp, (ctxt3, _)) = (fold_map o fold_map) prep args (ctxt2, props)
+  in (propp, ctxt3) end;
+
+fun gen_bind_propp mode parse_pat(*changed*) parse_prop raw_args ctxt =
+  let
+    val (args, ctxt') = prep_propp mode parse_pat(*changed*) parse_prop raw_args ctxt;
+    val binds = flat (flat (map (map (simult_matches ctxt')) args));
+    val propss = map (map #1) args;
+    fun gen_binds ctxt0 = ctxt0
+      |> Proof_Context.bind_terms (map #1 binds ~~
+          map (SOME o Term.close_schematic_term) (Variable.export_terms ctxt' ctxt0 (map #2 binds)));
+  in ((propss, gen_binds), ctxt' |> Proof_Context.bind_terms (map (apsnd SOME) binds)) end;
+
+in
+
+(* val read_propp           = prep_propp mode_default Syntax.read_props;
+val cert_propp           = prep_propp mode_default (map o cert_prop);
+val read_propp_schematic = prep_propp mode_schematic Syntax.read_props;
+val cert_propp_schematic = prep_propp mode_schematic (map o cert_prop); *)
+
+val bind_propp             = gen_bind_propp Proof_Context.mode_default Syntax.read_props
+  (fn raw_props => fn ctxt => (*changes*)
+    let val props = Syntax.read_props ctxt raw_props
+    in assume_constraints props ctxt end);
+(* val bind_propp_i           = gen_bind_propp mode_default (map o cert_prop);
+val bind_propp_schematic   = gen_bind_propp mode_schematic Syntax.read_props;
+val bind_propp_schematic_i = gen_bind_propp mode_schematic (map o cert_prop); *)
+
+end;
+
+
+
+local
+
+fun gen_assms prepp exp args ctxt =
+  let
+    val cert = Thm.cterm_of (Proof_Context.theory_of ctxt);
+    val ((propss, _), ctxt1) = prepp (map snd args) ctxt;
+    val _ = Variable.warn_extra_tfrees ctxt ctxt1;
+    val (premss, ctxt2) = fold_burrow (Assumption.add_assms exp o map cert) propss ctxt1;
+  in
+    ctxt2
+    |> Proof_Context.auto_bind_facts (flat propss)
+    |> Proof_Context.note_thmss "" (map fst args ~~ map (map (fn th => ([th], []))) premss)
+  end;
+
+in
+
+val add_assms = gen_assms bind_propp;
+(* val add_assms_i = gen_assms bind_propp_i; *)
+
+end;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(* adapted from proof.ML *)
+
+local
+
+fun gen_assume asm prep_att exp args state =
+  state
+  |> Proof.assert_forward
+  |> Proof.map_context_result (asm exp (Attrib.map_specs (map (prep_att (Proof.context_of state))) args))
+  |> (fn (named_factss, state_) => (named_factss, state |> Proof.set_facts (maps snd named_factss)))
+       (* inlined  these_factss []  from proof.ML*)
+  |> #2;
+
+in
+
+val assm_cmd = gen_assume add_assms(*changed*) Attrib.attribute_cmd;
+val assume_cmd = assm_cmd Assumption.assume_export;
+val presume_cmd = assm_cmd Assumption.presume_export;
+
+end;
+
+
+(* common goal statements *)
+
+local
+
+fun check_result msg sq =
+  (case Seq.pull sq of
+    NONE => error msg
+  | SOME (s, _) => s);
+
+fun gen_have prep_att prepp before_qed after_qed stmt int =
+  Proof.local_goal (Proof_Display.print_results Markup.state int)
+    prep_att prepp "have" before_qed after_qed stmt;
+
+fun gen_show prep_att prepp before_qed after_qed stmt int state =
+  let
+    val testing = Unsynchronized.ref false;
+    val rule = Unsynchronized.ref (NONE: thm option);
+    fun fail_msg ctxt =
+      "Local statement fails to refine any pending goal" ::
+      (case ! rule of NONE => [] | SOME th => [Proof_Display.string_of_rule ctxt "Failed" th])
+      |> cat_lines;
+
+    fun print_results ctxt res =
+      if ! testing then ()
+      else Proof_Display.print_results Markup.state int ctxt res;
+    fun print_rule ctxt th =
+      if ! testing then rule := SOME th
+      else if int then
+        writeln (Markup.markup Markup.state (Proof_Display.string_of_rule ctxt "Successful" th))
+      else ();
+    val test_proof =
+      Proof.local_skip_proof true
+      |> Unsynchronized.setmp testing true
+      |> Exn.interruptible_capture;
+
+    fun after_qed' results =
+      Proof.refine_goals print_rule (Proof.context_of state) (flat results)
+      #> check_result "Failed to refine any pending goal"
+      #> after_qed results;
+  in
+    state
+    |> Proof.local_goal print_results prep_att prepp "show" before_qed after_qed' stmt
+    |> int ? (fn goal_state =>
+      (case test_proof (Proof.map_context (Context_Position.set_visible false) goal_state) of
+        Exn.Res _ => goal_state
+      | Exn.Exn exn => raise Exn.EXCEPTIONS ([exn, ERROR (fail_msg (Proof.context_of goal_state))])))
+  end;
+
+in
+
+(*val have = gen_have (K I) Proof_Context.bind_propp_i;*)
+val have_cmd = gen_have Attrib.attribute_cmd bind_propp(*changed*)
+(*val show = gen_show (K I) Proof_Context.bind_propp_i;*)
+val show_cmd = gen_show Attrib.attribute_cmd bind_propp(*changed*)
+
+end;
+
+
+
+
+
+
+
+
+
+
+
+(* adapted from isar_cmd.ML *)
+
+
+fun goal opt_chain goal stmt int =
+  opt_chain #> goal NONE (K I) stmt int;
+
+val have = goal I have_cmd(*changed*);
+val hence = goal Proof.chain have_cmd(*changed*);
+val show = goal I show_cmd(*changed*);
+val thus = goal Proof.chain show_cmd(*changed*);
+
 
 
 
@@ -579,9 +824,41 @@ fun gen_theorem spec schematic kind =
 val _ = gen_theorem @{command_spec "theorem"} false Thm.theoremK;
 val _ = gen_theorem @{command_spec "lemma"} false Thm.lemmaK;
 val _ = gen_theorem @{command_spec "corollary"} false Thm.corollaryK;
+(* TODO: the schematic variants probably don't work anyway, because of
+  the necessary unvarification during Syntax.check_term *)
 val _ = gen_theorem @{command_spec "schematic_theorem"} true Thm.theoremK;
 val _ = gen_theorem @{command_spec "schematic_lemma"} true Thm.lemmaK;
 val _ = gen_theorem @{command_spec "schematic_corollary"} true Thm.corollaryK;
+
+
+
+
+
+val _ =
+  Outer_Syntax.command @{command_spec "have"} "state local goal"
+    (Parse_Spec.statement >> ((Toplevel.print oo Toplevel.proof') o have(*changed*)));
+
+val _ =
+  Outer_Syntax.command @{command_spec "hence"} "old-style alias of \"then have\""
+    (Parse_Spec.statement >> ((Toplevel.print oo Toplevel.proof') o hence(*changed*)));
+
+val _ =
+  Outer_Syntax.command @{command_spec "show"}
+    "state local goal, solving current obligation"
+    (Parse_Spec.statement >> ((Toplevel.print oo Toplevel.proof') o show(*changed*)));
+
+val _ =
+  Outer_Syntax.command @{command_spec "thus"} "old-style alias of  \"then show\""
+    (Parse_Spec.statement >> ((Toplevel.print oo Toplevel.proof') o thus(*changed*)));
+
+
+
+
+
+val _ =
+  Outer_Syntax.command @{command_spec "assume"} "assume propositions"
+    (Parse_Spec.statement >> (Toplevel.print oo (Toplevel.proof o assume_cmd(*changed*))));
+
 
 
 
