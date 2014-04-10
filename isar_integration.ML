@@ -6,11 +6,18 @@ structure IsarIntegration = struct
 
 fun assume_constraints ts ctxt =
   let
-    val constraints = []
+    val constraints0 = []
       |> fold (dest_constraintimps #> fst #> union (op =)) ts
+    val constraints = constraints0 |> filter_out (can dest_freshunifvar)
+    val unifvars = constraints0 |> map_filter (try dest_freshunifvar)
     val unconstrained_ts = ts |> map (dest_constraintimps #> snd)
+
     val (bound_assms0, ctxt2) = ctxt
-      (* TODO(correctness): auto_fixes necessary as in element.ML:init ? *)
+      |> fold Variable.auto_fixes constraints
+      (* |> Variable.add_fixes_direct (unifvars |> map
+          (fn Free (x, _) => x
+            | t => error ("assume_constraints: unification variable not a Free: "
+              ^Syntax.string_of_term ctxt t))) *)
       |> Proof_Context.add_assms_i Assumption.assume_export
            (constraints |> map (fn C => ((Binding.empty, []), [(C, [])])))
     val assms0 = bound_assms0 |> maps (fn (_, assms_) => assms_)
@@ -25,8 +32,10 @@ fun assume_constraints ts ctxt =
         assmC_rewr
       end)
     val ctxt3 = ctxt2 |> fold (MetaRec.add_assm true) assms
-    val _ = tracing ("assume_constaints: assumed  "^commas (map (Syntax.string_of_term ctxt3) constraints))
-    (* val _ = tracing ("Assumption.all_prems_of: "^commas (map (Display.string_of_thm ctxt3) (Assumption.all_prems_of ctxt3))) *)
+    (* val _ = tracing ("assume_constaints: assumed  "
+      ^commas (map (Syntax.string_of_term ctxt3) constraints)) *)
+    (* val _ = tracing ("Assumption.all_prems_of: "
+      ^commas (map (Display.string_of_thm ctxt3) (Assumption.all_prems_of ctxt3))) *)
   in
     (unconstrained_ts, ctxt3)
   end
@@ -401,26 +410,6 @@ end;
 
 local
 
-(* fold_burrow_fst : ('a list -> 's -> 'b list * 's) -> ('a * 'c) list -> 's -> ('b * 'c) list * 's *)
-fun fold_burrow_fst f xs st =
-  let
-    val (as_, cs) = split_list xs
-    val (bs, st2) = f as_ st
-  in (bs ~~ cs, st2) end
-
-(* filter_split : ('a -> bool) -> 'a list -> 'a list * 'a list * ('a list -> 'a list -> 'a list) *)
-fun filter_split p (x :: xs) =
-   let val ((ys, zs), recomb) = filter_split p xs
-   in
-     if p x then
-       ((x :: ys, zs),
-        fn (y' :: ys') => fn zs' => y' :: (recomb ys' zs'))
-     else
-       ((ys, x :: zs),
-        fn ys' => fn (z' :: zs') => z' :: (recomb ys' zs'))
-   end
-  | filter_split p [] = (([], []), (fn ys' => fn zs' => []))
-
 
 fun prep_statement prep activate raw_elems raw_concl ctxt = (*changes*)
   let
@@ -429,11 +418,11 @@ fun prep_statement prep activate raw_elems raw_concl ctxt = (*changes*)
         ([], []) I raw_elems raw_concl ctxt;
 
     val ((assm_elems, nonassm_elems), recomb_elems) = elems
-      |> filter_split (fn Element.Assumes _ => true | _ => false)
+      |> MetaRec.filter_split (fn Element.Assumes _ => true | _ => false)
     val elem_css = assm_elems |> map (fn Element.Assumes assms_ => map snd assms_)
     val (css', ctxt2) = ctxt |>
       (* TODO(correctness): also process patterns?! but they are not even checked by check_autofix ... *)
-      (fold_burrow o fold_burrow o fold_burrow_fst) assume_constraints (elem_css @ [concl])
+      (fold_burrow o fold_burrow o MetaRec.fold_burrow_fst) assume_constraints (elem_css @ [concl])
     val (elem_css2, [concl2]) = chop (length elem_css) css'
     val assm_elems2 = (assm_elems ~~ elem_css2) |> map (fn (Element.Assumes asms, css) =>
       (asms ~~ css) |> map (fn ((b, _), cs) => (b, cs)) |> Element.Assumes)
@@ -655,8 +644,12 @@ val cert_propp_schematic = prep_propp mode_schematic (map o cert_prop); *)
 
 val bind_propp             = gen_bind_propp Proof_Context.mode_default Syntax.read_props
   (fn raw_props => fn ctxt => (*changes*)
-    let val props = Syntax.read_props ctxt raw_props
-    in assume_constraints props ctxt end);
+    let
+      val props = Syntax.read_props ctxt raw_props |> Syntax.check_terms ctxt
+      val (props2, ctxt2) = assume_constraints props ctxt
+      val _ = tracing ("bind_propp: elaborated terms: "^commas
+        (props2 |> map (Syntax.string_of_term ctxt2)))
+    in (props2, ctxt2) end)
 (* val bind_propp_i           = gen_bind_propp mode_default (map o cert_prop);
 val bind_propp_schematic   = gen_bind_propp mode_schematic Syntax.read_props;
 val bind_propp_schematic_i = gen_bind_propp mode_schematic (map o cert_prop); *)
@@ -708,7 +701,7 @@ fun gen_assume asm prep_att exp args state =
   state
   |> Proof.assert_forward
   |> Proof.map_context_result (asm exp (Attrib.map_specs (map (prep_att (Proof.context_of state))) args))
-  |> (fn (named_factss, state_) => (named_factss, state |> Proof.set_facts (maps snd named_factss)))
+  |> (fn (named_factss, state) => (named_factss, state |> Proof.set_facts (maps snd named_factss)))
        (* inlined  these_factss []  from proof.ML*)
   |> #2;
 

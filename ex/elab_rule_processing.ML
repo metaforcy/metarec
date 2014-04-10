@@ -22,7 +22,7 @@ struct
           ^Syntax.string_of_term @{context} t)
   in
     val elabjud_n = dest_jud_name @{prop "t elabto t' : A"}
-    val elabsjud_n = dest_jud_name @{prop "elabs ts ts'_As"}
+    val metaelabjud_n = dest_jud_name @{prop "metaelab P P'"}
     val printsasjud_n = dest_jud_name @{prop "t' printsas t"}
     val synthtyjud_n = dest_jud_name @{prop "t synthty A"}
     val unify_jud_n = dest_jud_name @{prop "unify t t'"}

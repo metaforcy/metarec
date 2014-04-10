@@ -97,6 +97,27 @@ fun fold_with_change_tracking f xs st =
           | NONE => SOME st2))
 
 
+(* fold_burrow_fst : ('a list -> 's -> 'b list * 's) -> ('a * 'c) list -> 's -> ('b * 'c) list * 's *)
+fun fold_burrow_fst f xs st =
+  let
+    val (as_, cs) = split_list xs
+    val (bs, st2) = f as_ st
+  in (bs ~~ cs, st2) end
+
+(* filter_split : ('a -> bool) -> 'a list -> 'a list * 'a list * ('a list -> 'a list -> 'a list) *)
+fun filter_split p (x :: xs) =
+   let val ((ys, zs), recomb) = filter_split p xs
+   in
+     if p x then
+       ((x :: ys, zs),
+        fn (y' :: ys') => fn zs' => y' :: (recomb ys' zs'))
+     else
+       ((ys, x :: zs),
+        fn ys' => fn (z' :: zs') => z' :: (recomb ys' zs'))
+   end
+  | filter_split p [] = (([], []), (fn ys' => fn zs' => []))
+
+
 
 
 infix abeconv

@@ -96,6 +96,17 @@ definition
 definition
   ptprod :: "i => (i => i) => i" where
   "ptprod(A,F) == 0"
+definition
+  pteq :: "i => i => i" (infixl "===" 30) where
+  "pteq(x,y) == 0"
+definition
+  ptannot :: "i => i => i" ("_ annotwith _") where
+  "ptannot(t,A) == 0"
+definition
+  ptmquant :: "(i => prop) => prop" (binder "!!st " 1) where
+  "ptmquant(P) == Trueprop(True)"
+
+
 
 syntax
   "_fun" :: "[pttrn, i] => i"  ("(2fun _./ _)" 10)  (* lam already taken for proper ZF abstractions *)
@@ -104,15 +115,6 @@ syntax
 translations
   "fun x. f"  == "CONST ptlambda(%x. f)"
   "PI x:A. B" == "CONST ptprod(A, %x. B)"
-
-definition
-  pteq (infixl "===" 30) where
-  "pteq(x,y) == 0"
-
-definition
-  typed_eq ("_ ===[_] _") where
-  "typed_eq(x,A,y) == if (x = y) then 1 else 0"
-
 
 (* we use ~> because -> is already taken for the proper set-theoretic simple function space *)
 abbreviation
@@ -123,6 +125,11 @@ term "PI x:A~>univ. PI z:A. x # ((fun y. y) # z)"
 
 term "x : y"
 
+
+
+definition
+  typed_eq ("_ ===[_] _") where
+  "typed_eq(x,A,y) == if (x = y) then 1 else 0"
 
 
 
@@ -139,16 +146,27 @@ definition
   elabjud :: "i => i => i => o" ("_ elabto _ : _") where
   [MRjud 1 2]: "elabjud(t, t', A) == t' : A"
 definition
-  elabs_const :: "i => i => o" ("elabs _ _") where
-  [MRjud 1 1]: "elabs ts ts'_As ==
-    length(ts) = length(ts'_As)
-    & (ALL <t',A> : set_of_list(ts'_As). t' : A)"
+  metaelab_const :: "prop => prop => prop" ("metaelab _ _") where
+  [MRjud 1 1]: "metaelab_const(P, P') == Trueprop(True)"
 definition
   printsasjud :: "i => i => o" ("_ printsas _ ") where
   [MRjud 1 1]: "printsasjud(t, t') == True"
 definition
   synthty_const :: "i => i => o" ("_ synthty _") where
   [MRjud 1 1]: " t synthty A == t : A"
+
+definition
+  elabbrack :: "i => o" where
+  "elabbrack(pt) == True"
+(* Dmitriy saves *)
+declare [[coercion "elabbrack :: i => o"]]
+
+definition
+  truenessbrack :: "i => o" where
+  "truenessbrack(t) == (t = 1)"
+(* TODO: invisible printing of truenessbrack *)
+
+
 
 
 lemma elab_to_synthty_rewr: "t elabto t' : A' == t' synthty A'"
@@ -251,8 +269,16 @@ lemma [elabMR]: "[|
   unfolding bool_def elabjud_def typed_eq_def
   by simp
 
+(* NB: no printsas, synth rule for this *)
+lemma [MR_unchecked]: "[|
+    t elabto t' : A'  ;
+    A elabto A'2 : U  ;
+    unify A' A'2  |] ==>
+  (t annotwith A) elabto t' : A'"
+  unfolding elabjud_def .
 
-(* NB: no printsas rule for this, rule for printing variables is used instead  *)
+(* NB: no printsas, synth rule for this, rule for printing variables
+   and variable type synthesis assumption is used instead  *)
 lemma [MR_unchecked]: "[|
     freshunifvar x  ;  freshunifvar A  ;  freshunifvar i  ;
     constraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  constraint (x <: A) |] ==>
@@ -338,15 +364,48 @@ lemma [elabMR]: "[|
   apply (subst univlvl_def, subst univlvl_def) by (rule natelab)
 
 
+
 lemma [MR]: "
-  elabs Nil Nil"
-  by (simp add: elabs_const_def)
+  metaelab (PROP P) (PROP P)"
+  by (simp add: metaelab_const_def)
 
 lemma [MR]: "[|
-    t elabto t' : A  ;
-    elabs ts ts'_As  |] ==>
-  elabs (Cons(t, ts)) (Cons(<t',A>, ts'_As))"
-  by (simp add: elabs_const_def elabjud_def)
+    t elabto t' : A  |] ==>
+  metaelab (elabbrack(t)) (truenessbrack(t'))"
+  by (simp add: metaelab_const_def)
+
+(* TODO(feature): allow foconstraints over x and discharge them into P'.
+     => interpretation of  LOCDISCH x jud Cs := Cs ==> jud  special form? *)
+lemma [MR]: "[|
+    !! x. metaelab (PROP P(x)) (PROP P'(x))  |] ==>
+  metaelab (!! x. PROP P(x)) (!! x. PROP P'(x))"
+  by (simp add: metaelab_const_def)
+
+(* NB: special case instead of elaboration of standalone synthty judgements,
+     to avoid dependence of A' on x *) 
+lemma [MR]: "[|
+    A elabto A' : U  ;
+    !! x. x synthty A' ==> metaelab (PROP P(x)) (PROP P'(x))  |] ==>
+  metaelab (!! x. x synthty A ==> PROP P(x))
+    (!! x. x synthty A' ==> PROP P'(x))"
+  by (simp add: metaelab_const_def)
+
+lemma [MR]: "[|
+    metaelab (!! x. x synthty ? ==> PROP P(x)) (PROP Q)  |] ==>
+  metaelab (!!st x. (PROP P(x))) (PROP Q)"
+  by (simp add: metaelab_const_def)
+
+lemma [MR]: "[|
+    metaelab (PROP P) (PROP P')  ;
+    PROP P' ==> metaelab (PROP Q) (PROP Q')  |] ==>
+  metaelab (PROP P ==> PROP Q) (PROP P' ==> PROP Q')"
+  by (simp add: metaelab_const_def)
+
+lemma [MR]: "[|
+    metaelab (PROP P) (PROP P')  ;
+    metaelab (PROP Q) (PROP Q')  |] ==>
+  metaelab (PROP P &&& PROP Q) (PROP P' &&& PROP Q')"
+  by (simp add: metaelab_const_def)
 
 
 
@@ -615,13 +674,6 @@ ML {*
       end)
 
   
-  fun elabs ctxt ts =
-    exception_trace (fn () =>
-      let
-        val ts_list = zfy_list ts
-        val (th, [ts'_As_t]) = MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.elabsjud_n (ts_list, [])
-      in th end)
-
   fun elab_with_expected_error exp_err_match ctxt t =
     let
       val err_msg =
@@ -844,8 +896,6 @@ ML {*  elab @{context} @{term "f # x"}  *}
 (* NB: now the universe constraints get unified due to the constraint sharing rule *)
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
-
-ML {*  elabs @{context} [@{term "x :: i"}, @{term "x # y"}] *}
 
 (* test of smash unification ?B(x) == ?B(y) *)
 ML {* elab @{context} @{term "f # x === f # y"} *}
@@ -1411,16 +1461,6 @@ definition
   constraintimp :: "prop => prop => prop" (infixr "=C=>" 1) where
   "constraintimp(P,Q) == (PROP P ==> PROP Q)"
 
-definition
-  elabbrack :: "i => o" where
-  "elabbrack(pt) == True"
-(* Dmitriy saves *)
-declare [[coercion "elabbrack :: i => o"]]
-
-definition
-  truenessbrack :: "i => o" where
-  "truenessbrack(t) == (t = 1)"
-(* TODO: invisible printing of truenessbrack *)
 
 
 
@@ -1437,56 +1477,48 @@ ML {*
     | NONE => ([], P)
 *}
 
+
 ML_file "../isar_integration.ML"
 
 
 ML {*
-  fun elab_infer ts0 ctxt =
+  fun elab_infer ts ctxt =
     let
       (* TODO: elaborate under Trueprops, elabbracks *)
-      val _ = tracing ("input of inference: "^commas (ts0 |> map (Syntax.string_of_term ctxt)))
+      val _ = tracing ("input of inference: "^commas (ts |> map (Syntax.string_of_term ctxt)))
 
-      (* FIXME: hackish *)
-      val ts = ts0 |> filter_out (can Logic.dest_type) 
-      val metaty_constraints = ts0 |> filter (can Logic.dest_type)
+      val ((pt_props, other_ts), recomb_ts) = ts
+        |> MetaRec.filter_split (fn t =>
+          fastype_of t = Term.propT andalso
+          member (op =) (Term.add_const_names t []) @{const_name "elabbrack"})
     in
-      if null ts orelse
-        (* FIXME: hackish because have to ignore meta implications etc *)
-        (ts |> exists (fn t =>
-          not (can FOLogic.dest_Trueprop t)
-          orelse not (can dest_elabbrack (FOLogic.dest_Trueprop t))))
-      then
+      if null pt_props then
         NONE
       else
         let
-          val ts_uncoerced = map (FOLogic.dest_Trueprop #> dest_elabbrack) ts
-          val ts_term = zfy_list ts_uncoerced
-          val ((th, [ts'_As_term]), (delayed_unifs, constraints)) =
-            MetaRec.metarec ctxt ElabRuleProcessing.elabsjud_n (ts_term, [])
+          val ptprops_conj = Logic.mk_conjunction_balanced pt_props
+          val ((th, [props_conj']), (delayed_unifs, constraints)) =
+            MetaRec.metarec ctxt ElabRuleProcessing.metaelabjud_n (ptprops_conj, [])
+          val prop1' :: props' = Logic.dest_conjunction_balanced (length pt_props) props_conj'
            
           val _ = tracing ("elaboration theorem:   "^Display.string_of_thm ctxt th)
-          val t1' :: ts' = metaize_list ts'_As_term
-            |> map (metaize_pair #> fst #> mk_truenessbrack #> FOLogic.mk_Trueprop)
 
           val vars = [] |> fold Term.add_vars
-           (t1' :: ts' @ map Logic.mk_equals delayed_unifs @ constraints)
+           (prop1' :: props' @ map Logic.mk_equals delayed_unifs @ constraints)
           val unconstrain = fold_rev mk_constraintimp
-            (map Logic.mk_equals delayed_unifs @ constraints)
-            (* information about unification variables not really important
-               because automatic exports revarifies *)
-            (* @ map (mk_freshunifvar o Var) vars) *)
+            (map Logic.mk_equals delayed_unifs @ constraints
+            @ map (mk_freshunifvar o Var) vars)
           (* minor FIXME: unvarify could potentially lead to Free name collisions  *)
           val unvarify_with_idxs = map_aterms
             (fn Var((n,ix), T) => Free(n ^ string_of_int ix, T)
               | t => t)
           (* fix unification variables, because checking does not allow schematic variables *)
-          val unconstrained_ts' = unconstrain t1' :: ts' |> map (unvarify_with_idxs) 
+          val unconstrained_props' = unconstrain prop1' :: props' |> map (unvarify_with_idxs) 
 
-          val _ = tracing ("elaborated\n  "^commas (ts |> map (Syntax.string_of_term ctxt))
-            ^"\nto\n  "^commas (unconstrained_ts' |> map (Syntax.string_of_term ctxt)))
+          val _ = tracing ("elaborated\n  "^commas (pt_props |> map (Syntax.string_of_term ctxt))
+            ^"\nto\n  "^commas (unconstrained_props' |> map (Syntax.string_of_term ctxt)))
         in
-          (* FIXME: we assume that type constaints go last *)
-          SOME (unconstrained_ts' @ metaty_constraints, ctxt)
+          SOME (recomb_ts unconstrained_props' other_ts, ctxt)
         end
     end
 *}
@@ -1503,8 +1535,9 @@ ML {*
 
 
 
-lemma assumes "x === y" shows "f # x === f # y"
+lemma assumes H0: "(x annotwith A) === y" shows "f # x === f # y"
 proof -
+  thm H0
   ML_prf {* Assumption.all_assms_of @{context} *}
 
   have "y === x"
@@ -1515,15 +1548,39 @@ proof -
     sorry
 
   {
+    fix z
+    have "y === x &&& x === z"
+      ML_prf {* Assumption.all_assms_of @{context} *}
+      sorry
+  }
+  thm this
+
+  have "y === x ==> f === g"
+    ML_prf {* Assumption.all_assms_of @{context} *}
+    sorry 
+  thm this
+
+  have "!!st x. f # x === g # x" sorry
+
+  {
     assume "y === z"
+    and "x == x"
+      ML_prf {* Assumption.all_assms_of @{context} *}
     have "z === z"
       ML_prf {* Assumption.all_assms_of @{context} *}
       sorry
   }
+  thm this
+
+  { assume H: "Q"
+    ML_prf {*  Assumption.all_assms_of @{context} *}
+    have blub: "Q" by (rule H)  }
+  thm this
 
   show "f # x === f # y"
     sorry
 qed
+
 
 
 
@@ -1533,7 +1590,7 @@ qed
      Universe-Polymorphism in   Sozeau - Universe Polymorphism in Coq
 *)
 
-(* Unifikations-Hack entspricht moeglich der Entscheidbarkeit
+(* Unifikations-Hack entspricht moeglicherweise der Entscheidbarkeit
    eines groesseren Fragments das pattern-Unifikation umfasst:
      gefunden wird die allgemeinste Substitution die die Terme
      unifiziert (nach betaeta-Normalisierungs-Preprocessing),

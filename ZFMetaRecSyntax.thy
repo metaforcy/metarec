@@ -336,7 +336,7 @@ ML {*
   fun zfy_pair (t1, t2) = @{term ZF.Pair} $ t1 $ t2
 
   fun metaize_pair (Const (@{const_name ZF.Pair}, _) $ t1 $ t2) = (t1, t2)
-    | metaize_pair _ = error ("metaize_pair: not a pair")
+    | metaize_pair t = raise TERM ("metaize_pair: not a pair", [t])
 
   fun mk_freshunifvar t =
     let val T = fastype_of t
@@ -344,6 +344,8 @@ ML {*
       Const(@{const_name fresh_unifvar_const}, @{typ i} --> T --> @{typ prop})
         $ @{term 0} $ t
     end
+  fun dest_freshunifvar (Const (@{const_name fresh_unifvar_const}, _) $ _ $ t) = t
+    | dest_freshunifvar t = raise TERM ("not a freshunifvar", [t])
 *}
 
 end
