@@ -1344,6 +1344,7 @@ fun unifies thy (t1, t2) =
 
 exception TryPatUnify of Proof.context * (term * term) * string
 exception TryStructUnify of Proof.context * (term * term) * string
+exception TryStructUnifyFlexFlexs of Proof.context * StructUnify.flexflex list * string
 
 
 fun strip_abss t =
@@ -1427,7 +1428,7 @@ fun patternify ctxt term env =
      mengenwertige contextual discharge Regel entstehen. Das :> judgement muss
      also input des metarec functors werden.
 *)
-fun try_struct_unify ctxt (t1_0, t2_0) env = 
+fun try_struct_unify ctxt (t1_0, t2_0) (env, delayed_flexflexs) = 
   let
     fun unif_failed () = raise TryStructUnify(ctxt, (t1_0, t2_0), "try_struct_unify: structural unification of "
           ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
@@ -1438,13 +1439,24 @@ fun try_struct_unify ctxt (t1_0, t2_0) env =
       val (tyenv2, maxidx2) = (Envir.type_env env, Envir.maxidx_of env)
         |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
       val env2 = Envir.Envir { maxidx = maxidx2, tenv = Envir.term_env env, tyenv = tyenv2 }
-      val env3 = StructUnify.unify thy (t1, t2) env2
     in
-      SOME env3
+      StructUnify.unify thy (t1, t2) (env2, delayed_flexflexs) |> SOME
     end
       handle
           StructUnify.Unif => unif_failed ()
         | Type.TUNIFY => unif_failed ()
+  end
+
+fun solve_delayed_flexflexs ctxt delayed_flexflexs env =
+  let
+    fun unif_failed () = raise TryStructUnifyFlexFlexs(ctxt, delayed_flexflexs, "try_struct_unify_delayed_flexflexs: "
+      ^"structural unification of delayed flexflex pairs failed "
+          ^commas (map (str_of_normed_term ctxt o StructUnify.term_eq_of_flexflex) delayed_flexflexs))
+  in
+    StructUnify.solve_delayed_flexflexs (Proof_Context.theory_of ctxt) delayed_flexflexs env
+    handle
+      StructUnify.Unif => unif_failed ()
+    | Type.TUNIFY => unif_failed ()
   end
 
 fun try_pat_unify ctxt (t1_0, t2_0) env =
@@ -1484,19 +1496,16 @@ fun try_pat_unify ctxt (t1_0, t2_0) env =
         | Type.TUNIFY => unif_failed ()
   end
 
-fun try_solve_delayed_unifs structural ctxt delayed_unifs env =
-  let val unif = if structural then try_struct_unify else try_pat_unify
-  in
-    ([], env)
-    |> fold_rev (fn ((t1_, t2_), solved) => fn (ufs, env_) =>
-           if solved then
-             (cons ((t1_, t2_), true) ufs, env_)
-           else
-             case unif ctxt (t1_, t2_) env_ of
-               SOME env_2 => (cons ((t1_, t2_), true) ufs, env_2)
-             | NONE => (cons ((t1_, t2_), false) ufs, env_))
-         delayed_unifs
-  end
+fun try_solve_delayed_unifs unif ctxt delayed_unifs st =
+  ([], st)
+  |> fold_rev (fn ((t1_, t2_), solved) => fn (ufs, st_) =>
+         if solved then
+           (cons ((t1_, t2_), true) ufs, st_)
+         else
+           case unif ctxt (t1_, t2_) st_ of
+             SOME st_2 => (cons ((t1_, t2_), true) ufs, st_2)
+           | NONE => (cons ((t1_, t2_), false) ufs, st_))
+       delayed_unifs
 
 
 
@@ -3898,7 +3907,7 @@ and metarec_structural_unifications final_unifs prf ctxt =
     val {env, delayed_unifs, ...} = get_the_run_state (Context.Proof ctxt)
 
     val (delayed_unifs2, env2) =
-      try_solve_delayed_unifs false ctxt delayed_unifs env
+      try_solve_delayed_unifs try_pat_unify ctxt delayed_unifs env
       handle TryPatUnify (ctxt_, (bad_t1, bad_t2), msg) =>
         err_with_trace ctxt_ ("metarec: solving of a delayed unification problem failed: "^msg)
 
@@ -3910,13 +3919,20 @@ and metarec_structural_unifications final_unifs prf ctxt =
            instead of applying constraint simplification before and after all forced
            structural unifications *)
     val struct_unify = true
+    fun struct_err ctxt_ msg = 
+        err_with_trace ctxt_ ("metarec: solving of a delayed unification problem structurally failed: "^msg)
     val (delayed_unifs3, env3) =
         (if struct_unify then
-          try_solve_delayed_unifs true ctxt delayed_unifs2 env2
+          let
+            val (delayed_unifs3, (env_3, delayed_flexflexs)) = try_solve_delayed_unifs try_struct_unify
+              ctxt delayed_unifs2 (env2, [])
+            val env_4 = solve_delayed_flexflexs ctxt delayed_flexflexs env_3
+          in (delayed_unifs3, env_4) end
         else
           (delayed_unifs2, env2))
-      handle TryStructUnify (ctxt_, (bad_t1, bad_t2), msg) =>
-        err_with_trace ctxt_ ("metarec: solving of a delayed unification problem structurally failed: "^msg)
+      handle
+        TryStructUnify (ctxt_, _, msg) => struct_err ctxt_ msg
+      | TryStructUnifyFlexFlexs (ctxt_, _, msg) => struct_err ctxt_ msg
 
     val solved_delayed_unifs = delayed_unifs3 |> filter snd |> map fst
     val unsolved_delayed_unifs = delayed_unifs3 |> filter_out snd |> map fst
@@ -4048,7 +4064,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
         tracing ("proof replay after structural unifications: "^Display.string_of_thm ctxt4 th_3)
       end *)
 
-    val (prf4, ctxt5) =  metarec_constraint_simp true prf3 ctxt4
+    val (prf4, ctxt5) = metarec_constraint_simp true prf3 ctxt4
 
     (* NB: we always need a final pass for structural unifications after the last constraint simplification pass.
          Still necessary now that contextual discharge of typing constraints works without unification? *)
@@ -5777,7 +5793,7 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
           val unchanged_delayed_unifs = delayed_unifs |> filter_out changed_unifprob
 
           val (changed_delayed_unifs', env3) =
-            try_solve_delayed_unifs false ctxt changed_delayed_unifs env2
+            try_solve_delayed_unifs try_pat_unify ctxt changed_delayed_unifs env2
           val st2 = calc_res_state env3 (changed_delayed_unifs' @ unchanged_delayed_unifs)
 
           val ctxt2 = ctxt |> Context.proof_map (set_run_state (SOME st2))

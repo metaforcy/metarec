@@ -9,8 +9,8 @@ begin
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
-  val env' = 
-    StructUnify.unify @{theory} (B_x, prod) (Envir.empty 1)
+  val (env', _) = 
+    StructUnify.unify @{theory} (B_x, prod) (Envir.empty 1, [])
   val B_x' = Envir.norm_term env' B_x |> cterm_of @{theory}
   val prod' = Envir.norm_term env' prod |> cterm_of @{theory}
 *}
@@ -18,8 +18,8 @@ ML {*
 ML {*
   val A1 = @{cpat "?B(x::i)"} |> Thm.term_of
   val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
-  val env' = 
-    StructUnify.unify @{theory} (A1, A2) (Envir.empty 1)
+  val (env', _) = 
+    StructUnify.unify @{theory} (A1, A2) (Envir.empty 1, [])
   val A1' = Envir.norm_term env' A1 |> cterm_of @{theory}
   val A2' = Envir.norm_term env' A2 |> cterm_of @{theory}
 *}
@@ -28,7 +28,7 @@ ML {*
   val A1 = @{cpat "?B(x::i, x) :: i"} |> Thm.term_of
   val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
   val env = Envir.empty 1
-  val env2 = StructUnify.unify @{theory} (A1, A2) env
+  val (env2, _) = StructUnify.unify @{theory} (A1, A2) (env, [])
   val A1' = Envir.norm_term env2 A1 |> cterm_of @{theory}
 *}
 
@@ -39,11 +39,11 @@ ML {*
   val B1 = @{cpat "?D(x :: i) :: i"} |> Thm.term_of
   val B2 = @{cpat "PROD x:?E. ?F(x)"} |> Thm.term_of
   val env = Envir.empty 1
-  val env2 = StructUnify.unify @{theory} (A1, A2) env
+  val (env2, _) = StructUnify.unify @{theory} (A1, A2) (env, [])
   val A2' = Envir.norm_term env2 A2 |> cterm_of @{theory}
   val B1' = Envir.norm_term env2 B1 |> cterm_of @{theory}
   val B2' = Envir.norm_term env2 B2 |> cterm_of @{theory}
-  val env3 = StructUnify.unify @{theory} (B1, B2) env2
+  val (env3, _) = StructUnify.unify @{theory} (B1, B2) (env2, [])
   val A2'' = Envir.norm_term env3 A2 |> cterm_of @{theory}
 *}
 
@@ -100,7 +100,7 @@ definition
   pteq :: "i => i => i" (infixl "===" 30) where
   "pteq(x,y) == 0"
 definition
-  ptannot :: "i => i => i" ("_ annotwith _") where
+  ptannot :: "i => i => i" ("_ annotyped _") where
   "ptannot(t,A) == 0"
 definition
   ptmquant :: "(i => prop) => prop" (binder "!!st " 1) where
@@ -270,11 +270,13 @@ lemma [elabMR]: "[|
   by simp
 
 (* NB: no printsas, synth rule for this *)
+(* TODO: discharge universe level constraints that are only necessary from elaboration of A
+  (after completed elaboration) *)
 lemma [MR_unchecked]: "[|
     t elabto t' : A'  ;
     A elabto A'2 : U  ;
     unify A' A'2  |] ==>
-  (t annotwith A) elabto t' : A'"
+  (t annotyped A) elabto t' : A'"
   unfolding elabjud_def .
 
 (* NB: no printsas, synth rule for this, rule for printing variables
@@ -900,13 +902,18 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 (* test of smash unification ?B(x) == ?B(y) *)
 ML {* elab @{context} @{term "f # x === f # y"} *}
 
-(* FIXME: types of f,g appear to be too general from mutual x,y dependency lifting;
-     guniv constraint not simplifiable;
-     important constraints are   ?B(x) == ?B2(y),  f : PROD x:?A. ?B(x),  g : PROD y:?A2. ?B2(y)
-       x : ?A,  y : ?A2
-     struct unify of ?B(x) == ?B2(y)  results in ?B2 := (% y. ?B3(x,y)), ?B := (% x. ?B3(x,y)).
-     smash-unifying in flexflex2 case would result in  ?B := ?B2 := (% _. ?B3) *)
+(* NB: smash-unification of ?B(x) == ?B2(y) from result types of f,g
+     avoids too general type with mutual x,y dependency lifting *)
 ML {* elab @{context} @{term "f # x === g # y"} *}
+
+(* test of dependency restriction solution of flexflex unifications *)
+ML {* elab @{context} @{term "f # x === g # x"} *}
+ML {* elab @{context} @{term "f # x === g # x # x"} *}
+ML {* elab @{context} @{term "f # x === g # x # y"} *}
+ML {* elab @{context} @{term "f # x === g # y # x"} *}
+
+(* test of delay of flexflex unifications *)
+ML {* elab @{context} @{term "f # x # y === g # x # y"} *}
 
 
 
@@ -1535,7 +1542,7 @@ ML {*
 
 
 
-lemma assumes H0: "(x annotwith A) === y" shows "f # x === f # y"
+lemma assumes H0: "(x annotyped A) === y" shows "f # x === f # y"
 proof -
   thm H0
   ML_prf {* Assumption.all_assms_of @{context} *}
@@ -1572,16 +1579,23 @@ proof -
   }
   thm this
 
-  { assume H: "Q"
-    ML_prf {*  Assumption.all_assms_of @{context} *}
-    have blub: "Q" by (rule H)  }
-  thm this
 
   show "f # x === f # y"
+    ML_prf {*  Assumption.all_assms_of @{context} *}
     sorry
 qed
 
 
+
+
+locale test =
+ fixes y z
+ assumes H:"y === z" (* FIXME: constraints of H should be assumed too *)
+begin
+  thm H
+
+  lemma loclem: "z === z2" sorry
+end
 
 
 (* meta-theory ist schon in der Coq-Literatur abgedeckt:

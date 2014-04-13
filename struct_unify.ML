@@ -2,7 +2,10 @@
 
 signature STRUCT_UNIFY =
 sig
-  val unify: theory -> term * term -> Envir.env -> Envir.env
+  type flexflex
+  val unify: theory -> term * term -> Envir.env * flexflex list -> Envir.env * flexflex list
+  val solve_delayed_flexflexs: theory -> flexflex list -> Envir.env -> Envir.env
+  val term_eq_of_flexflex: flexflex -> term
   exception Unif
   exception NotBetaNormal
   exception Pattern
@@ -45,7 +48,7 @@ fun clashB binders i s =
   if !trace_unify_fail then clash (boundVar binders i) s
   else ()
 
-fun proj_fail thy (env,binders,F,_,is,t) =
+fun proj_fail thy binders (F,_,is,t) (env, delayed_flexflexs) =
   if !trace_unify_fail
   then let val f = Term.string_of_vname F
            val xs = bnames binders is
@@ -114,15 +117,21 @@ fun lambda_open binderTs v t = lambda_name_open binderTs ("", v) t;
 fun dest_Bound (Bound i) = i
   | dest_Bound _ = error "dest_Bound"
 
+fun reord_name_from_term binders s = case s of
+    Free(n, _) => n
+  | Var((n, _), _) => n
+  | Const(n,_) => n
+  | Bound i => nth binders i |> fst
+  | _ => "__reordfree0"
 
-(* TODO(feature): use variants of the names of bounds from abstractions instead of boundfree
-     and use variants of the names of frees/vars in ss *)
-fun reorder_open_abss binderTs ss ss_reord body =
+
+fun reorder_open_abss binders ss ss_reord body =
   let
+    val binderTs = map snd binders
     val ctxt = Name.context |> fold Term.declare_term_names
       (body :: ss @ map Logic.mk_type binderTs)
-    val bnd_ns = Name.invent ctxt "__boundfree0" (length binderTs)
-    val ss_ns = Name.invent ctxt "__reordfree0" (length ss)
+    val (bnd_ns, ctxt2) = ctxt |> fold_map (Name.variant o fst) binders
+    val (ss_ns, _) = ctxt2 |> fold_map (Name.variant o reord_name_from_term binders) ss
 
     val bnd_frees = bnd_ns ~~ binderTs |> map Free
     val subst = curry subst_bounds bnd_frees
@@ -270,27 +279,53 @@ fun flexflex2(env,binders,F,Fty,is,G,Gty,js) =
                  end;
   in if Term_Ord.indexname_ord (G,F) = LESS then ff(F,Fty,is,G,Gty,js) else ff(G,Gty,js,F,Fty,is) end
 
-fun unify_types thy (T, U) (env as Envir.Envir {maxidx, tenv, tyenv}) =
-  if T = U then env
+(* assumes normed Fty, Gty *)
+fun smash_flexflex ((F, Fty), argsF) ((G, Gty), argsG) env =
+  let
+    fun smashing_abss varT num_appargs smashvar = 
+      let val smashed_binderTs = take num_appargs (Term.binder_types varT)
+      in smashvar |> fold_rev (fn T => fn t => Abs("", T, t)) smashed_binderTs end
+
+    val smashed_binderTs = take (length argsF) (Term.binder_types Fty)
+    val (env2, smashvar) = Envir.genvar (fst F)
+      (env, drop (length argsF) (Term.binder_types Fty) ---> Term.body_type Fty)
+    val F_smashing_abss = smashing_abss Fty (length argsF) smashvar
+    val G_smashing_abss = smashing_abss Gty (length argsG) smashvar
+
+    val env3 = Envir.update (((F,Fty), F_smashing_abss), env2)
+  in
+    if F = G then env3 (* the other update would be identical *)
+    else
+      Envir.update (((G, Gty), G_smashing_abss), env3)
+  end
+
+type flexflex = (string * typ) list * (((indexname * typ) * term list) * ((indexname * typ) * term list))
+
+fun unify_types thy (T, U) (env as Envir.Envir {maxidx, tenv, tyenv}, delayed_flexflexs) =
+  if T = U then (env, delayed_flexflexs)
   else
     let val (tyenv', maxidx') = Sign.typ_unify thy (U, T) (tyenv, maxidx)
-    in Envir.Envir {maxidx = maxidx', tenv = tenv, tyenv = tyenv'} end
+    in
+      (Envir.Envir {maxidx = maxidx', tenv = tenv, tyenv = tyenv'},
+       delayed_flexflexs)
+    end
     handle Type.TUNIFY => (typ_clash thy (tyenv, T, U); raise Unif);
 
-fun unif thy binders (s,t) env = case (Envir.head_norm env s, Envir.head_norm env t) of
+fun unif thy binders (s,t) (env, delayed_flexflexs) = case (Envir.head_norm env s, Envir.head_norm env t) of
       (Abs(ns,Ts,ts),Abs(nt,Tt,tt)) =>
          let val name = if ns = "" then nt else ns
-         in unif thy ((name,Ts)::binders) (ts,tt) env end
-    | (Abs(ns,Ts,ts),t) => unif thy ((ns,Ts)::binders) (ts,(incr t)$Bound(0)) env
-    | (t,Abs(nt,Tt,tt)) => unif thy ((nt,Tt)::binders) ((incr t)$Bound(0),tt) env
-    | p => cases thy (binders,env,p)
+         in unif thy ((name,Ts)::binders) (ts,tt) (env, delayed_flexflexs) end
+    | (Abs(ns,Ts,ts),t) => unif thy ((ns,Ts)::binders) (ts,(incr t)$Bound(0)) (env, delayed_flexflexs)
+    | (t,Abs(nt,Tt,tt)) => unif thy ((nt,Tt)::binders) ((incr t)$Bound(0),tt) (env, delayed_flexflexs)
+    | p => cases thy binders p (env, delayed_flexflexs)
 
-and cases thy (binders,env,(s,t)) = case (strip_comb s,strip_comb t) of
+and cases thy binders (s,t) (env, delayed_flexflexs) = case (strip_comb s,strip_comb t) of
        ((Var(F,Fty),ss),(Var(G,Gty),ts)) =>
           if F = G then 
-            (flexflex1(env,binders,F,Fty,ints_of' env ss,ints_of' env ts)
+            ((flexflex1(env,binders,F,Fty,ints_of' env ss,ints_of' env ts),
+             delayed_flexflexs)
             handle Pattern =>
-              if env_abeconv env (s, t) then env
+              if env_abeconv env (s, t) then (env, delayed_flexflexs)
               else
                 (* NB: structural instantiation would lead to cyclic instantiation in this case *)
                 (* we employ opportunistic smash unification because this situation occurs
@@ -299,38 +334,30 @@ and cases thy (binders,env,(s,t)) = case (strip_comb s,strip_comb t) of
                    which we smash-unify via ?B := (% _. ?B2) *)
                 let
                   val Fty' = Fty |> Envir.norm_type (Envir.type_env env)
-                  val smashed_binderTs = take (length ss) (Term.binder_types Fty')
-                  val (env', var) = Envir.genvar (fst F)
-                    (env, drop (length ss) (Term.binder_types Fty') ---> Term.body_type Fty')
-                  val smashing_abss = var |> fold_rev (fn T => fn t => Abs("", T, t)) smashed_binderTs
-                  val env'' = Envir.update (((F,Fty'), smashing_abss), env')
                 in
-                  env''
+                  (smash_flexflex ((F, Fty'), ss) ((F, Fty'), ts) env, delayed_flexflexs)
                 end)
           else
-            (flexflex2(env,binders,F,Fty,ints_of' env ss,G,Gty,ints_of' env ts)
+            ((flexflex2(env,binders,F,Fty,ints_of' env ss,G,Gty,ints_of' env ts),
+              delayed_flexflexs)
              handle Pattern => 
-               (* FIXME: smash unification seems to be more approapriate, to avoid
-                   overly general type inference in e.g.  f # x == g # y
-                   (especially since structural unification is only employed
-                   on maximally-delayed unifications)
-                   But if ss subset ts (or symmetrically), we should reduce to the
-                   variable with less dependencies (i.e. generalizing
-                   the treatment in pattern unification), so that e.g.
-                   f # x == g # x results in f, g : (PROD x:A. B(x)) *)
-               if Term_Ord.indexname_ord (G,F) = LESS then
+               (env, delayed_flexflexs @ [ (binders, (((F,Fty), ss), ((G,Gty), ts))) ]))
+
+               (* NB: the following also works, but results in overly general types
+                  for  f # x == g # y (due to constraint ?B(x) == ?C(y)) *)
+               (* if Term_Ord.indexname_ord (G,F) = LESS then
                  struct_inst thy binders ((F,Fty), ss) t env
                else
-                 struct_inst thy binders ((G,Gty), ts) s env)
+                 struct_inst thy binders ((G,Gty), ts) s env) *)
       | ((Var(F,Fty),ss),_) =>
-          (flexrigid thy (env,binders,F,Fty,ints_of' env ss,t)
-           handle Pattern => struct_inst thy binders ((F,Fty), ss) t env)
+          (flexrigid thy binders (F,Fty,ints_of' env ss,t) (env, delayed_flexflexs)
+           handle Pattern => (struct_inst thy binders ((F,Fty), ss) t env, delayed_flexflexs))
       | (_,(Var(F,Fty),ts)) =>
-          (flexrigid thy (env,binders,F,Fty,ints_of' env ts,s)
-           handle Pattern => struct_inst thy binders ((F,Fty), ts) s env)
-      | ((Const c,ss),(Const d,ts))   => rigidrigid thy (env,binders,c,d,ss,ts)
-      | ((Free(f),ss),(Free(g),ts))   => rigidrigid thy (env,binders,f,g,ss,ts)
-      | ((Bound(i),ss),(Bound(j),ts)) => rigidrigidB thy (env,binders,i,j,ss,ts)
+          (flexrigid thy binders (F,Fty,ints_of' env ts,s) (env, delayed_flexflexs)
+           handle Pattern => (struct_inst thy binders ((F,Fty), ts) s env, delayed_flexflexs))
+      | ((Const c,ss),(Const d,ts))   => rigidrigid thy binders (c,d,ss,ts) (env, delayed_flexflexs)
+      | ((Free(f),ss),(Free(g),ts))   => rigidrigid thy binders (f,g,ss,ts) (env, delayed_flexflexs)
+      | ((Bound(i),ss),(Bound(j),ts)) => rigidrigidB thy binders (i,j,ss,ts) (env, delayed_flexflexs)
       | ((Abs(_),_),_)                => raise NotBetaNormal
       | (_,(Abs(_),_))                => raise NotBetaNormal
       | ((Const(c,_),_),(Free(f,_),_)) => (clash c f; raise Unif)
@@ -373,7 +400,7 @@ and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
 
         val ts_reord = filter Term.is_Bound ts @ filter_out Term.is_Bound ts
         val absHapp = Happ
-          |> reorder_open_abss (map snd binders) ts ts_reord
+          |> reorder_open_abss binders ts ts_reord
 
         (* val _ = tracing ("liftvars_over "^Syntax.string_of_term_global thy (Var(ixn, T))^" with "
           ^"\n  ts="^commas (map (Syntax.string_of_term_global thy) ts)
@@ -423,29 +450,127 @@ and struct_inst thy binders ((F, Fty), ss0) term env =
       val env2 = liftvars_over thy binders 0 (ss_reord_Ts, ss_bnds) term env
       val norm2 = Envir.norm_term env2
       val term'_abs = norm2 term
-        |> reorder_open_abss (map snd binders) (map norm2 ss) (map norm2 ss_reord)
+        |> reorder_open_abss binders (map norm2 ss) (map norm2 ss_reord)
       (* NB: Fty does not have to be normed since var-clash check in Envir.lookup
          is modulo type normalization *)
       val env3 = Envir.update (((F, Fty), term'_abs), env2)
+      val _ = tracing ("struct_inst: "
+        ^Syntax.string_of_term_global thy (Var (F,Fty))
+        ^" := "^Syntax.string_of_term_global thy term'_abs)
     in env3 end
   
 
 
-and rigidrigid thy (env,binders,(a,Ta),(b,Tb),ss,ts) =
+and rigidrigid thy binders ((a,Ta),(b,Tb),ss,ts) (env, delayed_flexflexs) =
       if a<>b then (clash a b; raise Unif)
-      else env |> unify_types thy (Ta,Tb) |> fold (unif thy binders) (ss~~ts)
+      else
+        (env, delayed_flexflexs)
+        |> unify_types thy (Ta,Tb)
+        |> fold (unif thy binders) (ss~~ts)
 
-and rigidrigidB thy (env,binders,i,j,ss,ts) =
+and rigidrigidB thy binders (i,j,ss,ts) (env, delayed_flexflexs) =
      if i <> j then (clashBB binders i j; raise Unif)
-     else fold (unif thy binders) (ss~~ts) env
+     else
+       (env, delayed_flexflexs) |> fold (unif thy binders) (ss~~ts)
 
-and flexrigid thy (params as (env,binders,F,Fty,is,t)) =
-      if occurs(F,t,env) then (ocheck_fail thy (F,t,binders,env); raise Unif)
-      else (let val (u,env') = proj(t,env,binders,is)
-            in Envir.update (((F, Fty), mkabs (binders, is, u)), env') end
-            handle Unif => (proj_fail thy params; raise Unif));
+and flexrigid thy binders (F,Fty,is,t) (env, delayed_flexflexs) =
+      if occurs(F,t,env) then
+        (ocheck_fail thy (F,t,binders,env); raise Unif)
+      else
+        (let val (u,env') = proj(t,env,binders,is)
+         in
+           (Envir.update (((F, Fty), mkabs (binders, is, u)), env'),
+            delayed_flexflexs)
+         end
+         handle Unif =>
+          (proj_fail thy binders (F,Fty,is,t) (env, delayed_flexflexs); 
+           raise Unif));
 
-fun unify thy = unif thy [];
+fun solve_flexflex thy (binders, (((F,Fty), ss), ((G,Gty), ts))) env = 
+  let
+    val (ss', ts') = pairself (map (Envir.norm_term env)) (ss, ts)
+    val (Fty', Gty') = (Fty, Gty) |> pairself (Envir.norm_type (Envir.type_env env))
+
+    (* args1 subset args2 *)
+    fun dep_restr_sol (v1, args1) (v2, args2) env =
+      let
+        val ctxt = Name.context |> fold Term.declare_term_names
+          ([Var v1, Var v2] @ args1 @ args2 @ map (snd #> Logic.mk_type) binders)
+        val (bnd_ns, _) = ctxt |> fold_map (Name.variant o fst) binders
+        val bnd_frees = bnd_ns ~~ (map snd binders) |> map Free
+        val subst = curry subst_bounds bnd_frees
+
+        val (args1', args2') = pairself (map subst) (args1, args2)
+        val t1 = list_comb (Var v1, args1')
+        val t1_args2_abs = t1 |> fold_rev Term.lambda args2'
+
+        val env2 = Envir.update ((v2, t1_args2_abs), env)
+        val _ = tracing ("flexflex2 dependency restriction solution for "
+          ^Syntax.string_of_term_global thy
+            (Logic.mk_equals (list_comb ((Var v1), args1'), list_comb ((Var v2), args2')))
+          ^":   "^Syntax.string_of_term_global thy (Var v2)^" := "
+          ^Syntax.string_of_term_global thy t1_args2_abs)
+      in
+        env2
+      end
+  in
+    (* if ss subset ts (or symmetrically), we should reduce to the
+       variable with less dependencies (i.e. generalizing
+       the treatment in pattern unification), so that e.g.
+       f # x == g # x results in f, g : (PROD x:A. B(x))
+       (due to constraint ?B(x) == ?C(x)) *)
+    if subset (op aconv) (ss', ts') then
+      dep_restr_sol ((F,Fty'), ss') ((G,Gty'), ts') env
+    else if subset (op aconv) (ts', ss') then
+      dep_restr_sol ((G,Gty'), ts') ((F,Fty'), ss') env
+    else
+      (* smash unification is used here to avoid overly general
+        type inference in e.g.  f # x == g # y
+        (due to constraint ?B(x) == ?C(y))
+        (seems right especially since structural unification is only employed
+        on maximally-delayed unifications, and we could even delay this
+        smash unification to the end of the structural unifications) *)
+      smash_flexflex ((F,Fty'), ss') ((G,Gty'), ts') env
+  end
+
+fun flexflex_eq_to_term_eq (((F,Fty), ss), ((G,Gty), ts)) =
+  (list_comb (Var(F,Fty), ss), list_comb (Var(G,Gty), ts))
+
+fun term_eq_of_flexflex (binders, flexflex_eq) = 
+  flexflex_eq_to_term_eq flexflex_eq
+  |> Logic.mk_equals
+  |> curry Logic.list_all binders
+
+val flexflex_eq = pairself term_eq_of_flexflex #> op aconv
+
+fun unify_flexflex thy (binders, flexflex_eq) =
+  unif thy binders (flexflex_eq_to_term_eq flexflex_eq)
+
+fun solve_delayed_flexflexs thy delayed_flexflexs env = 
+  case delayed_flexflexs of
+    [] => env
+  | flexflex :: delayed_flexflexs' =>
+      let
+        val (env_, delayed_flexflex_) = unify_flexflex thy flexflex (env, [])
+        fun flexflex_gone_case () = solve_delayed_flexflexs thy
+          (delayed_flexflexs' @ delayed_flexflex_) env_
+      in
+        case delayed_flexflex_ of 
+          [flexflex'] =>
+            if flexflex_eq (flexflex, flexflex') then
+              let
+                val env2 = solve_flexflex thy flexflex env
+                val (env3, delayed_flexflexs2) = (env2, [])
+                  |> fold (unify_flexflex thy) delayed_flexflexs'
+              in
+                solve_delayed_flexflexs thy delayed_flexflexs2 env3
+              end
+            else
+              flexflex_gone_case ()
+        | _ => flexflex_gone_case ()
+      end
+
+fun unify thy = unif thy []
 
 
 (* put a term into eta long beta normal form *)

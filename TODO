@@ -22,8 +22,8 @@
 
   
 (* TODO(feature)
-     * Prioritaeten nicht numerisch angeben sondern ueber Constraints an
-       Prioritaetrgraph spezifizieren
+     * Regel-Prioritaeten nicht numerisch angeben sondern ueber Constraints an
+       Prioritaetengraph spezifizieren
 
    TODO(opt)
      * reine Netze statt Item-Netze nutzen damit auch einfuegen von
@@ -836,10 +836,6 @@
     dem toplevel metarec Aufruf nutzen
   * metarec auf mehrere Judgement-Goals um Typinferenz mehrerer Propositionen
     mit Sharing von Variablen zu ermoeglichen
-  * metarec-basierte Typinferenz als Isabelle-Termelaborationsphase registrieren
-    (Constraints ueber spezielle Implikationen nach aussen kommunizieren)
-  * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten
-    Typinferenz als Annahmen im Kontext zu interpretieren
   * verzoegerte non-pattern Unifikationen doch besser vor Constraint-Vereinfachung durchfuehren,
     damit Vereinfachung auf den erfolgten Instantiierungen durchgefuehrt wird.
     Positiver Einfluss von Unifikationen waehrend der Constraint-Vereinfachung auf die
@@ -848,6 +844,15 @@
     die Constraints zu minimieren.
 
 
+
+
+  * resolution modulo metarec
+    * parametrisiert auf Mengensynthesejudgement (zumindest auf Universen-Granularitaet)
+      von elaborierten Termen um ZF-Lambdas,Produkte waehrend pattern unification
+      bilden zu koennen
+    * braucht zusaetzlichen Spezialkram fuer Universenlevel:
+        triv discharge constraints von Universenlevel die nicht (mehr) in prop vorkommen
+      durch max,max+succ hochzaehlen entlang i <=u j, i <u j Kanten
 *)
 
 
@@ -896,5 +901,9 @@
           Gesamtmenge C_0 impliziert. Sich wechselseitig-implizierende Constraints in C_0
           bleiben dabei erhalten
 
+  * metarec-basierte Typinferenz als Isabelle-Termelaborationsphase registrieren
+    (Constraints ueber spezielle Implikationen nach aussen kommunizieren)
+  * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten
+    Typinferenz als Annahmen im Kontext zu interpretieren
 
 *)
