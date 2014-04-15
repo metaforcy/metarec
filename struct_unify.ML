@@ -491,7 +491,6 @@ fun solve_flexflex thy (binders, (((F,Fty), ss), ((G,Gty), ts))) env =
     val (ss', ts') = pairself (map (Envir.norm_term env)) (ss, ts)
     val (Fty', Gty') = (Fty, Gty) |> pairself (Envir.norm_type (Envir.type_env env))
 
-    (* args1 subset args2 *)
     fun dep_restr_sol (v1, args1) (v2, args2) env =
       let
         val ctxt = Name.context |> fold Term.declare_term_names
@@ -501,36 +500,34 @@ fun solve_flexflex thy (binders, (((F,Fty), ss), ((G,Gty), ts))) env =
         val subst = curry subst_bounds bnd_frees
 
         val (args1', args2') = pairself (map subst) (args1, args2)
-        val t1 = list_comb (Var v1, args1')
-        val t1_args2_abs = t1 |> fold_rev Term.lambda args2'
+        val common_args = inter (op aconv) args1' args2'
+        val (v1_binderTs, v1_bodyT) = Term.strip_type (snd v1)
+        val (env2, newvar) = Envir.genvar (fst (fst v1)) (env,
+          map fastype_of common_args ---> drop (length args1') v1_binderTs ---> v1_bodyT)
 
-        val env2 = Envir.update ((v2, t1_args2_abs), env)
+        val common_body = list_comb(newvar, common_args)
+        val t1 = common_body |> fold_rev Term.lambda args1'
+        val t2 = common_body |> fold_rev Term.lambda args2'
+
+        val env3 = Envir.update ((v1, t1), env2)
+        val env4 = Envir.update ((v2, t2), env3)
         val _ = tracing ("flexflex2 dependency restriction solution for "
           ^Syntax.string_of_term_global thy
             (Logic.mk_equals (list_comb ((Var v1), args1'), list_comb ((Var v2), args2')))
-          ^":   "^Syntax.string_of_term_global thy (Var v2)^" := "
-          ^Syntax.string_of_term_global thy t1_args2_abs)
+          ^":   "
+          ^Syntax.string_of_term_global thy (Var v1)^" := " ^Syntax.string_of_term_global thy t1
+          ^Syntax.string_of_term_global thy (Var v2)^" := " ^Syntax.string_of_term_global thy t2)
       in
-        env2
+        env4
       end
   in
-    (* if ss subset ts (or symmetrically), we should reduce to the
-       variable with less dependencies (i.e. generalizing
+    (* NB: we intersect dependencies (i.e. generalizing
        the treatment in pattern unification), so that e.g.
        f # x == g # x results in f, g : (PROD x:A. B(x))
-       (due to constraint ?B(x) == ?C(x)) *)
-    if subset (op aconv) (ss', ts') then
-      dep_restr_sol ((F,Fty'), ss') ((G,Gty'), ts') env
-    else if subset (op aconv) (ts', ss') then
-      dep_restr_sol ((G,Gty'), ts') ((F,Fty'), ss') env
-    else
-      (* smash unification is used here to avoid overly general
-        type inference in e.g.  f # x == g # y
-        (due to constraint ?B(x) == ?C(y))
-        (seems right especially since structural unification is only employed
-        on maximally-delayed unifications, and we could even delay this
-        smash unification to the end of the structural unifications) *)
-      smash_flexflex ((F,Fty'), ss') ((G,Gty'), ts') env
+         (due to constraint ?B(x) == ?C(x)) 
+       and f # x == g # y results in f : ?X -> ?D, g : ?Y -> ?D
+         (due to constraint ?B(x) == ?C(y)) *)
+    dep_restr_sol ((F,Fty'), ss') ((G,Gty'), ts') env
   end
 
 fun flexflex_eq_to_term_eq (((F,Fty), ss), ((G,Gty), ts)) =

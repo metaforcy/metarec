@@ -122,6 +122,7 @@ abbreviation
   "A ~> B == ptprod(A, %_. B)"
 
 term "PI x:A~>univ. PI z:A. x # ((fun y. y) # z)"
+term "PI x:A. B"
 
 term "x : y"
 
@@ -149,17 +150,21 @@ definition
   metaelab_const :: "prop => prop => prop" ("metaelab _ _") where
   [MRjud 1 1]: "metaelab_const(P, P') == Trueprop(True)"
 definition
-  printsasjud :: "i => i => o" ("_ printsas _ ") where
+  printsasjud :: "'a::{} => 'b::{} => o" ("_ printsas _ " [10, 10] 10) where
   [MRjud 1 1]: "printsasjud(t, t') == True"
 definition
   synthty_const :: "i => i => o" ("_ synthty _") where
   [MRjud 1 1]: " t synthty A == t : A"
+
+
+lemma [MR]: "t printsas t" by (simp add: printsasjud_def)
 
 definition
   elabbrack :: "i => o" where
   "elabbrack(pt) == True"
 (* Dmitriy saves *)
 declare [[coercion "elabbrack :: i => o"]]
+(* TODO: invisible printing of elabbrack *)
 
 definition
   truenessbrack :: "i => o" where
@@ -409,6 +414,43 @@ lemma [MR]: "[|
   metaelab (PROP P &&& PROP Q) (PROP P' &&& PROP Q')"
   by (simp add: metaelab_const_def)
 
+
+
+
+
+lemma [MR]: "[|
+  !! x. (PROP P(x)) printsas (PROP P'(x))  |] ==>
+  (!! x. PROP P(x)) printsas (!! x. PROP P'(x))"
+  by (simp add: printsasjud_def)
+
+(* lemma [MR]: "[|
+  !! x. (PROP P(x)) printsas (PROP P'(x))  |] ==>
+  (!! x. x synthty A ==> PROP P(x)) printsas (!!st x. PROP P'(x))"
+  by (simp add: printsasjud_def) *)
+
+lemma [MR]: "[|
+    (PROP P) printsas (PROP P')  ;
+    (PROP Q) printsas (PROP Q')  |] ==>
+  (PROP P ==> PROP Q) printsas (PROP P' ==> PROP Q')"
+  by (simp add: printsasjud_def)
+
+lemma [MR]: "[|
+    PROP P printsas PROP P'  ;
+    PROP Q printsas PROP Q'  |] ==>
+  (PROP P &&& PROP Q) printsas (PROP P' &&& PROP Q')"
+  by (simp add: printsasjud_def)
+
+lemma [MR]: "[|
+    t printsas t'  |] ==>
+  Trueprop(truenessbrack(t)) printsas Trueprop(elabbrack(t'))"
+  by (simp add: printsasjud_def)
+
+(* TODO(feature): printing rule for  (x <: A) ==> PROP P
+     where x <: A is only printed if x occurs in printing of P *)
+lemma [MR]: "[|
+    A printsas A'  |] ==>
+  Trueprop(x <: A) printsas Trueprop(x <: A')"
+ by (simp add: printsasjud_def)  
 
 
 
@@ -902,7 +944,7 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 (* test of smash unification ?B(x) == ?B(y) *)
 ML {* elab @{context} @{term "f # x === f # y"} *}
 
-(* NB: smash-unification of ?B(x) == ?B2(y) from result types of f,g
+(* NB: dependency intersection unification of ?B(x) == ?B2(y) from result types of f,g
      avoids too general type with mutual x,y dependency lifting *)
 ML {* elab @{context} @{term "f # x === g # y"} *}
 
@@ -910,7 +952,16 @@ ML {* elab @{context} @{term "f # x === g # y"} *}
 ML {* elab @{context} @{term "f # x === g # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # y"} *}
+(* FIXME? overly general inferred type? *)
+(* FIXME: needs better contextual discharge *)
 ML {* elab @{context} @{term "f # x === g # y # x"} *}
+(* FIXME? overly general inferred type? *)
+(* FIXME: needs better contextual discharge *)
+ML {* elab @{context} @{term "f # x # z === g # y # x"} *}
+
+(* FIXME? overly general inferred type? *)
+(* FIXME: needs better contextual discharge *)
+ML {* elab @{context} @{term "f # z # x === g # y # x"} *}
 
 (* test of delay of flexflex unifications *)
 ML {* elab @{context} @{term "f # x # y === g # x # y"} *}
@@ -1489,17 +1540,28 @@ ML_file "../isar_integration.ML"
 
 
 ML {*
-  fun elab_infer ts ctxt =
+  structure ElabAndPrintingTagging = Proof_Data(
+     type T = { printing_enabled : bool, elaborated : bool}
+     fun init thy = { printing_enabled = true, elaborated = false }
+  );
+
+  val set_elaborated =
+     ElabAndPrintingTagging.map (fn {printing_enabled, elaborated} =>
+       {printing_enabled=printing_enabled, elaborated=true})
+  fun set_printing_enabled b =
+     ElabAndPrintingTagging.map (fn {printing_enabled, elaborated} =>
+       {printing_enabled=b, elaborated=elaborated})
+
+  fun elab_infer ts ctxt0 =
     let
-      (* TODO: elaborate under Trueprops, elabbracks *)
+      val ctxt = ctxt0 |> set_printing_enabled false
       val _ = tracing ("input of inference: "^commas (ts |> map (Syntax.string_of_term ctxt)))
 
-      val ((pt_props, other_ts), recomb_ts) = ts
-        |> MetaRec.filter_split (fn t =>
-          fastype_of t = Term.propT andalso
-          member (op =) (Term.add_const_names t []) @{const_name "elabbrack"})
+      val ((pt_props, other_ts), recomb_ts) = ts |> MetaRec.filter_split (fn t =>
+        fastype_of t = Term.propT andalso
+        member (op =) (Term.add_const_names t []) @{const_name "elabbrack"})
     in
-      if null pt_props then
+      if null pt_props orelse (ElabAndPrintingTagging.get ctxt |> # elaborated) then
         NONE
       else
         let
@@ -1525,14 +1587,41 @@ ML {*
           val _ = tracing ("elaborated\n  "^commas (pt_props |> map (Syntax.string_of_term ctxt))
             ^"\nto\n  "^commas (unconstrained_props' |> map (Syntax.string_of_term ctxt)))
         in
-          SOME (recomb_ts unconstrained_props' other_ts, ctxt)
+          SOME (recomb_ts unconstrained_props' other_ts, set_elaborated ctxt)
         end
     end
+
+
+  fun elab_printing ts ctxt0 =
+    if ElabAndPrintingTagging.get ctxt0 |> #printing_enabled |> not then
+      NONE
+    else
+      let
+        (* avoids looping due to tracing outputs of metarec derivations *)
+        val ctxt = ctxt0 |> set_printing_enabled false
+
+        (* NB: using makestring to avoid looping *)
+        val _ = tracing ("printing on "^commas (map PolyML.makestring ts))
+
+        fun print elab_t =
+          MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.printsasjud_n (elab_t, [])
+          |> snd |> hd
+        val ((elab_props, other_ts), recomb_ts) = ts |> MetaRec.filter_split (fn t =>
+          fastype_of t = Term.propT andalso
+          member (op =) (Term.add_const_names t []) @{const_name "truenessbrack"})
+      in
+        if null elab_props then
+          NONE
+        else
+          let val printed_props = map print elab_props
+          in SOME (recomb_ts printed_props other_ts, ctxt) end
+      end
 *}
 
 setup {*
   Context.theory_map
-    (Syntax_Phases.term_check' ~100 "elab_infer" elab_infer)
+    (Syntax_Phases.term_check' ~100 "elab_infer" elab_infer
+     #> Syntax_Phases.term_uncheck' 100 "elab_printing" elab_printing)
 *}
 
 
