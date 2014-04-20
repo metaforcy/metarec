@@ -234,6 +234,14 @@ lemma fresh_unifvarI: "freshunifvar x"
   by (simp add: fresh_unifvar_const_def)
 
 
+definition
+  dep_restr_const :: "'a::{} => 'b::{} => prop" ("deprestr _ _") where
+  "dep_restr_const(t1, t2) == Trueprop(True)"
+
+lemma deprestrI: "deprestr t1 t2"
+  by (simp add: dep_restr_const_def)
+
+
 
 definition
   expl_app :: "('a :: {} => 'b :: {}) => 'a => 'b" (infixr "$" 200) where
@@ -275,10 +283,12 @@ ML {*
     val constraintI = @{thm constraintI}
     val foconstraint_headterm = @{term foconstraint_const} |> max_polym
     val foconstraintI = @{thm foconstraintI}
-    val unify_headterm = @{term unify_const} |> max_polym
-    val unifyI = @{thm unifyI}
     val fresh_unifvar_headterm = @{term fresh_unifvar_const} |> max_polym
     val fresh_unifvarI = @{thm fresh_unifvarI}
+    val unify_headterm = @{term unify_const} |> max_polym
+    val unifyI = @{thm unifyI}
+    val deprestr_headterm = @{term "dep_restr_const"} |> max_polym
+    val deprestrI = @{thm deprestrI}
 
     val note_headterm = @{term note_const} |> max_polym
     val note_const_def = @{thm note_const_def}

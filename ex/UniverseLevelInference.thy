@@ -549,11 +549,11 @@ term "MssPI x : A. B"
 
 (* NB: the next 2 rules feature a B(x) non-pattern in non-primary input position.
    They can only be applied usefully by metarec if x is a free variable, esp. a fixed one. *)
-  
+ 
 (* TODO: unchecked for now because variable availability analysis is
      cautious about non-pattern match against input B(x) *)
 lemma typ_constraint_ctxt_discharge_MR[MR_unchecked]: "[|
-     try (x :> A)  ;
+     try (x :> A)  ;  deprestr f A  ;
      f <:: MsPI x : A. B(x)  |] ==>
    f(x) <:: B(x)"
   unfolding try_const_def unify_const_def elabjud_def
@@ -564,7 +564,7 @@ lemma typ_constraint_ctxt_discharge_MR[MR_unchecked]: "[|
 (* TODO: unchecked for now because variable availability analysis is
      cautious about non-pattern match against input B(x) *)
 lemma typ_constraint_ctxt_discharge_MR2[MR_unchecked]: "[|
-     try (x :> A)  ;
+     try (x :> A)  ;  deprestr f A  ;
      f <:: MssPI x : A. B(x) |] ==>
    f(x) <: B(x)"
   unfolding try_const_def unify_const_def elabjud_def
@@ -814,7 +814,7 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 
-
+(* minor FIXME: stupid __reordfree0 bound variable name. can actually be eta-contracted away here *)
 ML {*  elab @{context} @{term "f # (fun g. g # x) # y"}  *}
 
 ML {*  elab @{context} @{term "(fun f. f # (fun y. (fun x. (fun g. g # x)) # y))"}  *}
@@ -952,15 +952,11 @@ ML {* elab @{context} @{term "f # x === g # y"} *}
 ML {* elab @{context} @{term "f # x === g # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # y"} *}
-(* FIXME? overly general inferred type? *)
-(* FIXME: needs better contextual discharge *)
 ML {* elab @{context} @{term "f # x === g # y # x"} *}
-(* FIXME? overly general inferred type? *)
-(* FIXME: needs better contextual discharge *)
 ML {* elab @{context} @{term "f # x # z === g # y # x"} *}
 
-(* FIXME? overly general inferred type? *)
-(* FIXME: needs better contextual discharge *)
+(* FIXME: one guniv-typing constraint does not get contextually discharged,
+   because no dependence on context *)
 ML {* elab @{context} @{term "f # z # x === g # y # x"} *}
 
 (* test of delay of flexflex unifications *)
@@ -986,8 +982,6 @@ ML {*  elab_with_expected_error "universe_inconsistency" @{context}
 
 
 (* test of postprocessing that unlifts of first-order vars (here: universe level vars) *)
-(* FIXME: undischarged context of (?B482(x__, guniv ?i97)_ <: guniv ?i22) constraint
-     because of non-variable argument. revision/specialization of structural unification algo? *)
 ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
 
 
@@ -1601,7 +1595,7 @@ ML {*
         val ctxt = ctxt0 |> set_printing_enabled false
 
         (* NB: using makestring to avoid looping *)
-        val _ = tracing ("printing on "^commas (map PolyML.makestring ts))
+        val _ = tracing ("printing on "^commas (map (Syntax.string_of_term ctxt) ts))
 
         fun print elab_t =
           MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.printsasjud_n (elab_t, [])
@@ -1679,7 +1673,7 @@ qed
 
 locale test =
  fixes y z
- assumes H:"y === z" (* FIXME: constraints of H should be assumed too *)
+ assumes H:"y === z" (* TODO: constraints of H should be assumed too *)
 begin
   thm H
 

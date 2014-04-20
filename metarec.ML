@@ -21,6 +21,8 @@ sig
   val fresh_unifvarI: thm (* fresh_unifvar X *)
   val unify_headterm : term
   val unifyI : thm (* t1 == t2 ==> unify t1 t2 *)
+  val deprestr_headterm : term
+  val deprestrI : thm (* deprestr t1 t2 *)
 
   val note_headterm : term (* Const(note_const_name, ...) *)
   val note_const_def : thm  (* note_const P name == P *)
@@ -418,6 +420,7 @@ val note_jud = "note_jud"
 val concat_names_jud = "concat_names_jud"
 val fresh_unifvar_jud = "fresh_unifvar_jud"
 val unify_jud = "unify_jud"
+val deprestr_jud = "deprestr_jud"
 val constraint_jud = "constraint_jud"
 val foconstraint_jud = "foconstraint_jud"
 
@@ -2286,7 +2289,7 @@ fun abstr_inst (avail_vars, avail_tvars) =
 (* TODO(refactor): realize with fold_varapps; but normalization on each step is in the way.
      necessary if variables are sometimes partially applied, but this should not be the case
      for freshunifvar-generated ones.  *)
-fun unlift_unifvar_occs t0 ctxt =
+fun unlift_unifvar_occs allowed_deps t0 ctxt =
   let
     (* from Pure/term.ML *)
     fun term_name (Const (x, _)) = Long_Name.base_name x
@@ -2316,20 +2319,26 @@ fun unlift_unifvar_occs t0 ctxt =
                 val bnds_frees = ts_bnds_ns ~~ map typeof ts_bnds |> map Free
                 val ts_bnds_to_frees = ts_bnds ~~ bnds_frees
 
-                val T' = map typeof ts_bnds ---> drop (length ts) (binder_types T) ---> body_type T
+                val allowed_nonbnd_ts = ts |> filter_out Term.is_Bound
+                  |> inter (aconv_norm (norm_with_env_in_run_state ctxt)) allowed_deps
+
+                val T' = map typeof (ts_bnds @ allowed_nonbnd_ts)
+                  ---> drop (length ts) (binder_types T) ---> body_type T
                 val (v', ctxt2) = genvar_on_run_state n T' ctxt
                 (* NB: ts_nonbnds do not occur in v' of course, so this corresponds to unlifting and
                    loose bounds in ts don't matter *)
-                val v'_abs = Term.list_comb(v', bnds_frees) |> fold_rev (fn t => fn body =>
-                    let val t' = case AList.lookup (op =) ts_bnds_to_frees t of
-                        SOME free => free
-                      | NONE => t
-                    in
-                      Abs(term_name t', typeof t', Term.abstract_over (t', body))
-                    end)
-                  ts
+                val v'_abs = Term.list_comb(v', bnds_frees @ allowed_nonbnd_ts)
+                  |> fold_rev (fn t => fn body =>
+                      let val t' = case AList.lookup (op =) ts_bnds_to_frees t of
+                          SOME free => free
+                        | NONE => t
+                      in
+                        Abs(term_name t', typeof t', Term.abstract_over (t', body))
+                      end)
+                    ts
               in
-                ctxt2 |> Context.proof_map (map_env_in_run_state (curry Envir.update ((ixn, T), v'_abs)))
+                ctxt2 |> Context.proof_map (map_env_in_run_state
+                  (curry Envir.update ((ixn, T), v'_abs)))
               end
         | (Abs(n, T, t2), []) => unlift ((n,T) :: boundsTs) t2 ctxt
         | (Abs _, _) => error ("unlift_unifvar_occs: internal error: term not beta normal")
@@ -3963,7 +3972,7 @@ and metarec_structural_unifications final_unifs prf ctxt =
                     ^Syntax.string_of_term ctxt_ (Var (fo_var, Term.fastype_of t))
                     ^" := "^str_of_normed_term ctxt_ t) *)
                  (* NB: we rely on env-normalization of t inside unlift_unifvar_occs *)
-                 in unlift_unifvar_occs t ctxt_ end
+                 in unlift_unifvar_occs [] t ctxt_ end
              | NONE => ctxt_)
            fo_vars
 
@@ -5811,6 +5820,19 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
     handle TryPatUnify (ctxt, (bad_t1, bad_t2), msg) =>
       fail_cont ctxt ("unify_proc: "^msg)
   end
+
+
+fun deprestr_proc ctxt fail_cont (t1, [t2], _) =
+  let
+    val (t1', t2') = pairself (norm_with_env_in_run_state ctxt) (t1, t2)
+    val allowed_deps =
+      let val rel_frees = [] |> fold Term.add_frees (strip_comb t1' |> snd)
+      in rel_local_frees ctxt (SOME rel_frees) end
+    val ctxt2 = unlift_unifvar_occs allowed_deps t2' ctxt
+    val (res_prf, ctxt3) = inst_match_on_freshthm_prf Data.deprestrI [SOME t1', SOME t2'] ctxt2
+  in 
+    ((res_prf, []), SOME (get_the_run_state (Context.Proof ctxt3)))
+  end
   
 
 fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
@@ -5821,7 +5843,7 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
       if local_constraint then ctxt
       else
         let
-          val ctxt2_ = ctxt |> unlift_unifvar_occs t0
+          val ctxt2_ = ctxt |> unlift_unifvar_occs [] t0
           val t_ = norm_with_env_in_run_state ctxt2_ t0
           (* val fovars = Term.add_vars t_ [] |> map fst *)
         in
@@ -5931,12 +5953,14 @@ val setup =
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 1 1 concat_names_jud Data.concat_names_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 1 fresh_unifvar_jud Data.fresh_unifvar_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 1 0 unify_jud Data.unify_headterm
+       #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 1 0 deprestr_jud Data.deprestr_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 0 constraint_jud Data.constraint_headterm
        #> gen_add_nplace_synth_jud DisallowInconsis ProcJud NONE 0 0 foconstraint_jud Data.foconstraint_headterm)
   #> Context.theory_map (
        add_syn_proc concat_names_jud "concat_names_proc" concat_names_proc
        #> add_general_syn_proc fresh_unifvar_jud "fresh_unifvar_proc" fresh_unifvar_proc
        #> add_general_syn_proc unify_jud "unify_proc" unify_proc
+       #> add_general_syn_proc deprestr_jud "deprestr_proc" deprestr_proc
        #> add_general_syn_proc constraint_jud "constraint_gen_proc" (constraint_gen_proc true)
        #> add_general_syn_proc foconstraint_jud "foconstraint_gen_proc" (constraint_gen_proc false)
        #> add_lthy_transform define_jud  "define" define_lthy_transf)
