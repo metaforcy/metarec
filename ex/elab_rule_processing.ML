@@ -112,6 +112,15 @@ struct
        else (Thm.equal_elim eq th, st2)
      end;
 
+   fun exact_rewr_conv th ct =
+     if Thm.term_of ct aconv (Thm.lhs_of th |> Thm.term_of) then
+       Conv.rewr_conv th ct
+     else
+       Conv.no_conv ct
+
+   fun exact_bottomup_rewrs_conv ths = 
+     Conv.bottom_conv (fn _ => Conv.try_conv (Conv.first_conv (map exact_rewr_conv ths)))
+
 
 
 (* Inferenz von Syntheseregeln aus Elaborierungsregeln
@@ -236,6 +245,8 @@ struct
       val (synth_rl3, grnd_vars) = (synth_rl2, grnd_vars0)
         |-> fold_fconv_rule (fold_prems_conv ~1 constraint_cv)
       val ground = ground grnd_vars
+      (* val _ = tracing ("ground variables: "
+        ^commas (grnd_vars |> map (Var #> Syntax.string_of_term ctxt2))) *)
 
 
       val freshunifvar_decls = Thm.prems_of synth_rl3 |> map_filter (fn prem =>
@@ -247,11 +258,17 @@ struct
         |> filter (fn uv => not (is_Var uv) orelse ground uv)
       (* val _ = tracing ("elim_freshunifvar_decls: "^commas (elim_freshunifvar_decls
         |> map (Syntax.string_of_term ctxt2))) *)
+      val elim_freshunifvar_rews = elim_freshunifvar_decls |> map (fn uv => @{thm freshunifvar_triv_rewr}
+        |> Drule.instantiate' [SOME (ctyp_of thy (fastype_of uv))] [SOME (cterm_of thy uv)])
+      (* val _ = tracing ("elim_freshunifvar_rews: "^commas (elim_freshunifvar_rews
+        |> map (Display.string_of_thm ctxt2))) *)
+
       val ss3 = Simplifier.context ctxt2 Raw_Simplifier.empty_ss
-        addsimps (elim_freshunifvar_decls |> map (fn uv => @{thm freshunifvar_triv_rewr}
-          |> Drule.instantiate' [SOME (ctyp_of thy (fastype_of uv))] [SOME (cterm_of thy uv)]))
-        addsimps [@{thm true_mimp_rewr}]
-      val synth_rl4 = synth_rl3 |> Simplifier.full_simplify ss3
+        addsimps ([@{thm true_mimp_rewr}])
+      val synth_rl4 = synth_rl3
+        (* NB: exact rewriting to avoid temporary fixing of unifvar *)
+        |> Conv.fconv_rule (exact_bottomup_rewrs_conv elim_freshunifvar_rews ctxt2)
+        |> Simplifier.full_simplify ss3
 
       (* val _ = tracing ("derived synthesis rule\n  "^Display.string_of_thm ctxt2 synth_rl4) *)
     in

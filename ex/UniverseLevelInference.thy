@@ -63,6 +63,10 @@ where
   guniv_in_guniv: "[|  i : nat  ;  j : nat  ;  i < j |] ==> guniv i : guniv j"
 
 
+lemma zero_in_guniv: "i : nat ==> 0 : guniv i"
+  apply (rule trans_guniv[where x=0, where A=nat])
+  apply assumption apply simp by (rule nat_in_guniv)
+
 
 lemma guniv_cumul: "[|  i : nat  ;  j : nat  ;  i le j ;  x : guniv i |] ==> x : guniv j"
   apply (cases "i = j") apply simp
@@ -131,9 +135,32 @@ term "x : y"
 definition
   typed_eq ("_ ===[_] _") where
   "typed_eq(x,A,y) == if (x = y) then 1 else 0"
+definition
+  typed_pair :: "i => i => i => i" ("<_, _> typed _") where
+  "typed_pair(t1, t2, A) == <t1, t2>"
 
 
+(* TODO(tradeoff): annotating PRODs with universe levels speeds up type synthesis
+   (no introduction of universe levels and constraints for them necessary,
+    but we need a checking judgement),
+   but has to introduce more universe levels during elaboration.  *)
+definition
+  univannot_prod where
+  "univannot_prod(k, A, B) = Pi(A, B)"
 
+syntax
+  "_PRODu"     :: "[i, pttrn, i, i] => i"  ("(3PRODu _ _:_./ _)" 10)
+translations
+  "PRODu i x:A. B" == "CONST univannot_prod(i, A, %x. B)"
+
+abbreviation
+  simple_univannot_fun :: "i => i => i => i" ("_ ->[_] _" 60) where
+  "(A ->[i] B) == (PRODu i _:A. B)"
+
+term "PRODu i x:A. B(x)"
+term "A ->[k] B"
+(* FIXME: does not translate to simple_univannot_fun *)
+term "PRODu i _:A. B"
 
 
 
@@ -241,6 +268,10 @@ definition
   univ_leq (infixl "u<=" 50) where
   [MRjud 2 0]: "univ_leq(x,y) == x le y"
 
+definition
+  univ_max (infixl "umax" 80) where
+  "i umax j == max(i,j)"
+
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 (* low prio rule for type inference of free variable x *)
 (* TODO(opt)?: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
@@ -266,31 +297,7 @@ lemma [elabMR_unchecked]: "[|
   f(x) elabto f(x) : A"
  unfolding elabjud_def constraint_const_def foconstraint_const_def constraint_typing_def .
 
-lemma [elabMR]: "[|
-    t1 elabto t1' : T  ;
-    t2 elabto t2' : T'  ;
-    unify T T' |] ==>
-  (t1 === t2) elabto (t1' ===[T] t2') : bool"
-  unfolding bool_def elabjud_def typed_eq_def
-  by simp
 
-(* NB: no printsas, synth rule for this *)
-(* TODO: discharge universe level constraints that are only necessary from elaboration of A
-  (after completed elaboration) *)
-lemma [MR_unchecked]: "[|
-    t elabto t' : A'  ;
-    A elabto A'2 : U  ;
-    unify A' A'2  |] ==>
-  (t annotyped A) elabto t' : A'"
-  unfolding elabjud_def .
-
-(* NB: no printsas, synth rule for this, rule for printing variables
-   and variable type synthesis assumption is used instead  *)
-lemma [MR_unchecked]: "[|
-    freshunifvar x  ;  freshunifvar A  ;  freshunifvar i  ;
-    constraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  constraint (x <: A) |] ==>
-  ? elabto x : A"
- unfolding elabjud_def constraint_const_def constraint_typing_def .
 
 lemma [elabMR_unchecked]: "[|
     t1 elabto t1' : T  ;
@@ -305,7 +312,6 @@ lemma [elabMR_unchecked]: "[|
 
 
 
-
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [elabMR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
@@ -316,11 +322,10 @@ lemma [elabMR_unchecked]: "[|
   by (rule lam_type)
 
 
-
-
 (* NB: not elabMR registered to avoid overlapping printsas rule with rule above *)
 lemma [MR]: "[|
-    A elabto A' : guniv i  ;
+    A elabto A' : U  ;
+    freshunifvar i  ;  unify U (guniv i)  ;  foconstraint (i <: univlvl)  ;
     !! x.  x elabto x : A'  ==>  t(x) elabto t'(x) : B(x)  |] ==>
   (lam x:A. t(x)) elabto (lam x:A'. t'(x)) : (PROD x:A'. B(x))"
   unfolding elabjud_def fresh_unifvar_const_def
@@ -328,14 +333,19 @@ lemma [MR]: "[|
 
 
 
-
-lemma [elabMR]: "[|
-    A elabto A' : guniv i  ;  foconstraint (i <: univlvl)  ;
-    !! x.  x elabto x : A'  ==>  B(x) elabto B'(x) : guniv j  ;  foconstraint (j <: univlvl)  ;
+(* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
+(* NB: no direct matching of U, U2 against (guniv _) because U, U2 could
+     be type unification variables *)
+lemma PI_elab[elabMR_unchecked]: "[|
+    A elabto A' : U  ;
+    freshunifvar i  ;  unify U (guniv i)  ;  foconstraint (i <: univlvl)  ;
+    !! x.  x elabto x : A'  ==>  B(x) elabto B'(x) : U2(x)  ;
+    freshunifvar j  ;  unify U2 (% x. guniv j)  ;  foconstraint (j <: univlvl)  ;
     freshunifvar k  ;  foconstraint (k <: univlvl)  ;  foconstraint (i u<= k)  ;
     foconstraint (j u<= k)  |] ==>
   (PI x:A. B(x)) elabto (PROD x:A'. B'(x)) : guniv k"
   unfolding elabjud_def foconstraint_const_def constraint_typing_def fresh_unifvar_const_def univ_leq_def univlvl_def
+  apply (simp add: unify_const_def)
   apply (rule prod_in_guniv)
   apply assumption
   apply (rule guniv_cumul[of i k], assumption+)
@@ -369,6 +379,62 @@ lemma [elabMR]: "[|
     freshunifvar i  ;  foconstraint (i <: univlvl)  |] ==>
   univlvl elabto univlvl : (guniv i)"
   apply (subst univlvl_def, subst univlvl_def) by (rule natelab)
+
+
+lemma [elabMR]: "[|
+    t1 elabto t1' : T  ;
+    t2 elabto t2' : T'  ;
+    unify T T' |] ==>
+  (t1 === t2) elabto (t1' ===[T] t2') : bool"
+  unfolding bool_def elabjud_def typed_eq_def
+  by simp
+
+(* NB: no printsas, synth rule for this *)
+(* TODO: discharge universe level constraints that are only necessary from elaboration of A
+  (after completed elaboration) *)
+lemma [MR_unchecked]: "[|
+    t elabto t' : A'  ;
+    A elabto A'2 : U  ;
+    unify A' A'2  |] ==>
+  (t annotyped A) elabto t' : A'"
+  unfolding elabjud_def .
+
+(* NB: no printsas, synth rule for this, rule for printing variables
+   and variable type synthesis assumption is used instead  *)
+lemma [MR_unchecked]: "[|
+    freshunifvar x  ;  freshunifvar A  ;  freshunifvar i  ;
+    constraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  constraint (x <: A) |] ==>
+  ? elabto x : A"
+ unfolding elabjud_def constraint_const_def constraint_typing_def .
+
+(* TODO: dependent pairs based on local type inference
+   or explicitly typed syntax     <t1, t2> annotyped SIGMA x:T1. T2(x)
+   or mixture via partially annotyped elaboration invocation for implicit arguments
+   (which loosely corresponds to purely syntactic local type inference?) *)
+(* lemma [elabMR]: "[|
+    t1 elabto t1' : A1  ;
+    t2 elabto t2' : A2  |] ==>
+    <t1, t2> elabto (<t1', t2'> typed (A1 * A2)) : A1 * A2"
+  unfolding elabjud_def typed_pair_def by (rule SigmaI) *)
+
+(* the insane unificationist approach! no synthty rule inference because
+   of fancy abstract non-pattern unification constraint (abstract solution
+   might be possible via structural unification) *)
+lemma [MR]: "[|
+    t1 elabto t1' : A  ;
+    freshunifvar B  ;
+    t2 elabto t2' : T2  ;
+    unify (B(t1')) T2 |] ==>
+    <t1, t2> elabto (<t1', t2'> typed (SUM x:A. B(x))) : (SUM x:A. B(x))"
+  by (simp add: elabjud_def unify_rev_def typed_pair_def)
+lemma [MR]: "[|
+    t1' printsas t1  ;  t2' printsas t2  |] ==>
+  (<t1', t2'> typed A) printsas <t1, t2>"
+  by (simp add: printsasjud_def)
+lemma [MR]: "[|
+    t1' synthty A  ;  t2' synthty B(t1')  |] ==>
+  (<t1', t2'> typed (SUM x:A. B(x)))  synthty (SUM x:A. B(x))"
+  by (simp add: synthty_const_def typed_pair_def)
 
 
 
@@ -570,6 +636,14 @@ lemma typ_constraint_ctxt_discharge_MR2[MR_unchecked]: "[|
   unfolding try_const_def unify_const_def elabjud_def
     constraint_typing_def constraint_meta_typ_def mPi_def
     syn_constraint_typing_def
+  by simp
+
+lemma typ_constraint_ctxt_discharge_MR3[MR_unchecked]: "[|
+     try (x :> A)  ;  deprestr f A  ;
+     f <: PROD x:A. B(x) |] ==>
+   f ` x <: B(x)"
+  unfolding try_const_def unify_const_def elabjud_def
+    constraint_typing_def syn_constraint_typing_def
   by simp
 
 
@@ -931,6 +1005,167 @@ lemma [constraint_propag_rule]: "[|  unify A A2  ; t <:: A &&& t <:: A2 |] ==> T
   by (simp add: constraint_const_def unify_const_def conjunctionI)
 
 
+lemma uless_base: "i <: univlvl ==> i u< succ(i)"
+  by (simp add: univ_less_def univlvl_def constraint_typing_def)
+  (* NB: univlvl typing premises only necessary for uniformity *)
+lemma uless_umax1: "i u< i' ==> i' <: univlvl ==> j <: univlvl ==> i u< i' umax j"
+  apply (simp add: univ_max_def univ_less_def max_def)
+  apply (rule impI) by (rule Ordinal.lt_trans2)
+lemma uless_umax2: "j u< j' ==> i <: univlvl ==> j' <: univlvl ==> j u< i umax j'"
+  apply (simp add: univ_max_def univ_less_def max_def univlvl_def constraint_typing_def)
+  apply (rule impI) apply (simp add: not_le_iff_lt) by (rule Ordinal.lt_trans)
+
+lemma uleq_base: "i <: univlvl ==> i u<= i"
+  by (simp add: univ_leq_def univlvl_def constraint_typing_def)
+  (* NB: univlvl typing premises only necessary for uniformity *)
+lemma uleq_umax1: "i u<= i' ==> i' <: univlvl ==> j <: univlvl ==> i u<= i' umax j"
+  apply (simp add: univ_max_def univ_leq_def max_def)
+  apply (rule impI) by (rule Ordinal.le_trans)
+lemma uleq_umax2: "j u<= j' ==> i <: univlvl ==> j' <: univlvl ==> j u<= i umax j'"
+  apply (simp add: univ_max_def univ_leq_def max_def univlvl_def constraint_typing_def)
+  apply (rule impI) apply (simp add: not_le_iff_lt) by (rule leI, rule Ordinal.lt_trans1)
+
+lemma umax_univlvl_ty: "i <: univlvl ==> j <: univlvl ==> (i umax j) <: univlvl"
+  by (simp add: univ_max_def max_def)
+lemma zero_univlvl_ty: "0 <: univlvl"
+  by (simp add: univlvl_def constraint_typing_def)
+lemma succ_univlvl_ty: "i <: univlvl ==> succ(i) <: univlvl"
+  by (simp add: univlvl_def constraint_typing_def)
+
+
+
+ML_file "hidden_univlvl_discharge.ML"
+
+
+ML {*
+  fun opt_Trueprop_ct2t ct =
+    let val t = Thm.term_of ct
+    in
+      if fastype_of t = @{typ prop} then t
+      else FOLogic.mk_Trueprop t
+    end
+
+  fun test_univlvl_discharge ctxt0 Cs_cts expected_uninst_uls_cprops =
+    let
+      val Cs = Cs_cts |> map opt_Trueprop_ct2t
+      val expected_uninst_uls = expected_uninst_uls_cprops
+          |> map (opt_Trueprop_ct2t #> HiddenUnivlvlDischarge.dest_univlvl ctxt0 #> the)
+        handle Option => error ("test_univlvl_discharge: one of the expected_uninst_ul propositions "
+         ^"is not a universe level typing constraint judgement") 
+
+
+      val ctxt0 = ctxt0 |> fold Variable.declare_term Cs
+        |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
+      val ctxt = ctxt0
+        |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
+        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K Cs))
+      val ((simpth, uninst_uls, inst_uls), _) =
+        HiddenUnivlvlDischarge.calc_hidden_terminal_univlvl_discharge Cs ctxt
+
+      val _ =
+        if eq_set (op aconv) (uninst_uls, expected_uninst_uls) then ()
+        else
+          error ("test_univlvl_discharge: expected different universe level instantiation\n"
+            ^commas (uninst_uls |> map (Syntax.string_of_term ctxt))
+            ^"\nvs  "^commas (expected_uninst_uls |> map (Syntax.string_of_term ctxt)))
+     in
+       (simpth, uninst_uls, inst_uls |> map (pairself (cterm_of @{theory})))
+     end
+
+*}
+
+
+ML {*
+  test_univlvl_discharge @{context}
+   [@{cpat "?i <: univlvl"}, @{cpat "?j <: univlvl"}, @{cpat "?k <: univlvl"},
+    @{cpat "?i u< ?j"}, @{cpat "?i u< ?k"},
+    @{cpat "?A <: guniv ?i"}]
+   [@{cpat "?i <: univlvl"}]
+*}
+
+ML {*
+  test_univlvl_discharge @{context}
+   [@{cpat "?i <: univlvl"}, @{cpat "?j <: univlvl"}, @{cpat "?k <: univlvl"},
+    @{cpat "?i u< ?k"}, @{cpat "?j u< ?k"},
+    @{cpat "?A <: guniv ?i"}]
+   [@{cpat "?i <: univlvl"}]
+*}
+
+ML {*
+  test_univlvl_discharge @{context}
+   [@{cpat "?i <: univlvl"}, @{cpat "?j <: univlvl"}, @{cpat "?k <: univlvl"},
+    @{cpat "?i u< ?k"}, @{cpat "?j u< ?k"},
+    @{cpat "?A <: guniv ?i"}, @{cpat "?B <: guniv ?j"}]
+   [@{cpat "?i <: univlvl"}, @{cpat "?j <: univlvl"}]
+*}
+
+setup {*
+  Context.theory_map (MetaRec.add_constraint_simproc true
+    HiddenUnivlvlDischarge.hidden_terminal_univlvl_discharge_simproc)
+*}
+
+
+definition
+  metawitnessuniv_const ("metawitnessuniv _ _") where
+  [MRjud 1 1]: "metawitnessuniv A t == PROP A(t)"
+definition
+  witnessuniv_const ("witnessuniv _ _") where
+  [MRjud 1 1]: "witnessuniv A t == t : A"
+
+(* TODO: synthproc that checks whether x is a variable that is not contained
+    in "the proposition" (registered during constraint simplification)
+    (specification of nonhiddenness would be even better:
+       in t elabto t' : A' only the variables in t' and A' are nonhidden) *)
+definition
+  hiddenvar_const ("hiddenvar _") where
+  [MRjud 1 0]: "hiddenvar x == True"
+
+
+lemma [MR]: "constraint (i <: univlvl) ==>
+  witnessuniv (guniv i) 0"
+  apply (simp add: witnessuniv_const_def constraint_const_def
+    constraint_typing_def univlvl_def)
+  by (rule zero_in_guniv)
+
+lemma [MR]: "[|
+    !! x. witnessuniv (B(x)) t |] ==>
+  witnessuniv (PROD x : A. B(x)) (lam x:A. t)"
+  apply (simp add: witnessuniv_const_def)
+  by (rule lam_type)
+
+
+lemma [MR]: "[|
+    !! x. witnessuniv (B(x)) t |] ==>
+  metawitnessuniv (MssPI x : A. B(x)) (% x. t)"
+  by (simp add: witnessuniv_const_def metawitnessuniv_const_def mPi_def)
+
+lemma [MR]: "[|
+    !! x. metawitnessuniv (B(x)) t |] ==>
+  metawitnessuniv (MsPI x : A. B(x)) (% x. t)"
+  by (simp add: metawitnessuniv_const_def mPi_def)
+
+
+lemma [constraint_simp_rule]: "[|
+    try (hiddenvar x)  ;  try (witnessuniv A t)  ;  unify x t  |] ==>
+  x <: A"
+  by (simp add: try_const_def witnessuniv_const_def unify_const_def constraint_typing_def)
+
+lemma [constraint_simp_rule]: "[|
+    try (hiddenvar x)  ;  try (metawitnessuniv A t)  ;  unify x t  |] ==>
+  x <:: A"
+  by (simp add: try_const_def metawitnessuniv_const_def unify_const_def
+    constraint_meta_typ_def)
+
+
+
+(* TODO: constraint simp procs die eine constraint simp rule dynamisch (auf Basis
+     aller aktuell vorliegenden Constraints) generieren
+     (ggf. unter Modifikation des Kontext, insbes Instantiierungen),
+     die dann einmal ausgefuehrt wird
+     (und entstehende Constraints werden normal hinzugefuegt) *)
+
+
+
 
 ML {*  elab_with_expected_error "unification of * and * failed" @{context} @{term "x # x"} *}
 
@@ -941,6 +1176,30 @@ ML {*  elab @{context} @{term "f # x"}  *}
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
 
+(* tests for insane dependent pair type inference *)
+ML {*  elab @{context} @{term "<x, f # x>"}  *}
+ML {*  elab @{context} @{term "<g # x, f # x>"}  *}
+ML {*  elab @{context} @{term "<g # x, f # (g # x)>"}  *}
+ML {*  elab @{context} @{term "<x, <g # x, f # x # (g # x)>>"}  *}
+ML {*  elab @{context} @{term "<x, <y, f # x # y>>"}  *}
+ML {*  elab @{context} @{term "<x, <y, f # y # x>>"}  *}
+ML {*  elab @{context} @{term "<h # f # x, i # g # y>"}  *}
+
+
+
+
+(* tests for terminal hidden universe level discharge *)
+  (* i73 hidden and terminal *)
+ML {*  elab @{context} @{term "f # (PI x:A. B(x))"}  *}
+  (* FIXME: typing constraint for C has no x:A in context *)
+ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y))"}  *}
+(* FIXME: universe inconsistency *)
+(* ML {*  elab @{context} @{term "f # (PI x:A. PI y:(B # x). C # x # y)"}  *} *)
+(* minor FIXME: reordfree naming visible *)
+ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y)) # D"}  *}
+ML {*  elab @{context} @{term "(lam x:guniv i. fun f. f # x)"} *}
+
+
 (* test of smash unification ?B(x) == ?B(y) *)
 ML {* elab @{context} @{term "f # x === f # y"} *}
 
@@ -948,7 +1207,7 @@ ML {* elab @{context} @{term "f # x === f # y"} *}
      avoids too general type with mutual x,y dependency lifting *)
 ML {* elab @{context} @{term "f # x === g # y"} *}
 
-(* test of dependency restriction solution of flexflex unifications *)
+(* tests of dependency restriction solution of flexflex unifications *)
 ML {* elab @{context} @{term "f # x === g # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # y"} *}
@@ -956,7 +1215,8 @@ ML {* elab @{context} @{term "f # x === g # y # x"} *}
 ML {* elab @{context} @{term "f # x # z === g # y # x"} *}
 
 (* FIXME: one guniv-typing constraint does not get contextually discharged,
-   because no dependence on context *)
+    even though no dependence on context; probably because constraint simp MR rule
+    does not fire, so constraint relocalization does not happen *)
 ML {* elab @{context} @{term "f # z # x === g # y # x"} *}
 
 (* test of delay of flexflex unifications *)
@@ -1004,28 +1264,40 @@ ML {*
     end
 *}
 
+(* FIXME: these tests omit the  i <: univlvl  constraints.
+    that should only make a difference regarding hidden univlvl discharge *)
 ML {*
-  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val res = test_constraint_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 
 ML {*
-  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
+  val res = test_constraint_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"}, @{prop "l <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
   val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
 *}
 
 ML {*
-  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
+  val res = test_constraint_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 
 ML {*
-  val res = test_constraint_simp @{context} [@{prop "i u<= j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val res = test_constraint_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
+     @{prop "i u<= j"}, @{prop "j u< k"}, @{prop "i u< k"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 
 ML {*
-  val res = test_constraint_simp @{context} [@{prop "i u< j"}, @{prop "j u<= k"}, @{prop "k u< l"}, @{prop "i u< l"}]
+  val res = test_constraint_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"}, @{prop "l <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u<= k"}, @{prop "k u< l"}, @{prop "i u< l"}]
   val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
 *}
 

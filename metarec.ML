@@ -613,7 +613,8 @@ type ruledata_type = {
       (* constraint {propagation, simplification} rules indexed by all of their heads respectively;
          the zero-based position of the head which indexes is also stored *)
     constraint_propag_rules_hdidx: (thm * int) Net.net,
-    constraint_simp_rules_hdidx: (thm * int) Net.net
+    constraint_simp_rules_hdidx: (thm * int) Net.net,
+    constraint_simprocs: (serial * (bool * (term list -> Proof.context -> thm option * Proof.context))) list
   }
 
 val empty_ruledata : ruledata_type = {
@@ -628,7 +629,8 @@ val empty_ruledata : ruledata_type = {
      lthy_transforms = Symtab.empty, lthy_transform_log = [],
      new_facts = Symtab.empty,
      constraint_propag_rules_hdidx = Net.empty,
-     constraint_simp_rules_hdidx = Net.empty
+     constraint_simp_rules_hdidx = Net.empty,
+     constraint_simprocs = []
    }
 
 val base_scope = 0
@@ -655,14 +657,16 @@ structure RuleData = Generic_Data(
             depgraph=depgraph1, frules=frules1, frules_hdidx=frules_hdidx1, frules_factgen=frules_factgen1,
             gen_brule_concls=gen_brule_concls1, lthy_transforms=lthy_transforms1, lthy_transform_log=lthy_transform_log1,
             new_facts=new_facts1, constraint_propag_rules_hdidx=constraint_propag_rules_hdidx1,
-            constraint_simp_rules_hdidx=constraint_simp_rules_hdidx1} = data1
+            constraint_simp_rules_hdidx=constraint_simp_rules_hdidx1,
+            constraint_simprocs=constraint_simprocs1} = data1
           val {rules=rules2, judgements=judgements2, term_to_jud=term_to_jud2, assms=assms2, syn_procs=syn_procs2,
             comp_rules=comp_rules2, trace_depth=trace_depth2, trace=trace2,
             facts=facts2, facts_lhs_idx=facts_lhs_idx2, depgraph=depgraph2, frules=frules2, frules_hdidx=frules_hdidx2,
             frules_factgen=frules_factgen2, gen_brule_concls=gen_brule_concls2, lthy_transforms=lthy_transforms2,
             lthy_transform_log=lthy_transform_log2, new_facts=new_facts2,
             constraint_propag_rules_hdidx=constraint_propag_rules_hdidx2,
-            constraint_simp_rules_hdidx=constraint_simp_rules_hdidx2} = data2
+            constraint_simp_rules_hdidx=constraint_simp_rules_hdidx2,
+            constraint_simprocs=constraint_simprocs2} = data2
           val judgements' : judgements_type = Symtab.merge (K true) (judgements1, judgements2)
           val term_to_jud' = Net.merge (op =) (term_to_jud1, term_to_jud2)
           val frules' = frules1 |> Inttab.fold (fn (id, (th, kind, headjuds, applied_to_facts, traced)) =>
@@ -706,7 +710,9 @@ structure RuleData = Generic_Data(
             constraint_propag_rules_hdidx = Net.merge (Thm.eq_thm_prop o pairself fst)
               (constraint_propag_rules_hdidx1, constraint_propag_rules_hdidx2),
             constraint_simp_rules_hdidx = Net.merge (Thm.eq_thm_prop o pairself fst)
-              (constraint_simp_rules_hdidx1, constraint_simp_rules_hdidx2)
+              (constraint_simp_rules_hdidx1, constraint_simp_rules_hdidx2),
+            constraint_simprocs = Library.merge (eq_fst (op =))
+              (constraint_simprocs1, constraint_simprocs2)
           }
         end
     in
@@ -762,7 +768,7 @@ fun map_rule_stuff f_rules f_depgraph = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules = f_rules rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -772,13 +778,14 @@ fun map_rule_stuff f_rules f_depgraph = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_judgement_stuff f_judgements f_term_to_jud f_depgraph = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements = f_judgements judgements,
      term_to_jud = f_term_to_jud term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -788,13 +795,14 @@ fun map_judgement_stuff f_judgements f_term_to_jud f_depgraph = map_current_rule
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_term_to_jud f_term_to_jud = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements = judgements,
      term_to_jud = f_term_to_jud term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -804,13 +812,14 @@ fun map_term_to_jud f_term_to_jud = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_assms f_assms = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements = judgements,
      term_to_jud=term_to_jud, assms = f_assms assms, syn_procs=syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -820,13 +829,14 @@ fun map_assms f_assms = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_syn_procs f_syn_procs = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements = judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs = f_syn_procs syn_procs,
      comp_rules = comp_rules, trace_depth=trace_depth, trace=trace,
@@ -836,13 +846,14 @@ fun map_syn_procs f_syn_procs = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_comp_rules f_comp_rules = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules = f_comp_rules comp_rules, trace_depth=trace_depth, trace=trace,
@@ -852,13 +863,14 @@ fun map_comp_rules f_comp_rules = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun set_trace_depth d = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth = d, trace=trace,
@@ -869,13 +881,14 @@ fun set_trace_depth d = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_trace f_trace = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth = trace_depth, trace = f_trace trace,
@@ -886,13 +899,14 @@ fun map_trace f_trace = map_current_ruledata
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_fact_stuff f_facts f_facts_lhs_idx f_new_facts = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -903,13 +917,14 @@ fun map_fact_stuff f_facts f_facts_lhs_idx f_new_facts = map_current_ruledata
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log,
      new_facts = f_new_facts new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_frule_stuff f_depgraph f_frules f_frules_hdidx f_frules_factgen = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -920,13 +935,14 @@ fun map_frule_stuff f_depgraph f_frules f_frules_hdidx f_frules_factgen = map_cu
      gen_brule_concls=gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_gen_brule_concls f_gen_brule_concls = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -937,13 +953,14 @@ fun map_gen_brule_concls f_gen_brule_concls = map_current_ruledata
      gen_brule_concls=f_gen_brule_concls gen_brule_concls,
      lthy_transforms=lthy_transforms, lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_lthy_transforms f_lthy_transforms = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -955,14 +972,15 @@ fun map_lthy_transforms f_lthy_transforms = map_current_ruledata
      lthy_transforms = f_lthy_transforms lthy_transforms,
      lthy_transform_log = lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
 fun map_lthy_transforms_log f_lthy_transform_log =
   Local_Theory.target (Context.proof_map (map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -975,13 +993,14 @@ fun map_lthy_transforms_log f_lthy_transform_log =
      lthy_transform_log = f_lthy_transform_log lthy_transform_log,
      new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})))
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})))
 
 fun map_constraint_propag_rules_hdidx f = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -993,13 +1012,14 @@ fun map_constraint_propag_rules_hdidx f = map_current_ruledata
      lthy_transforms=lthy_transforms,
      lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx = f constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
  
 fun map_constraint_simp_rules_hdidx f = map_current_ruledata
   (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
        facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
        gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
-       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx} =>
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
     {rules=rules, judgements=judgements,
      term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
      comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
@@ -1011,8 +1031,27 @@ fun map_constraint_simp_rules_hdidx f = map_current_ruledata
      lthy_transforms=lthy_transforms,
      lthy_transform_log=lthy_transform_log, new_facts=new_facts,
      constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
-     constraint_simp_rules_hdidx = f constraint_simp_rules_hdidx})
+     constraint_simp_rules_hdidx = f constraint_simp_rules_hdidx,
+     constraint_simprocs=constraint_simprocs})
 
+fun map_constraint_simprocs f = map_current_ruledata
+  (fn {rules, judgements, term_to_jud, assms, syn_procs, comp_rules, trace_depth, trace,
+       facts, facts_lhs_idx, depgraph, frules, frules_hdidx, frules_factgen,
+       gen_brule_concls, lthy_transforms, lthy_transform_log, new_facts,
+       constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs} =>
+    {rules=rules, judgements=judgements,
+     term_to_jud=term_to_jud, assms=assms, syn_procs=syn_procs,
+     comp_rules=comp_rules, trace_depth=trace_depth, trace=trace,
+     facts=facts, facts_lhs_idx=facts_lhs_idx,
+     depgraph=depgraph,
+     frules = frules, 
+     frules_hdidx = frules_hdidx, frules_factgen = frules_factgen,
+     gen_brule_concls=gen_brule_concls,
+     lthy_transforms=lthy_transforms,
+     lthy_transform_log=lthy_transform_log, new_facts=new_facts,
+     constraint_propag_rules_hdidx=constraint_propag_rules_hdidx,
+     constraint_simp_rules_hdidx=constraint_simp_rules_hdidx,
+     constraint_simprocs = f constraint_simprocs})
 
 fun get_lthy_transform_log lthy =
   let val {lthy_transform_log = log, ...} =
@@ -1875,7 +1914,7 @@ fun fun_cong_prf prf t ctxt =
 
 (* TODO(opt): sharing of prf in resulting proofterms *)
 fun conj_extr_prfs prf ctxt =
-  let val prop = prop_of_proofp prf
+  let val prop = prop_of_proofp prf |> norm_with_env_in_run_state ctxt
   in
     case try Logic.dest_conjunction prop of
       NONE => ([(prop, prf)], ctxt)
@@ -1890,6 +1929,8 @@ fun conj_extr_prfs prf ctxt =
         end
   end
 
+(* if prf proves  assms ==> (&&& i. conjunct_i)
+   this returns  ([conjunct_i]_i, [proof of assms ==> conjunct_i]_i) *)
 fun conj_concl_extr_prfs prf ctxt =
   let
     val prems = Logic.strip_imp_prems (prop_of_proofp prf)
@@ -3351,7 +3392,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
 and constraint_simplification allow_propagation ctxt0 =
   let
     val gctxt0 = Context.Proof ctxt0
-    val { constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, ...} =
+    val { constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs, ...} =
       get_current_ruledata gctxt0
     val { constraints=constraints0, ...} = get_the_run_state gctxt0
 
@@ -3414,7 +3455,27 @@ and constraint_simplification allow_propagation ctxt0 =
     *)
 
 
-    fun gen_with_pot_rules is_propagation
+    fun reconsider_instantiated_constraints (constraint_graph, ctxt) =
+      let
+        (* NB: determination of existing constraints that have been instantiated now relies on the facts that
+             * constraints in the constraint graph are fully normalized 
+             * type unification variables are not instantiated during this derivation process *)
+        val inst_old_Cs = constraint_graph |> Net.content |> map fst
+          |> filter (fn C => Term.add_vars C [] |> exists (fn ixnT =>
+               Envir.lookup (get_the_env_in_run_state ctxt, ixnT) |> is_some))
+
+        (* val _ = if null inst_old_Cs then ()
+          else
+            tracing ("the following existing constraints have been instantiated:\n"
+              ^commas (inst_old_Cs |> map (Syntax.string_of_term ctxt))) *)
+      in
+        (constraint_graph, ctxt)
+        |> fold (fn inst_old_C => reg_constraint true inst_old_C NONE NONE)
+             inst_old_Cs
+      end
+
+
+    and gen_with_pot_rules is_propagation
         pot_rules_with_C4head (constraint_graph0, ctxt0) = 
       let
         (* NB: only the first successful simplification rule is applied *)
@@ -3430,7 +3491,8 @@ and constraint_simplification allow_propagation ctxt0 =
           if is_propagation then fold_with_change_tracking f
           else fold_upto_first_change f
 
-        fun do_pot_rule (rule, C4head) (constraint_graph, ctxt) =
+
+        fun do_pot_rule (rule, C4head_opt, exact_match) (constraint_graph, ctxt) =
           let
             exception UnsolvablePrem
 
@@ -3489,14 +3551,25 @@ and constraint_simplification allow_propagation ctxt0 =
                   ^" returned\n  "^commas (map (str_of_normed_term ctxt2) res)) *)
               in res end
             val cs_for_heads_posprod = heads0 |> map_index (fn (i,head) =>
-                 let val (headidx, C) = C4head
-                 in
-                   if headidx = i then [C]
-                   else lookup head
-                 end)
+                 case C4head_opt of
+                   SOME (headidx, C) => 
+                     if headidx = i then [C]
+                     else lookup head
+                 | NONE => lookup head)
                |> list_amb
             (* val _ = tracing ("cs_for_heads_posprod: \n"
               ^cat_lines (cs_for_heads_posprod |> map (commas o (map (str_of_normed_term ctxt2))))) *)
+
+
+            fun configurated_matches ctxt_ (heads, cs_for_heads) =
+              if not exact_match then
+                pattern_matches_envctxt ctxt_ (heads, cs_for_heads)
+              else if forall2 (curry (aconv_norm (norm_with_env_in_run_state ctxt_)))
+                heads cs_for_heads
+              then
+                SOME ctxt_
+              else
+                NONE
 
 
             fun inst_and_apply_rule cs_for_heads i (constraint_graph, ctxt2) =
@@ -3504,7 +3577,7 @@ and constraint_simplification allow_propagation ctxt0 =
                 val ((prf, prems, heads, static_new_constraints_opt), ctxt3) = fresh_rule_in_ctxt ctxt2
                 val rl_prop = prop_of_proofp prf
               in
-              case pattern_matches_envctxt ctxt3 (heads, cs_for_heads) of
+              case configurated_matches ctxt3 (heads, cs_for_heads) of
                 NONE =>
                   let
                     val _ = () (* tracing (string_of_int i^":  tried application of constraint propagation rule\n  "
@@ -3557,13 +3630,16 @@ and constraint_simplification allow_propagation ctxt0 =
                     val ctxt5 = ctxt5_ |> Context.proof_map (map_constraints_in_run_state
                       (K (get_constraints_in_run_state ctxt4)))
 
-                    (* val _ = tracing ("applied constraint "
+                    val _ =
+                      if not exact_match then ()
+                      else 
+                        tracing ("applied constraint "
                           ^(if is_propagation then "propagation" else "simplification")^" rule\n  "
                           ^Display.string_of_thm ctxt5_ rule
                           ^"\nto input constraints\n  "
                           ^commas (map (str_of_normed_term ctxt4) cs_for_heads)
                           ^"\nresulted in new constraints\n  "
-                          ^commas (map (str_of_normed_term ctxt5_) new_constraints)) *)
+                          ^commas (map (str_of_normed_term ctxt5_) new_constraints))
 
                     (* for propag rules:  input constraints ==> conjunctioned new constraints
                        for simp rules:  new_constraints ==> conjunctioned input constraints *)
@@ -3574,21 +3650,17 @@ and constraint_simplification allow_propagation ctxt0 =
                        for simp rules:  (input constraint i, proof of (new_constraints ==> input constraint i))_i *)
                     val (concls_prfs, ctxt6) = conj_concl_extr_prfs disch_prf ctxt5
 
-                    (* NB: determination of existing constraints that have been instantiated now relies on the facts that
-                         * constraints in the constraint graph are fully normalized 
-                         * type unification variables are not instantiated during this derivation process *)
-                    val inst_old_Cs = constraint_graph |> Net.content |> map fst
-                      |> filter (fn C => Term.add_vars C [] |> exists (fn ixnT =>
-                           Envir.lookup (get_the_env_in_run_state ctxt6, ixnT) |> is_some))
-
-                    (* val _ = if null inst_old_Cs then ()
+                    (* val _ =
+                      if not exact_match then ()
                       else
-                        tracing ("the following existing constraints have been instantiated:\n"
-                          ^commas (inst_old_Cs |> map (Syntax.string_of_term ctxt6))) *)
-                    
+                        tracing ("disch_prf:  "^str_of_normed_term ctxt6 (prop_of_proofp disch_prf)
+                          ^"\nconcls_prfs:\n"^cat_lines (concls_prfs
+                            |> map (fn (concl,prf) =>
+                              "  "^str_of_normed_term ctxt6 concl^"  proven by  "^
+                                (prf |> prop_of_proofp |> str_of_normed_term ctxt6)))) *)
+
                     val (constraint_graph2, ctxt7) = (constraint_graph, ctxt6)
-                      |> fold (fn inst_old_C => reg_constraint true inst_old_C NONE NONE)
-                           inst_old_Cs
+                      |> reconsider_instantiated_constraints
                   in
                     if is_propagation then
                       (constraint_graph2, ctxt7)
@@ -3687,7 +3759,7 @@ and constraint_simplification allow_propagation ctxt0 =
                 ^(case origin_rule_app_opt of
                    SOME rl => str_of_normed_term ctxt rl
                  | NONE => "initial constraints or instantiation of existing constraint")) *)
-            val ext_with_C0 = map (fn (rl, head_idx) => (rl, (head_idx, C0)))
+            val ext_with_C0 = map (fn (rl, head_idx) => (rl, SOME (head_idx, C0), false))
             val pot_simp_rls = Net.match_term constraint_simp_rules_hdidx C_eta |> ext_with_C0
             val pot_propag_rls =
               if allow_propagation then
@@ -3713,10 +3785,28 @@ and constraint_simplification allow_propagation ctxt0 =
       end
 
 
+    and apply_simproc (serial, (exact_simpth_match, simproc)) (constraint_graph_, ctxt_) =
+      let
+        val Cs = constraint_graph_ |> Net.content |> map fst
+        val (simpth_opt, ctxt_2) = simproc Cs ctxt_
+      in
+        (constraint_graph_, ctxt_2)
+        |> reconsider_instantiated_constraints
+        |> (case simpth_opt of
+             SOME simpth =>
+               let val _ = tracing ("exactly applying simpth generated by constraint simproc:\n"
+                 ^Display.string_of_thm ctxt_2 simpth)
+               in gen_with_pot_rules false [(simpth, NONE, exact_simpth_match)] end
+           | NONE => SOME)
+        |> the_default (constraint_graph_, ctxt_)
+      end
+
+
      (* constraint store with tracking which other constraints optionally imply this constraint *)
     val constraint_graph0 = Net.empty : (term * proof_pack option) Net.net
     val (constraint_graph', ctxt') = (constraint_graph0, ctxt0)
       |> fold (fn C => reg_constraint false C NONE NONE) constraints0
+      |> fold apply_simproc constraint_simprocs
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
 
@@ -5295,6 +5385,9 @@ fun add_constraint_simp_rule checked_grndness simp_rule0 gctxt =
     gctxt
     |> map_constraint_simp_rules_hdidx (K constraint_simp_rules_hdidx')
   end
+
+fun add_constraint_simproc exact_simpth_match proc gctxt =
+  gctxt |> map_constraint_simprocs (fn simprocs => simprocs @ [(serial (), (exact_simpth_match, proc))])
 
 
 

@@ -201,6 +201,8 @@ where
 
 lemma constraintI: "PROP P ==> constraint (PROP P)"
   by (subst constraint_const_def)
+lemma constraintD: "constraint (PROP P) ==> (PROP P)"
+  by (simp add: constraint_const_def)
 
 definition
   foconstraint_const :: "prop => prop" ("foconstraint _" [5] 10)
@@ -218,6 +220,10 @@ where
 
 lemma unifyI: "t1 == t2 ==> unify t1 t2"
   by (simp add: unify_const_def)
+
+lemma unify_rev_def: "(unify t1 t2) == (t2 == t1)"
+  apply rule
+  by (simp add: unify_const_def)+
 
 
 

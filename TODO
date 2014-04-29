@@ -850,9 +850,35 @@
     * parametrisiert auf Mengensynthesejudgement (zumindest auf Universen-Granularitaet)
       von elaborierten Termen um ZF-Lambdas,Produkte waehrend pattern unification
       bilden zu koennen
-    * braucht zusaetzlichen Spezialkram fuer Universenlevel:
-        triv discharge constraints von Universenlevel die nicht (mehr) in prop vorkommen
-      durch max,max+succ hochzaehlen entlang i <=u j, i <u j Kanten
+    * discharge/simp von durch Unifikation instantiierte Constraints
+      (aber fuer Universenlevel Constraints ist nichts zusaetzlich zu tun, weil
+       das immer Variablen sind und die ueblichen Simp/Propagierungsregeln immer aktiv sind)
+    * braucht zusaetzlichen Discharge von Constraints an "hidden" Variablen: 
+      * triv discharge von constraints an "hidden" Universenlevel
+        (die nicht in Proposition und nicht in Constraints zusammen mit
+        anderen nonhidden Variablen vorkommen)
+        und gemaess Universenlevel-Ungleichungs-Graph terminal sind (wobei hier Kanten von hidden
+        Universenleveln nicht gezaehlt werden),
+        durch Instantiierung mit Term ueber max,succ,Universenlevel hochgezaehlt
+        gemaess i <=u j, i <u j Kanten
+          Universenlevel die initial sind im Universenlevel-Ungleichungs-Graph koennte
+        man theoretisch auch dischargen wenn man stattdessen n <=u i constraints
+        fuer konstantes n nutzt (und zulaesst). Aber nervig und wo ist der Nutzen?
+          Koennte uns das zum Problem werden wenn zuviele initiale Level im Beweis aber
+        nicht in Proposition vorkommen die sich also anhaeufen?
+        klingt unwahrscheinlich -> Fallstudie
+      ? discharge von Typing Constraints an "hidden" Typ-Variablen ??
+        (die nicht in Proposition und nicht in Constraints zusammen mit
+         anderen nonhidden Variablen vorkommen)
+           A <: ... -> guniv i  ~~>  A := (% ... . 0)
+        Wie kann das vorkommen?
+      ? discharge von typing constraints an hidden Term-Variablen ??
+           x <: A  ~~>  x := SOME x. x : A   fuer  nonempty A
+        Aber sowieso unwahrscheinlich das hidden Term-Variablen relevant sind
+        und nonemptiness-Tracking ist typtheoretisch schlecht zu motivieren.
+    * als Optimierung: Unifikation verschiedener Universenlevel zwischen denen
+      (transitiv) keine Constraints bestehen. Vermutlich reicht auch schon die
+      Unifikation von Universenlevel an die garkeine Constraints bestehen
 *)
 
 
