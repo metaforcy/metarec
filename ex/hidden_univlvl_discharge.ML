@@ -5,14 +5,6 @@ struct
 
   datatype univlvl_comparison = UnivLess | UnivLeq
 
-  (* NB: assumes f monotonously extends length of input list *)
-  fun list_fixpoint f init =
-    let val next = f init
-    in
-      if pointer_eq (next, init) orelse length next = length init then init
-      else list_fixpoint f next
-    end
-
 
   local
     fun dest_jud_name t =
@@ -37,6 +29,8 @@ struct
   fun mk_univlvl i =
     @{term constraint_typing} $ i $ @{term univlvl} |> FOLogic.mk_Trueprop
 
+  (* NB: assumes that all universe levels (used in u<, u<= inequations) have  i <: univlvl  constraints in Cs
+    (which is the usual situation after standard elaboration) *)
   fun calc_hidden_terminal_univlvl_discharge Cs ctxt =
     let
       val gctxt = Context.Proof ctxt
@@ -64,9 +58,9 @@ struct
         else
           error ("calc_hidden_terminal_univlvl_discharge: non-atomic universe level "
             ^Syntax.string_of_term ctxt i))
-      val _ = tracing ("univlvls are "^commas (uls |> map (Syntax.string_of_term ctxt)))
+      (* val _ = tracing ("univlvls are "^commas (uls |> map (Syntax.string_of_term ctxt)))
       val _ = tracing ("univlvl inequations are "^commas (ul_iqs
-        |> map (mk_univ_ieq #> Syntax.string_of_term ctxt)))
+        |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))) *)
 
       val ul_graph = Term_Graph.empty
         |> fold (fn i => Term_Graph.new_node (i, [])) uls
@@ -75,10 +69,10 @@ struct
                #> Term_Graph.map_node j (cons ul_iq))
              ul_iqs
 
-      val _ = tracing ("univlvl graph is\n"^
+      (* val _ = tracing ("univlvl graph is\n"^
         cat_lines (Term_Graph.dest ul_graph |> map (fn ((i, prevs), succs) =>
           "  "^Syntax.string_of_term ctxt i^" -> "^commas (succs |> map (Syntax.string_of_term ctxt) )
-            ^"   (eqs from: "^commas (prevs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))^")")))
+            ^"   (eqs from: "^commas (prevs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))^")"))) *)
         
       val hidden_uls = uls |> filter_out (fn i =>
         not (can Term.dest_Var i)
@@ -86,22 +80,22 @@ struct
           not (is_some (dest_univlvl ctxt C)) andalso not (is_some (dest_univ_ieq C))
           andalso member (op =) (Term.add_vars C []) (Term.dest_Var i)))
 
-      val _ = tracing ("hidden univlvls are "^
-        commas (hidden_uls |> map (Syntax.string_of_term ctxt)))
+      (* val _ = tracing ("hidden univlvls are "^
+        commas (hidden_uls |> map (Syntax.string_of_term ctxt))) *)
 
       (* NB: univlvls that are only smaller than hidden terminals are also
           be considered as terminals (which makes instantiation an iterative effort)
           True terminals come last and terminals smaller than them come before. *) 
       val hidden_terminals = Term_Graph.maximals ul_graph |> inter (op =) hidden_uls
-        |> list_fixpoint (fn hidden_terminals =>
+        |> MetaRec.list_fixpoint (fn hidden_terminals =>
              hidden_terminals |> fold (fn i => 
                  Term_Graph.Keys.fold (fn j =>
                      member (op =) hidden_uls j ? insert (op =) j)
                    (Term_Graph.imm_preds ul_graph i))
                hidden_terminals)
 
-      val _ = tracing ("hidden terminal univlvls are "^
-        commas (hidden_terminals |> map (Syntax.string_of_term ctxt)))
+      (* val _ = tracing ("hidden terminal univlvls are "^
+        commas (hidden_terminals |> map (Syntax.string_of_term ctxt))) *)
         
       val cert = cterm_of (Proof_Context.theory_of ctxt)
       val (ctxt2, iq_ths) = (ctxt, []) |> fold (fn i => fn (ctxt_, ths) =>
@@ -131,8 +125,8 @@ struct
                            conclusions of th_j, ths against inst_t? Easy with Thm.match? *)
                        val th_j = (umax1_th |> Drule.instantiate' [] [SOME j'_ct, SOME j''_ct, SOME inst_t0_ct])
                          OF [th0_j]
-                       val _ = tracing ("th_j for "^Syntax.string_of_term ctxt_ (@{term Pair} $ j $ i)
-                         ^": "^Display.string_of_thm ctxt_ th_j)
+                       (* val _ = tracing ("th_j for "^Syntax.string_of_term ctxt_ (@{term Pair} $ j $ i)
+                         ^": "^Display.string_of_thm ctxt_ th_j) *)
                        val ths = ths0 |> map (fn th =>
                          let
                            val (umax2_th, (i0, j0)) = case dest_univ_ieq (Thm.concl_of th) of
@@ -144,18 +138,18 @@ struct
                            val (i0_ct, j0_ct) = (i0, j0) |> pairself cert
                            val th' = (umax2_th |> Drule.instantiate' [] [SOME i0_ct, SOME j0_ct, SOME j''_ct])
                              OF [th]
-                           val _ = tracing ("lifting:\n  "^Display.string_of_thm ctxt_ th
-                            ^"\nto  "^Display.string_of_thm ctxt_ th')
+                           (* val _ = tracing ("lifting:\n  "^Display.string_of_thm ctxt_ th
+                            ^"\nto  "^Display.string_of_thm ctxt_ th') *)
                          in th' end)
                        val inst_t = @{term univ_max} $ j'' $ inst_t0
                      in
                        (inst_t, th_j :: ths)
                      end)
                    iqs
-            val _ = tracing ("i_ths for "^Syntax.string_of_term ctxt i^" are: "^
+            (* val _ = tracing ("i_ths for "^Syntax.string_of_term ctxt i^" are: "^
               commas (i_ths |> map (Display.string_of_thm ctxt)))
             val _ = tracing ("i_inst for "^Syntax.string_of_term ctxt i^" ist: "^
-              Syntax.string_of_term ctxt i_inst)
+              Syntax.string_of_term ctxt i_inst) *)
             val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state
               (curry Envir.update (Term.dest_Var i, i_inst)))
             val env_2 = MetaRec.get_the_env_in_run_state ctxt_2
@@ -166,7 +160,7 @@ struct
           end)
         hidden_terminals
 
-      val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2)))
+      (* val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2))) *)
    
 
       val thmify = cert #> Drule.mk_term
@@ -190,14 +184,14 @@ struct
       val uninst_uls_fixes = uninst_uls_fxd |> map (Term.dest_Free #> fst)
         |> filter_out (Variable.is_fixed ctxt2)
 
-      val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
+      (* val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("instantiated univlvls ineqs: "^commas (inst_ul_iqs
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("uninstantiated univlvls fixed: "^commas (uninst_uls_fxd
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("fixed inequality thms: "^cat_lines (iq_ths_fxd
-        |> map (Display.string_of_thm ctxt2)))
+        |> map (Display.string_of_thm ctxt2))) *)
 
       (* NB: after applying iq_ths, we have to discharge their premises that
          became instantiated to   (.. umax ..) <: univlvl *)

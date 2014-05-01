@@ -119,6 +119,21 @@ fun filter_split p (x :: xs) =
    end
   | filter_split p [] = (([], []), (fn ys' => fn zs' => []))
 
+fun least_fixpoint eq f init = 
+  let val next = f init
+  in
+    if pointer_eq (next, init) orelse eq (next, init) then init
+    else least_fixpoint eq f next
+  end
+
+(* NB: assumes f monotonously extends length of input list *)
+fun list_fixpoint f = least_fixpoint (fn (next, init) => length next = length init) f
+fun list3_fixpoint f = least_fixpoint (fn (next, init) =>
+    length (#1 next) = length (#1 init) 
+    andalso length (#2 next) = length (#2 init) 
+    andalso length (#3 next) = length (#3 init))
+  f
+
 
 
 
@@ -341,6 +356,7 @@ datatype depgraph_node = Judgement | FRule of frule_id
 fun is_synth_mode (ninput, noutput) = (noutput > 0)
 fun synth_objs_from_sec_objs mode sec_objs = drop (fst mode) sec_objs
 
+datatype constraint_trace = ConstraintTrace of term list list
 
 type run_state = {
     outer_ctxt: Proof.context,
@@ -353,7 +369,7 @@ type run_state = {
        the derivation is complete. *)
     delayed_unifs: ((term * term) * bool) list,  
     (* constraints are implicit assumptions during the derivation that are always exported wrt. outer_ctxt *)
-    constraints: term list,
+    constraints: (term * constraint_trace) list,
     fo_vars: indexname list
   }
 
@@ -1583,6 +1599,12 @@ fun prop_of_rule ctxt (DirectRule th) = prop_of th
 
 
 
+   (* applied constraint rule * input constraints *)
+ datatype chr_inst_trace = ChrInstTrace of term  * term list 
+ structure ChrInstTracking = Proof_Data(
+   type T = (typ * (term * chr_inst_trace)) Vartab.table
+   fun init _ = Vartab.empty
+ );
 
 (* TODO(opt):
      macht es Sinn nur die letzten n Regeln-Tracing-Closures auf dem Trace
@@ -1601,6 +1623,9 @@ fun gen_add_to_trace trace_sel trace_depth_sel updater newobj =
 fun add_to_rule_trace rule = gen_add_to_trace fst fst (fn new => apfst (K new)) rule
 fun add_to_msg_trace msg = gen_add_to_trace snd snd (fn new => apsnd (K new)) msg
 
+fun get_rule_trace ctxt = 
+  let val {trace=(rule_trace, _), ...} = get_current_ruledata (Context.Proof ctxt)
+  in rule_trace end
 
 fun compose_err_from_trace ctxt msg =
   let val {trace=(rule_trace, msg_trace), trace_depth=(rule_trace_depth, msg_trace_depth), ...} =
@@ -3389,15 +3414,17 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
 (* TODO(refactor): this contains an adaptation of the frules computation mechanism to propagation rules;
      can perhaps be realized with a common implementation, but the frules computation is completely ground *)
 
-and constraint_simplification allow_propagation ctxt0 =
+and constraint_simplification allow_propagation ctxt00 =
   let
-    val gctxt0 = Context.Proof ctxt0
+    val gctxt00 = Context.Proof ctxt00
     val { constraint_propag_rules_hdidx, constraint_simp_rules_hdidx, constraint_simprocs, ...} =
-      get_current_ruledata gctxt0
-    val { constraints=constraints0, ...} = get_the_run_state gctxt0
+      get_current_ruledata gctxt00
+    val { constraints=constraints0_with_traces, ...} = get_the_run_state gctxt00
+
+    val constraints0 = constraints0_with_traces |> map fst
 
     val _ = tracing ("started constraint simplification on constraints\n  "
-      ^commas (map (str_of_normed_term ctxt0) constraints0))
+      ^commas (map (str_of_normed_term ctxt00) constraints0))
 
     (* simplification step (muessen konfluent sein):   prems ==> subgoals ==> conjunctioned heads
          * match simprule conclusion-heads against input constraints
@@ -3455,22 +3482,101 @@ and constraint_simplification allow_propagation ctxt0 =
     *)
 
 
-    fun reconsider_instantiated_constraints (constraint_graph, ctxt) =
+
+    (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
+       if a constraint is not simplified according to the constraint graph, it has a self-dependency;
+       when discovering cycles we locally give up and share dependency results *)
+    fun calc_dependencies ctxt constraint_graph C0 (walked, calced) =
+      let
+        val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
+        val C = norm_with_env_in_run_state ctxt C0
+        val C_eta = C |> Envir.eta_contract
+        fun triv_dep C2 = ([C2], assumption_prf C2)
+      in
+        case 
+          Net.match_term walked C_eta
+          |> filter (fn C' => eq_C (C', C))
+        of
+          _ :: _ => (triv_dep C0, (walked, calced)) (* encountered cycle *)
+        | [] => 
+            case
+              Net.match_term calced C_eta
+              |> filter (fn (C', _) => eq_C (C', C))
+            of
+              (_, res) :: _ => (res, (walked, calced))
+            | [] =>
+                let
+                 (* TODO(correctness): constraints koennen durch unification waehrend der Propagierung
+                      zusammenfallen.
+                        Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
+                      sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
+                      Eintrag mit Vereinfachungsbeweis zum Constraint finden.
+                      Sollte das auch beim Anlegen dieser Eintraege waehrend der Propagierung so gemacht werden? 
+                      Ist mittlerweile schon so? *)
+                  val implied_by_opt =
+                    case Net.match_term constraint_graph C_eta
+                      |> filter (fn (C', _) => eq_C (C', C))
+                    of
+                      [] => err_with_trace ctxt ("internal error when calculating dependencies: constraint "
+                        ^str_of_normed_term ctxt C^" was not found in constraint graph")
+                    | C'_and_implied_by_opts => C'_and_implied_by_opts |> map_filter snd |> try hd
+
+                  val (res, (walked3, calced2)) =
+                    case implied_by_opt of
+                      NONE => (triv_dep C0, (walked, calced))
+                    | SOME implied_by_prf =>
+                       let
+                         val walked2 = walked |> Net.insert_term eq_C (C_eta, C)
+                         val Cs = Logic.strip_imp_prems (prop_of_proofp implied_by_prf)
+                         val (Cs_ress, (walked3, calced2)) = (walked2, calced)
+                           |> fold_map (calc_dependencies ctxt constraint_graph) Cs
+                         val deps = [] |> fold (union eq_C) (map fst Cs_ress)
+                         val prf = implied_by_prf |> fold (mp_rev_prf ctxt o snd) Cs_ress
+                       in
+                         ((deps, prf), (walked3, calced2))
+                       end
+
+                   val calced3 = calced2 |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, res))
+                in
+                  (res, (walked3, calced3))
+                end
+      end
+
+
+    fun reconsider_instantiated_constraints reason_trace (constraint_graph, ctxt) =
       let
         (* NB: determination of existing constraints that have been instantiated now relies on the facts that
              * constraints in the constraint graph are fully normalized 
              * type unification variables are not instantiated during this derivation process *)
-        val inst_old_Cs = constraint_graph |> Net.content |> map fst
-          |> filter (fn C => Term.add_vars C [] |> exists (fn ixnT =>
-               Envir.lookup (get_the_env_in_run_state ctxt, ixnT) |> is_some))
+        fun lookup_var ixnT = Envir.lookup (get_the_env_in_run_state ctxt, ixnT)
+
+        val inst_old_Cs = constraint_graph |> Net.content
+          |> map_filter (fn (C, _) =>
+               let val var_insts = Term.add_vars C [] |> map_filter (fn v =>
+                 case lookup_var v of
+                   SOME t => SOME (v, t)
+                 | NONE => NONE)
+               in
+                 if null var_insts then NONE
+                 else SOME (C, var_insts)
+               end)
+        val var_insts = [] |> fold (snd #> union (eq_fst (op =))) inst_old_Cs
+
+        (* NB: assumes there are no distinct vars that differ only in type *)
+        (* NB: until the reg_constraint fold below is fully completed, there are overlaps in inst_old_Cs
+           with different reconsider_instantiated_constraints subcalls via reg_constraint. This is
+           why Vartab.update_new below is essential. *)
+        val ctxt2 = ctxt |> ChrInstTracking.map (
+          fold (fn ((ixn, T), t) =>
+            perhaps (try (Vartab.update_new (ixn, (T, (t, reason_trace)))))) var_insts)
 
         (* val _ = if null inst_old_Cs then ()
           else
             tracing ("the following existing constraints have been instantiated:\n"
-              ^commas (inst_old_Cs |> map (Syntax.string_of_term ctxt))) *)
+              ^commas (inst_old_Cs |> map (fst #> Syntax.string_of_term ctxt))) *)
       in
-        (constraint_graph, ctxt)
-        |> fold (fn inst_old_C => reg_constraint true inst_old_C NONE NONE)
+        (constraint_graph, ctxt2)
+        |> fold (fn (inst_old_C, _) => reg_constraint true inst_old_C NONE NONE)
              inst_old_Cs
       end
 
@@ -3575,6 +3681,7 @@ and constraint_simplification allow_propagation ctxt0 =
             fun inst_and_apply_rule cs_for_heads i (constraint_graph, ctxt2) =
               let
                 val ((prf, prems, heads, static_new_constraints_opt), ctxt3) = fresh_rule_in_ctxt ctxt2
+                (* TODO(feature): print the rule with conjunctioned heads/concls *)
                 val rl_prop = prop_of_proofp prf
               in
               case configurated_matches ctxt3 (heads, cs_for_heads) of
@@ -3601,20 +3708,59 @@ and constraint_simplification allow_propagation ctxt0 =
                           ^commas (map (str_of_normed_term ctxt4) prems)) *)
 
                     fun global_fail_cont ctxt_ msg = 
-                      err_with_trace_and_facts ctxt_
-                        ("failed to solve a premise in an instantiated constraint "
-                          ^(if is_propagation then "propagation" else "simplification")
-                          ^" rule\n"
-                          ^str_of_normed_term ctxt_ rl_prop
-                          ^"\n\nbecause:\n"^msg)
+                      let
+                        (* NB: we don't want to see instantiations that happened
+                           during constraint propagation here *)
+                        val orig_term_pretty = norm_with_env_in_run_state ctxt00 #> Syntax.pretty_term ctxt00
+                        val eq_C = aconv_norm (norm_with_env_in_run_state ctxt_)
+                        fun add_deps_for Cs deps0 = deps0 |> fold (fn C =>
+                            let val ((deps_, _), _) = calc_dependencies ctxt_ constraint_graph
+                               C (Net.empty, Net.empty)
+                            in union eq_C deps_ end)
+                          Cs
+                        val (deps, orig_deps, insts) = (add_deps_for cs_for_heads [], [], [])
+                          |> list3_fixpoint (fn (deps, _, insts) =>
+                               let
+                                 val deps2 = deps |> fold (fn (_, (_, Cs)) => add_deps_for Cs) insts
+                                   (* NB: original constraints can become unified *)
+                                 val orig_deps2 = deps2 |> maps (fn C =>
+                                   filter (fn (C0, _) => eq_C (C, C0)) constraints0_with_traces)
+                                 val insts2 = [] |> fold (Term.add_vars o fst) orig_deps2
+                                   |> map_filter (fn (ixn, _) =>
+                                      Vartab.lookup (ChrInstTracking.get ctxt_) ixn
+                                      |> Option.map (fn (T, (t, ChrInstTrace (ruleapp, input_Cs))) =>
+                                          (((ixn, T), t), (ruleapp, input_Cs))))
+                               in (deps2, orig_deps2, insts2) end)
+                      in
+                        err_with_trace ctxt_
+                          ("failed to solve a premise in an instantiated constraint "
+                            ^(if is_propagation then "propagation" else "simplification")
+                            ^" rule\n"
+                            ^str_of_normed_term ctxt_ rl_prop
+                            ^"\n\nbecause:\n"^msg
+                            ^"\n\ninput constraint origins are:\n"
+                            ^Pretty.string_of (orig_deps |> map (fn (C0, ConstraintTrace trace) =>
+                               Pretty.block
+                                 [Pretty.block [orig_term_pretty C0, Pretty.brk 2, Pretty.str "from"], Pretty.fbrk,
+                                  trace |> maps (take 1 #> map orig_term_pretty)
+                                  |> Pretty.chunks2 |> Pretty.indent 2])
+                               |> Pretty.chunks2 |> Pretty.indent 2)
+                            ^"\n\ninstantiations of them are:\n"
+                            ^Pretty.string_of (insts |> map (fn (((ixn, T), t), (ruleapp, _)) => 
+                                 Pretty.block [orig_term_pretty (Var (ixn, T)),
+                                 Pretty.brk 1, Pretty.str ":=", Pretty.brk 1, orig_term_pretty t,
+                                 Pretty.brk 2, Pretty.str "from", Pretty.fbrk,
+                                 Pretty.indent 2 (orig_term_pretty ruleapp)])
+                               |> Pretty.chunks2 |> Pretty.indent 2))
+                      end
                     fun local_fail_cont _ _ = raise UnsolvablePrem
 
 
                     val ctxt4_ = ctxt4 |> Context.proof_map (map_constraints_in_run_state
-                      (K (these static_new_constraints_opt)))
+                      (K (these static_new_constraints_opt |> map (rpair (ConstraintTrace [])))))
                     val (solved_prems, ctxt5_) = solve_prems false false global_fail_cont local_fail_cont
                       rl_prop prems ctxt4_
-                    val new_constraints = get_constraints_in_run_state ctxt5_
+                    val new_constraints = get_constraints_in_run_state ctxt5_ |> map fst
                     val new_dynamic_constraints = new_constraints
                       |> subtract (aconv_norm (norm_with_env_in_run_state ctxt5_))
                            (these static_new_constraints_opt)
@@ -3630,16 +3776,13 @@ and constraint_simplification allow_propagation ctxt0 =
                     val ctxt5 = ctxt5_ |> Context.proof_map (map_constraints_in_run_state
                       (K (get_constraints_in_run_state ctxt4)))
 
-                    val _ =
-                      if not exact_match then ()
-                      else 
-                        tracing ("applied constraint "
-                          ^(if is_propagation then "propagation" else "simplification")^" rule\n  "
-                          ^Display.string_of_thm ctxt5_ rule
-                          ^"\nto input constraints\n  "
-                          ^commas (map (str_of_normed_term ctxt4) cs_for_heads)
-                          ^"\nresulted in new constraints\n  "
-                          ^commas (map (str_of_normed_term ctxt5_) new_constraints))
+                    (* val _ = tracing ("applied constraint "
+                      ^(if is_propagation then "propagation" else "simplification")^" rule\n  "
+                      ^Display.string_of_thm ctxt5_ rule
+                      ^"\nto input constraints\n  "
+                      ^commas (map (str_of_normed_term ctxt4) cs_for_heads)
+                      ^"\nresulted in new constraints\n  "
+                      ^commas (map (str_of_normed_term ctxt5_) new_constraints)) *)
 
                     (* for propag rules:  input constraints ==> conjunctioned new constraints
                        for simp rules:  new_constraints ==> conjunctioned input constraints *)
@@ -3650,17 +3793,16 @@ and constraint_simplification allow_propagation ctxt0 =
                        for simp rules:  (input constraint i, proof of (new_constraints ==> input constraint i))_i *)
                     val (concls_prfs, ctxt6) = conj_concl_extr_prfs disch_prf ctxt5
 
-                    (* val _ =
-                      if not exact_match then ()
-                      else
-                        tracing ("disch_prf:  "^str_of_normed_term ctxt6 (prop_of_proofp disch_prf)
-                          ^"\nconcls_prfs:\n"^cat_lines (concls_prfs
-                            |> map (fn (concl,prf) =>
-                              "  "^str_of_normed_term ctxt6 concl^"  proven by  "^
-                                (prf |> prop_of_proofp |> str_of_normed_term ctxt6)))) *)
+                    (* val _ = tracing ("disch_prf:  "^str_of_normed_term ctxt6 (prop_of_proofp disch_prf)
+                         ^"\nconcls_prfs:\n"^cat_lines (concls_prfs
+                           |> map (fn (concl,prf) =>
+                             "  "^str_of_normed_term ctxt6 concl^"  proven by  "^
+                               (prf |> prop_of_proofp |> str_of_normed_term ctxt6)))) *)
 
                     val (constraint_graph2, ctxt7) = (constraint_graph, ctxt6)
                       |> reconsider_instantiated_constraints
+                           (let val norm = norm_with_env_in_run_state ctxt4
+                            in ChrInstTrace (norm rl_prop, map norm cs_for_heads) end)
                   in
                     if is_propagation then
                       (constraint_graph2, ctxt7)
@@ -3792,6 +3934,7 @@ and constraint_simplification allow_propagation ctxt0 =
       in
         (constraint_graph_, ctxt_2)
         |> reconsider_instantiated_constraints
+             (ChrInstTrace (Free("simproc_"^string_of_int serial, @{typ "'a"}), []))
         |> (case simpth_opt of
              SOME simpth =>
                let val _ = tracing ("exactly applying simpth generated by constraint simproc:\n"
@@ -3804,7 +3947,7 @@ and constraint_simplification allow_propagation ctxt0 =
 
      (* constraint store with tracking which other constraints optionally imply this constraint *)
     val constraint_graph0 = Net.empty : (term * proof_pack option) Net.net
-    val (constraint_graph', ctxt') = (constraint_graph0, ctxt0)
+    val (constraint_graph', ctxt') = (constraint_graph0, ctxt00)
       |> fold (fn C => reg_constraint false C NONE NONE) constraints0
       |> fold apply_simproc constraint_simprocs
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
@@ -3814,7 +3957,7 @@ and constraint_simplification allow_propagation ctxt0 =
     val envdiff = get_the_run_state (Context.Proof ctxt') |> #env |> Envir.term_env |> Vartab.dest
       |> filter (fn (ixn, _) => member (op =) constraints0_varixns ixn)
       |> subtract (pairself fst #> (op =))
-           (get_the_run_state (Context.Proof ctxt0) |> #env |> Envir.term_env |> Vartab.dest)
+           (get_the_run_state (Context.Proof ctxt00) |> #env |> Envir.term_env |> Vartab.dest)
     val _ = tracing ("resulting instantiation is:\n  "
       ^commas (envdiff |> map (fn (ixn, (T, t)) =>
          Syntax.string_of_term ctxt' (Var(ixn,T)) ^ " := "
@@ -3827,70 +3970,14 @@ and constraint_simplification allow_propagation ctxt0 =
                 NONE => "nothing"
               | SOME prf => str_of_normed_term ctxt' (prop_of_proofp prf)))))
 
-    (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
-       if a constraint is not simplified according to the constraint graph, it has a self-dependency;
-       when discovering cycles we locally give up and share dependency results *)
-    fun calc_dependencies C0 (walked, calced) =
-      let
-        val C = norm_with_env_in_run_state ctxt' C0
-        val C_eta = C |> Envir.eta_contract
-        fun triv_dep C2 = ([C2], assumption_prf C2)
-      in
-        case 
-          Net.match_term walked C_eta
-          |> filter (fn C' => eq_C (C', C))
-        of
-          _ :: _ => (triv_dep C0, (walked, calced)) (* encountered cycle *)
-        | [] => 
-            case
-              Net.match_term calced C_eta
-              |> filter (fn (C', _) => eq_C (C', C))
-            of
-              (_, res) :: _ => (res, (walked, calced))
-            | [] =>
-                let
-                 (* TODO(correctness): constraints koennen durch unification waehrend der Propagierung
-                      zusammenfallen.
-                        Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
-                      sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
-                      Eintrag mit Vereinfachungsbeweis zum Constraint finden.
-                      Sollte das auch beim Anlegen dieser Eintraege waehrend der Propagierung so gemacht werden? 
-                      Ist mittlerweile schon so? *)
-                  val implied_by_opt =
-                    case Net.match_term constraint_graph' C_eta
-                      |> filter (fn (C', _) => eq_C (C', C))
-                    of
-                      [] => err_with_trace ctxt' ("internal error when calculating dependencies: constraint "
-                        ^str_of_normed_term ctxt' C^" was not found in constraint graph")
-                    | C'_and_implied_by_opts => C'_and_implied_by_opts |> map_filter snd |> try hd
-
-                  val (res, (walked3, calced2)) =
-                    case implied_by_opt of
-                      NONE => (triv_dep C0, (walked, calced))
-                    | SOME implied_by_prf =>
-                       let
-                         val walked2 = walked |> Net.insert_term eq_C (C_eta, C)
-                         val Cs = Logic.strip_imp_prems (prop_of_proofp implied_by_prf)
-                         val (Cs_ress, (walked3, calced2)) = (walked2, calced)
-                           |> fold_map calc_dependencies Cs
-                         val deps = [] |> fold (union eq_C) (map fst Cs_ress)
-                         val prf = implied_by_prf |> fold (mp_rev_prf ctxt' o snd) Cs_ress
-                       in
-                         ((deps, prf), (walked3, calced2))
-                       end
-
-                   val calced3 = calced2 |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, res))
-                in
-                  (res, (walked3, calced3))
-                end
-      end
-
 
     val constraints0_nodups = constraints0 |> distinct eq_C
 
     val constraints0_deps = constraints0_nodups |> map (fn C =>
       let
-        val ((deps, prf), (walked, _)) = calc_dependencies C (Net.empty, Net.empty)
+        val ((deps, prf), (walked, calced)) = calc_dependencies ctxt' constraint_graph'
+          C (Net.empty, Net.empty)
+        (* TODO(refactor): used = Net.content calced |> map fst ? *)
         val used = union eq_C deps (Net.content walked)
       in (C, (deps, prf, used)) end)
 
@@ -3910,6 +3997,8 @@ and constraint_simplification allow_propagation ctxt0 =
 
     val constraints' = constraints0_nodups |> subtract eq_C (map fst implied_constraints)
       |> fold (union eq_C) (map (fn (_, (deps, _)) => deps) implied_constraints)
+      |> map (fn C => AList.lookup eq_C constraints0_with_traces C
+           |> the_default (ConstraintTrace []) |> pair C)
 
     val implied_constraints_res = implied_constraints
       |> map (fn (C, (_, prf)) => (C, prf (* |> fold_rev (impI_prf ctxt') constraints' *)))
@@ -3930,9 +4019,9 @@ and metarec_constraint_simp final_C_simp prf ctxt =
          eliminating them in this case already happens if they are newly generated from their solve_prems call *)
 
     val _ = tracing ("metarec_constraint_simp started on constraints  "^
-      commas (map (str_of_normed_term ctxt) constraints))
+      commas (map (str_of_normed_term ctxt o fst) constraints))
 
-    val (prf2, ctxt2) = (prf, ctxt) |> fold (fn C0 => fn (prf_, ctxt_) =>
+    val (prf2, ctxt2) = (prf, ctxt) |> fold (fn (C0, ConstraintTrace C0_trace) => fn (prf_, ctxt_) =>
         if false (* null (Logic.strip_params C0) andalso null (Logic.strip_assums_hyp C0) *) then
           (prf_, ctxt_)
         else
@@ -3959,19 +4048,25 @@ and metarec_constraint_simp final_C_simp prf ctxt =
                  val eq_C = (aconv_norm (norm_with_env_in_run_state ctxt_3))
 
                  (* val _ = tracing ("simplified constraint  "^str_of_normed_term ctxt_3 C
-                   ^"  to\n"^cat_lines (map (str_of_normed_term ctxt_3 #> curry (op ^) "  ")
+                   ^"  to\n"^cat_lines (map (fst #> str_of_normed_term ctxt_3 #> curry (op ^) "  ")
                      (get_the_run_state (Context.Proof ctxt_3) |> #constraints)))
                  val _ = tracing "replaying proof of constraint simplification ..."
                  val _ = tracing ("  delayed unifs are "
                    ^commas (get_delayed_unifs_in_run_state ctxt_3
                       |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt_3)))  *)
                  val _ = replay_prf ctxt_3 (C_prf
-                   |> fold_rev (impI_prf ctxt_3) (get_constraints_in_run_state ctxt_3) 
+                   |> fold_rev (impI_prf ctxt_3 o fst) (get_constraints_in_run_state ctxt_3) 
                    |> fold_rev (impI_prf ctxt_3 o Logic.mk_equals o fst) (get_delayed_unifs_in_run_state ctxt_3)) (* for testing *)
                  (* val _ = tracing "  done" *)
 
                  val ctxt_4 = ctxt_3 |> Context.proof_map (map_constraints_in_run_state
-                   (union eq_C (get_constraints_in_run_state ctxt_ |> remove eq_C C)))
+                   (map (fn (C2, ConstraintTrace C2_trace) =>
+                      if eq_C (C0, C2) then
+                        (C2, ConstraintTrace C0_trace)
+                      else
+                        (C2, ConstraintTrace (C2_trace @ C0_trace)))
+                    #> union (eq_fst eq_C)
+                         (get_constraints_in_run_state ctxt_ |> remove (apsnd fst #> eq_C) C)))
                  val prf_2 = prf_ |> impI_prf ctxt_4 C |> mp_rev_prf ctxt_4 C_prf
 
                  (* val _ = tracing "replaying proof with simplified constraint ..."
@@ -3979,7 +4074,7 @@ and metarec_constraint_simp final_C_simp prf ctxt =
                    ^commas (get_delayed_unifs_in_run_state ctxt_4
                       |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt_4)))  *)
                  val _ = replay_prf ctxt_4 (prf_2
-                   |> fold_rev (impI_prf ctxt_4) (get_constraints_in_run_state ctxt_4)
+                   |> fold_rev (impI_prf ctxt_4 o fst) (get_constraints_in_run_state ctxt_4)
                    |> fold_rev (impI_prf ctxt_4 o Logic.mk_equals o fst) (get_delayed_unifs_in_run_state ctxt_4)) (* for testing *)
                  (* val _ = tracing "  done" *)
                 in
@@ -3991,7 +4086,7 @@ and metarec_constraint_simp final_C_simp prf ctxt =
     val ((constraints', implied_constraints), ctxt3) = constraint_simplification true ctxt2
     val prf3 = prf2
       |> fold (fn (C, C_prf) => impI_prf ctxt3 C #> mp_rev_prf ctxt3 C_prf) implied_constraints
-      |> final_C_simp ? (fold_rev (impI_prf ctxt3) constraints')
+      |> final_C_simp ? (fold_rev (impI_prf ctxt3 o fst) constraints')
 
     (* NB: if final_C_simp = true all remaining constraints' have been implicationally discharged,
        but we keep registered in the run state anyway *)
@@ -4128,7 +4223,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
     (* val _ = 
       let
         val {delayed_unifs, constraints, ...} = get_the_run_state (Context.Proof ctxt2)
-        val th_1 = prf |> fold_rev (impI_prf ctxt2) (map (Logic.mk_equals o fst) delayed_unifs @ constraints)
+        val th_1 = prf |> fold_rev (impI_prf ctxt2) (map (Logic.mk_equals o fst) delayed_unifs
+            @ map fst constraints)
           |> replay_prf ctxt2 
       in
         tracing ("metarec derivation was successful (but no constraint min yet) with: "
@@ -4143,7 +4239,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
         val _ = tracing ("  delayed unifs are "
           ^commas (get_delayed_unifs_in_run_state ctxt3
              |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt3))) 
-        val th_2 = prf2 |> fold_rev (impI_prf ctxt3) (map (Logic.mk_equals o fst) delayed_unifs @ constraints)
+        val th_2 = prf2 |> fold_rev (impI_prf ctxt3) (map (Logic.mk_equals o fst) delayed_unifs
+            @ map fst constraints)
           |> replay_prf ctxt3 
       in
         tracing ("proof replay after constraint min: "^Display.string_of_thm ctxt3 th_2)
@@ -4157,7 +4254,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
         (* val _ = tracing ("  delayed unifs are "
           ^commas (get_delayed_unifs_in_run_state ctxt4
              |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt4)))  *)
-        val th_3 = prf3 |> fold_rev (impI_prf ctxt4) constraints
+        val th_3 = prf3 |> fold_rev (impI_prf ctxt4 o fst) constraints
           |> replay_prf ctxt4 
       in
         tracing ("proof replay after structural unifications: "^Display.string_of_thm ctxt4 th_3)
@@ -4178,7 +4275,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
     (* NB: oobjs can be instantiated further now, due to further unifications *)
     val oobjs' = oobjs |> map (norm_with_env_in_run_state ctxt6) 
   in
-    ((th, oobjs'), (delayed_unifs' |> filter_out snd |> map fst, constraints'))
+    ((th, oobjs'), (delayed_unifs' |> filter_out snd |> map fst, constraints' |> map fst))
   end
 
 
@@ -6002,9 +6099,10 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
 
     (* val _ = tracing ("generated constraint "^str_of_normed_term ctxt3 t') *)
 
+    val trace = get_rule_trace ctxt3 |> map (fn f => f ())
     (* TODO(feature/opt): already simplify constraints on-the-fly *)
-    fun constraints_f constraints =
-      insert (aconv_norm (norm_with_env_in_run_state ctxt3)) t' constraints
+    val constraints_f =
+      insert (eq_fst (aconv_norm (norm_with_env_in_run_state ctxt3))) (t', ConstraintTrace [trace])
     val st2 = Context.Proof ctxt3 |> map_constraints_in_run_state constraints_f
       |> get_the_run_state
   in

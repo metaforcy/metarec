@@ -1,4 +1,3 @@
-
 theory UniverseLevelInference
 imports "../ZFMetaRec" "../DmitriySubtyping"
 begin
@@ -417,16 +416,26 @@ lemma [MR_unchecked]: "[|
     <t1, t2> elabto (<t1', t2'> typed (A1 * A2)) : A1 * A2"
   unfolding elabjud_def typed_pair_def by (rule SigmaI) *)
 
+
+definition
+  sum_abstract_as_const ("_ abstractas _") where
+  "(t abstractas x) == t"
+
 (* the insane unificationist approach! no synthty rule inference because
    of fancy abstract non-pattern unification constraint (abstract solution
    might be possible via structural unification) *)
 lemma [MR]: "[|
     t1 elabto t1' : A  ;
-    freshunifvar B  ;
     t2 elabto t2' : T2  ;
+    freshunifvar B  ;
     unify (B(t1')) T2 |] ==>
     <t1, t2> elabto (<t1', t2'> typed (SUM x:A. B(x))) : (SUM x:A. B(x))"
   by (simp add: elabjud_def unify_rev_def typed_pair_def)
+lemma [MR_unchecked]: "[|
+    t1 elabto t1' : A  ;
+    !! x'. x elabto x' : A ==> t2 elabto t2'(x') : B(x')  |] ==>
+    <t1 abstractas x, t2> elabto (<t1', t2'(t1')> typed (SUM x:A. B(x))) : (SUM x:A. B(x))"
+  by (simp add: elabjud_def unify_rev_def typed_pair_def sum_abstract_as_const_def)
 lemma [MR]: "[|
     t1' printsas t1  ;  t2' printsas t2  |] ==>
   (<t1', t2'> typed A) printsas <t1, t2>"
@@ -982,8 +991,7 @@ lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i u<= j 
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.le_trans)
 
-lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> (i u< j &&& j u< i)"
-  apply (rule Pure.conjunctionI)
+lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> i u< i"
   by (simp add: universe_inconsistency_def)+
 
   (* NB: no try around unify. corresponds to CHR  (i <= j , j <= i) == (i = j) *)
@@ -1058,7 +1066,8 @@ ML {*
         |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
       val ctxt = ctxt0
         |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
-        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K Cs))
+        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K
+             (Cs |> map (rpair (MetaRec.ConstraintTrace [])))))
       val ((simpth, uninst_uls, inst_uls), _) =
         HiddenUnivlvlDischarge.calc_hidden_terminal_univlvl_discharge Cs ctxt
 
@@ -1185,6 +1194,10 @@ ML {*  elab @{context} @{term "<x, <y, f # x # y>>"}  *}
 ML {*  elab @{context} @{term "<x, <y, f # y # x>>"}  *}
 ML {*  elab @{context} @{term "<h # f # x, i # g # y>"}  *}
 
+(* FIXME: abstractas does not work as expected ?! *)
+ML {*  elab @{context} @{term "<x abstractas y, y, x>"} *}
+ML {*  elab @{context} @{term "<(g # x) abstractas y, y, g # x, y>"}  *}
+
 
 
 
@@ -1193,7 +1206,9 @@ ML {*  elab @{context} @{term "<h # f # x, i # g # y>"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. B(x))"}  *}
   (* FIXME: typing constraint for C has no x:A in context *)
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y))"}  *}
-(* FIXME: universe inconsistency *)
+(* FIXME: universe inconsistency: when unifying guniv types, we have to
+    maximize the universe levels instead of mere level unification.
+    Use customizable unify judgement that calls out to builtin unify primitive in base case. *)
 (* ML {*  elab @{context} @{term "f # (PI x:A. PI y:(B # x). C # x # y)"}  *} *)
 (* minor FIXME: reordfree naming visible *)
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y)) # D"}  *}
@@ -1256,11 +1271,12 @@ ML {*
         |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
       val ctxt = ctxt0
         |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
-        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K Cs))
+        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K (Cs
+             |> map (rpair (MetaRec.ConstraintTrace [])))))
       val ((Cs', implied_Cs), ctxt2) = MetaRec.constraint_simplification true ctxt
       val cert = cterm_of (Proof_Context.theory_of ctxt0)
     in
-      (Cs' |> map cert, map (fst #> cert) implied_Cs)
+      (Cs' |> map (fst #> cert), map (fst #> cert) implied_Cs)
     end
 *}
 
