@@ -214,16 +214,16 @@ lemma foconstraintI: "PROP P ==> foconstraint (PROP P)"
 
 
 definition
-  unify_const :: "'a :: {} => 'a => prop" ("unify _ _")
+  primunify_const :: "'a :: {} => 'a => prop" ("primunify _ _")
 where
-  "unify_const (t1,t2) == (t1 == t2)"
+  "primunify_const (t1,t2) == (t1 == t2)"
 
-lemma unifyI: "t1 == t2 ==> unify t1 t2"
-  by (simp add: unify_const_def)
+lemma primunifyI: "t1 == t2 ==> primunify t1 t2"
+  by (simp add: primunify_const_def)
 
-lemma unify_rev_def: "(unify t1 t2) == (t2 == t1)"
+lemma primunify_rev_def: "(primunify t1 t2) == (t2 == t1)"
   apply rule
-  by (simp add: unify_const_def)+
+  by (simp add: primunify_const_def)+
 
 
 
@@ -291,8 +291,8 @@ ML {*
     val foconstraintI = @{thm foconstraintI}
     val fresh_unifvar_headterm = @{term fresh_unifvar_const} |> max_polym
     val fresh_unifvarI = @{thm fresh_unifvarI}
-    val unify_headterm = @{term unify_const} |> max_polym
-    val unifyI = @{thm unifyI}
+    val unify_headterm = @{term primunify_const} |> max_polym
+    val unifyI = @{thm primunifyI}
     val deprestr_headterm = @{term "dep_restr_const"} |> max_polym
     val deprestrI = @{thm deprestrI}
 
@@ -336,6 +336,8 @@ ML {*
 
 
 setup {* MetaRec.setup *}
+
+
 
 
 

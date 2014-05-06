@@ -857,11 +857,11 @@
       * triv discharge von constraints an "hidden" Universenlevel
         (die nicht in Proposition und nicht in Constraints zusammen mit
         anderen nonhidden Variablen vorkommen)
-        und gemaess Universenlevel-Ungleichungs-Graph terminal sind (wobei hier Kanten von hidden
-        Universenleveln nicht gezaehlt werden),
-        durch Instantiierung mit Term ueber max,succ,Universenlevel hochgezaehlt
-        gemaess i <=u j, i <u j Kanten
-          Universenlevel die initial sind im Universenlevel-Ungleichungs-Graph koennte
+        und gemaess Universenlevel-Ungleichungs-Graph u<=-initial bzw. u<=,u<-terminal sind
+        (wobei hier Kanten von hidden Universenleveln nicht gezaehlt werden),
+        durch Instantiierung Term ueber 0,max,succ,Universenlevel hochgezaehlt
+        gemaess i u<= j, i u< j Kanten
+          Universenlevel die <-initial sind im Universenlevel-Ungleichungs-Graph koennte
         man theoretisch auch dischargen wenn man stattdessen n <=u i constraints
         fuer konstantes n nutzt (und zulaesst). Aber nervig und wo ist der Nutzen?
           Koennte uns das zum Problem werden wenn zuviele initiale Level im Beweis aber

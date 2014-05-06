@@ -29,6 +29,13 @@ struct
   fun mk_univlvl i =
     @{term constraint_typing} $ i $ @{term univlvl} |> FOLogic.mk_Trueprop
 
+
+  (* TODO(feature): contract non-branching terminal u<=-chains (i.e. unify along them)
+       after terminal hidden universelevels are gone
+       (could be essential to avoid universe clutter from typing constraint merge rule. *)
+  (* TODO(minor? feature): u<=-initiale hidden Universenlevel auch dischargen
+       unter Instantiierung mit 0 *)
+
   (* NB: assumes that all universe levels (used in u<, u<= inequations) have  i <: univlvl  constraints in Cs
     (which is the usual situation after standard elaboration) *)
   fun calc_hidden_terminal_univlvl_discharge Cs ctxt =
@@ -84,18 +91,21 @@ struct
         commas (hidden_uls |> map (Syntax.string_of_term ctxt))) *)
 
       (* NB: univlvls that are only smaller than hidden terminals are also
-          be considered as terminals (which makes instantiation an iterative effort)
+          considered as terminals (which makes instantiation an iterative effort)
           True terminals come last and terminals smaller than them come before. *) 
       val hidden_terminals = Term_Graph.maximals ul_graph |> inter (op =) hidden_uls
         |> MetaRec.list_fixpoint (fn hidden_terminals =>
              hidden_terminals |> fold (fn i => 
-                 Term_Graph.Keys.fold (fn j =>
-                     member (op =) hidden_uls j ? insert (op =) j)
-                   (Term_Graph.imm_preds ul_graph i))
+                 fold (fn j =>
+                     if Term_Graph.immediate_succs ul_graph j = [i]
+                       andalso member (op =) hidden_uls j 
+                     then insert (op =) j
+                     else I)
+                   (Term_Graph.immediate_preds ul_graph i))
                hidden_terminals)
 
       (* val _ = tracing ("hidden terminal univlvls are "^
-        commas (hidden_terminals |> map (Syntax.string_of_term ctxt))) *)
+        commas (hidden_terminals |> map (Syntax.string_of_term ctxt)))  *)
         
       val cert = cterm_of (Proof_Context.theory_of ctxt)
       val (ctxt2, iq_ths) = (ctxt, []) |> fold (fn i => fn (ctxt_, ths) =>
@@ -191,7 +201,7 @@ struct
       val _ = tracing ("uninstantiated univlvls fixed: "^commas (uninst_uls_fxd
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("fixed inequality thms: "^cat_lines (iq_ths_fxd
-        |> map (Display.string_of_thm ctxt2))) *)
+        |> map (Display.string_of_thm ctxt2)))  *)
 
       (* NB: after applying iq_ths, we have to discharge their premises that
          became instantiated to   (.. umax ..) <: univlvl *)

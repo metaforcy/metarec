@@ -25,7 +25,7 @@ struct
     val metaelabjud_n = dest_jud_name @{prop "metaelab P P'"}
     val printsasjud_n = dest_jud_name @{prop "t' printsas t"}
     val synthtyjud_n = dest_jud_name @{prop "t synthty A"}
-    val unify_jud_n = dest_jud_name @{prop "unify t t'"}
+    val primunify_jud_n = dest_jud_name @{prop "primunify t t'"}
     val freshunifvar_jud_n = dest_jud_name @{prop "freshunifvar t"}
     val constraint_jud_n = dest_jud_name @{prop "constraint P"}
   end
@@ -167,7 +167,7 @@ struct
       val unifs = Thm.prems_of synth_rl0 |> map_filter (fn prem =>
         case MetaRec.decompose_judgement gctxt prem of
           SOME (jud, (pobj, iobjs, _)) =>
-            if jud = unify_jud_n then SOME (pobj, hd iobjs) else NONE
+            if jud = primunify_jud_n then SOME (pobj, hd iobjs) else NONE
         | NONE => NONE)
       (* val _ = tracing ("unifs: "^ commas (unifs
         |> map (fn tpair => Syntax.string_of_term ctxt (Logic.mk_equals tpair)))) *)
