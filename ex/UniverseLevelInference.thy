@@ -1562,9 +1562,6 @@ ML {* elab @{context} @{term "f # x === g # x # y"} *}
 ML {* elab @{context} @{term "f # x === g # y # x"} *}
 ML {* elab @{context} @{term "f # x # z === g # y # x"} *}
 
-(* FIXME: one guniv-typing constraint does not get contextually discharged,
-    even though no dependence on context; probably because constraint simp MR rule
-    does not fire, so constraint relocalization does not happen *)
 ML {* elab @{context} @{term "f # z # x === g # y # x"} *}
 
 (* test of delay of flexflex unifications *)

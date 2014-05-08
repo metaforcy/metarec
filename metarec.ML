@@ -1519,7 +1519,7 @@ fun strip_abss t =
       end
   | _ => ([], t)
 
-(* TODO(refactor): collect fixed bounds and pass to f. then use this in patternify instead of strip_abss *)
+(* TODO(refactor): collect fixed bounds and pass to f *)
 (* t is assumed to be beta normal *)
 fun fold_varapps f fixes t =
   case Term.strip_comb t of
@@ -1530,45 +1530,6 @@ fun fold_varapps f fixes t =
   | (a, ts) => fold (fold_varapps f fixes) ts
 
 
-(* term is assumed to be normal wrt env *)
-fun patternify ctxt term env =
-  env |> fold_varapps (fn fixes => fn v0 => fn ts => fn env_ =>
-      case Envir.norm_term env_ (Var v0) of
-        Var (ixn, T) =>
-          let
-            fun fixes_in t = Term.add_frees t [] |> map Free |> inter (op aconv) fixes
-            val app_fxs = inter (op aconv) fixes ts
-            val (ts', app_fxs') = [] |> fold_map (fn t => fn app_fxs' =>
-                if member (op aconv) app_fxs' t then (NONE, app_fxs')
-                else if member (op aconv) app_fxs t then (NONE, cons t app_fxs')
-                else if subset (op aconv) (fixes_in t, app_fxs) then (NONE, app_fxs')
-                else (SOME t, app_fxs'))
-              ts
-          in
-            if ts ~~ ts' |> forall (fn (t, t') => is_some t' orelse member (op aconv) app_fxs t) then
-              env_
-            else
-              let
-                (* val tostr = Syntax.string_of_term ctxt
-                val _ = tracing ("patternify on varapp "^Syntax.string_of_term ctxt
-                    (list_comb (Var (ixn,T), ts)) ^" results in:\n"
-                  ^"\n  fixes: "^commas (map tostr fixes)
-                  ^"\n  app_fxs: "^commas (map tostr app_fxs)
-                  ^"\n  app_fxs': "^commas (map tostr app_fxs')
-                  ^"\n  ts': "^commas (map (fn t'_opt =>
-                    case t'_opt of SOME t' => tostr t' | NONE => "NONE") ts')) *)
-                val T' = map fastype_of app_fxs'
-                  ---> map_filter (Option.map fastype_of) ts'
-                  ---> drop (length ts) (binder_types T) ---> body_type T
-                val (env_2, v') = Envir.genvar (fst ixn) (env_, T')
-                val v'_abs = list_comb (v', app_fxs' @ map_filter I ts')
-                  |> fold_rev Term.lambda ts
-              in
-                env_2 |> curry Envir.update ((ixn, T), v'_abs)
-              end
-          end
-      | t => patternify ctxt t env_)
-    [] term
 
 (* TODO(feature?): structural (oder sogar auch pattern?) unification modulo ZF-beta
        wobei wir Mischformen wie  ?f(args) ` otherargs  ignorieren
@@ -1623,30 +1584,14 @@ fun solve_delayed_flexflexs ctxt delayed_flexflexs env =
 fun try_pat_unify ctxt (t1_0, t2_0) env =
   let
     fun unif_failed () = raise TryPatUnify(ctxt, (t1_0, t2_0), "try_pat_unify: pattern unification of "
-          ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
-    val (t1_1, t2_1) = pairself (Envir.norm_term env) (t1_0, t2_0)
-    (* val relfrees = [] |> fold Term.add_frees [t1_1, t2_1] |> map Free *)
-    val (t1_2, t2_2) = (t1_1, t2_1) (* |> pairself (fold Term.lambda relfrees) *)
-    val tostr = Syntax.string_of_term ctxt
-    (* val _ = tracing ("try_pat_unify on"
-      ^"\n  "^tostr t1_1 ^"  lifted to "^tostr t1_2
-      ^"\n  "^tostr t2_1 ^"  lifted to "^tostr t2_2) *)
+      ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
   in
     let
-      (* FIXME?: patternify buggy? structural unification seems more useful
-           than patternification anyway and they interact badly *)
-      val env2 = env (* |> fold (patternify ctxt) [t1_2, t2_2] *)
-      val (t1, t2) = pairself (Envir.norm_term env2) (t1_2, t2_2)
-      val _ =
-        if t1 abeconv t1_2 andalso t2 abeconv t2_2 then ()
-        else
-          tracing ("try_pat_unify: patternified:"
-            ^"\n"^tostr t1_0 ^" = "^ tostr t1_2 ^"  ->  "^tostr t1
-            ^"\n"^tostr t2_0 ^" = "^ tostr t2_2 ^"  ->  "^tostr t2)
+      val (t1, t2) = pairself (Envir.norm_term env) (t1_0, t2_0)
       val thy = Proof_Context.theory_of ctxt
-      val (tyenv3, maxidx3) = (Envir.type_env env2, Envir.maxidx_of env2)
+      val (tyenv3, maxidx3) = (Envir.type_env env, Envir.maxidx_of env)
         |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
-      val env3 = Envir.Envir { maxidx = maxidx3, tenv = Envir.term_env env2, tyenv = tyenv3 }
+      val env3 = Envir.Envir { maxidx = maxidx3, tenv = Envir.term_env env, tyenv = tyenv3 }
       val env4 = Pattern.unify thy (t1, t2) env3
     in
       SOME env4
