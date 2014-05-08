@@ -33,8 +33,13 @@ struct
   (* TODO(feature): contract non-branching terminal u<=-chains (i.e. unify along them)
        after terminal hidden universelevels are gone
        (could be essential to avoid universe clutter from typing constraint merge rule. *)
+  (* TODO(feature): contract branching u<=-chains with hidden intermediate levels:
+        i1 u<= j1  i2 u<= j2  j1 u<= k  j2 u<= k ~~~>  j1, j2 := k    if j1, j2 hidden *)
   (* TODO(minor? feature): u<=-initiale hidden Universenlevel auch dischargen
-       unter Instantiierung mit 0 *)
+       unter Instantiierung mit 0.
+       Koennte wichtig sein wegen infunify von Typisierungs Constraints *)
+  (* minor FIXME: ignore and discharge inflvl constraints.
+      uncritical because inflvl universe levels are always non-hidden *)
 
   (* NB: assumes that all universe levels (used in u<, u<= inequations) have  i <: univlvl  constraints in Cs
     (which is the usual situation after standard elaboration) *)
@@ -76,10 +81,10 @@ struct
                #> Term_Graph.map_node j (cons ul_iq))
              ul_iqs
 
-      (* val _ = tracing ("univlvl graph is\n"^
+      val _ = tracing ("univlvl graph is\n"^
         cat_lines (Term_Graph.dest ul_graph |> map (fn ((i, prevs), succs) =>
           "  "^Syntax.string_of_term ctxt i^" -> "^commas (succs |> map (Syntax.string_of_term ctxt) )
-            ^"   (eqs from: "^commas (prevs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))^")"))) *)
+            ^"   (eqs from: "^commas (prevs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))^")")))
         
       val hidden_uls = uls |> filter_out (fn i =>
         not (can Term.dest_Var i)
@@ -87,8 +92,8 @@ struct
           not (is_some (dest_univlvl ctxt C)) andalso not (is_some (dest_univ_ieq C))
           andalso member (op =) (Term.add_vars C []) (Term.dest_Var i)))
 
-      (* val _ = tracing ("hidden univlvls are "^
-        commas (hidden_uls |> map (Syntax.string_of_term ctxt))) *)
+      val _ = tracing ("hidden univlvls are "^
+        commas (hidden_uls |> map (Syntax.string_of_term ctxt)))
 
       (* NB: univlvls that are only smaller than hidden terminals are also
           considered as terminals (which makes instantiation an iterative effort)
@@ -104,8 +109,8 @@ struct
                    (Term_Graph.immediate_preds ul_graph i))
                hidden_terminals)
 
-      (* val _ = tracing ("hidden terminal univlvls are "^
-        commas (hidden_terminals |> map (Syntax.string_of_term ctxt)))  *)
+      val _ = tracing ("hidden terminal univlvls are "^
+        commas (hidden_terminals |> map (Syntax.string_of_term ctxt))) 
         
       val cert = cterm_of (Proof_Context.theory_of ctxt)
       val (ctxt2, iq_ths) = (ctxt, []) |> fold (fn i => fn (ctxt_, ths) =>
@@ -170,11 +175,8 @@ struct
           end)
         hidden_terminals
 
-      (* val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2))) *)
+      val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2)))
    
-
-      val thmify = cert #> Drule.mk_term
-      val unthmify = Thm.prop_of #> Logic.dest_term
 
       fun uninst_ul_check i = i aconv (MetaRec.norm_with_env_in_run_state ctxt2 i)
       val uninst_uls = uls |> filter uninst_ul_check
@@ -185,23 +187,23 @@ struct
           uninst_ul_check i andalso uninst_ul_check j) 
         |> map (mk_univ_ieq #> MetaRec.norm_with_env_in_run_state ctxt2)
         |> distinct (op aconv) (* NB: hidden univlvls can get instantiated to same term *)
-      val ([uninst_uls_fxd_trivths, inst_ul_iqs_fxd_trivths, inst_uls_fxd_trivth, iq_ths_fxd], ctxt3) = ctxt2
-        |> fold_burrow (apfst snd oo Variable.import false)
-            ((map o map) thmify [uninst_uls, inst_ul_iqs, inst_uls] @ [iq_ths])
-      val [uninst_uls_fxd, inst_ul_iqs_fxd, inst_uls_fxd] =
-        [uninst_uls_fxd_trivths, inst_ul_iqs_fxd_trivths, inst_uls_fxd_trivth]
-        |> (map o map) unthmify
-      val uninst_uls_fixes = uninst_uls_fxd |> map (Term.dest_Free #> fst)
-        |> filter_out (Variable.is_fixed ctxt2)
+          (* NB: we don't use Variable.import/export because they are not exact inverses:
+               export changes maxidx of unification vars, which makes exact matching
+               of generated SimpCHR impossible *)
+      val ([uninst_uls_fxd, inst_ul_iqs_fxd, inst_uls_fxd, _], (((_, freeze_th), (_, thaw_th)), ctxt3)) = ctxt2
+        |> fold_burrow
+             (fn ts => MetaRec.exact_freeze_thaw ts #-> (fn (ts', fs) => fn ctxt_ => (ts', (fs, ctxt_))))
+             ([uninst_uls, inst_ul_iqs, inst_uls] @ [map Thm.prop_of iq_ths])
+      val iq_ths_fxd = iq_ths |> map freeze_th
 
-      (* val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
+      val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("instantiated univlvls ineqs: "^commas (inst_ul_iqs
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("uninstantiated univlvls fixed: "^commas (uninst_uls_fxd
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("fixed inequality thms: "^cat_lines (iq_ths_fxd
-        |> map (Display.string_of_thm ctxt2)))  *)
+        |> map (Display.string_of_thm ctxt2))) 
 
       (* NB: after applying iq_ths, we have to discharge their premises that
          became instantiated to   (.. umax ..) <: univlvl *)
@@ -217,21 +219,24 @@ struct
       val simpth_opt =
         if null inst_uls then NONE
         else
-          Goal.prove ctxt2 uninst_uls_fixes constr_univlvl_ty_assms goal
+          (* NB: we don't use Goal.prove to fix uninst_uls_fxd, because they would
+               not be generalized to the original ones *)
+          Goal.prove ctxt2 [] constr_univlvl_ty_assms goal
             (fn {prems=constr_univlvl_ty_prems, ...} =>
               print_tac "goal is"
               THEN REPEAT_DETERM_FIRST (
                 (* (fn _ => print_tac "current goal is")
                 THEN'*) match_tac ([Conjunction.conjunctionI] @ iq_ths_fxd @ univlvl_ty_rls
                   @ map (fn th => @{thm constraintD} OF [th]) constr_univlvl_ty_prems)))
-          |> singleton (Variable.export ctxt3 ctxt2)
-          |> SOME
+          |> thaw_th |> SOME
     in
       ((simpth_opt, uninst_uls, ul_instantiation), ctxt2)
     end
 
-  fun hidden_terminal_univlvl_discharge_simproc Cs ctxt =
-    calc_hidden_terminal_univlvl_discharge Cs ctxt |> apfst #1
+  fun hidden_terminal_univlvl_discharge_simproc Cs = MetaRec.cumul_timing "hidden_univlvl_discharge_proc"
+    (fn ctxt => calc_hidden_terminal_univlvl_discharge Cs ctxt |> apfst #1)
 
+  val setup = Context.theory_map (MetaRec.add_constraint_simproc true
+    hidden_terminal_univlvl_discharge_simproc)
 
 end

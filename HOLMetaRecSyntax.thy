@@ -186,7 +186,7 @@ ML {*
     val fresh_unifvarI = @{thm fresh_unifvarI}
     val unify_headterm = @{term unify_const} |> max_polym
     val unifyI = @{thm unifyI}
-    val deprestr_headterm = @{term "dep_restr"} |> max_polym
+    val deprestr_headterm = @{term "deprestr"} |> max_polym
     val deprestrI = @{thm deprestrI}
 
 

@@ -295,6 +295,11 @@ definition
   syn_constraint_meta_typ :: "'a::{} => ('a => prop) => prop" ("_ ::> _") where
   [MRjud 1 1]: "syn_constraint_meta_typ (t, A) == A(t)"
 
+definition
+  inf_lvl_const ("inflvl _") where
+  [MRjud 1 0]: "inf_lvl_const(i) == True"
+
+
 
 lemma [constraint_moding_rewrite]: "(constraint (t <: A)) == Trueprop(t synthty A)"
   by (simp add: synthty_const_def constraint_const_def constraint_typing_def)
@@ -414,14 +419,12 @@ lemma [MR]: "[|
   apply (simp add: primunify_const_def infunify_const_def)
   by (auto intro: Pi_weaken_type)
 
-(* NB: no_existing_constraint necessary to avoid infinite generation of guniv k constraints
-   via typing constraint merge rule *)
+(* NB: special treatment of the i <= j, j <= i cases is necessary to avoid infinite
+   generation of guniv k constraints via typing constraint merge rule *)
 lemma [MR]: "[|
-    try (noexconstraint (i u<= j))  ;
-    try (noexconstraint (j u<= i))  ;
     freshunifvar k  ;
     foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
-    foconstraint (k <: univlvl)  ;
+    foconstraint (k <: univlvl)  ;  foconstraint (inflvl k)  ;
     foconstraint (k u<= i)  ;  foconstraint (k u<= j)  |] ==>
   infunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: infunify_const_def foconstraint_const_def constraint_typing_def
@@ -431,7 +434,8 @@ lemma [MR]: "[|
 
 (* TODO(correctness): does this rely on persistent uniqueness of i'? *)
 lemma [MR]: "[|
-   try (exconstraint (?? i'. i' u<= i) (i' u<= i))  ;
+    try (exconstraint (?? i'. i' u<= i) (i' u<= i))  ;
+    try (intensionally_inequal (i', i))  ;
     infunify (guniv i') (guniv j) (guniv k)  ;
     foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
     foconstraint (i' <: univlvl)  |] ==>
@@ -444,9 +448,10 @@ lemma [MR]: "[|
   apply(rule guniv_sub, assumption+)
   by auto
 
-(* TODO(correctness): does this rely on persistent uniqueness of i'? *)
+(* TODO(correctness): does this rely on persistent uniqueness of j'? *)
 lemma [MR]: "[|
-   try (exconstraint (?? j'. j' u<= j) (j' u<= j))  ;
+    try (exconstraint (?? j'. j' u<= j) (j' u<= j))  ;
+    try (intensionally_inequal (j', j))  ;
     infunify (guniv i) (guniv j') (guniv k)  ;
     foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
     foconstraint (j' <: univlvl)  |] ==>
@@ -458,6 +463,83 @@ lemma [MR]: "[|
   defer 1
   apply(rule guniv_sub, assumption+)
   by auto
+
+
+(*lemma [MR]: "[|
+    try (exconstraint  (?? j'. j' u<= j) (j' u<= j))  ;
+    try (exconstraint (inflvl j'))  ;
+    constraint (j' u<= i)  ;
+    foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
+    foconstraint (j' <: univlvl) |] ==>
+  infunify (guniv i) (guniv j) (guniv j')"
+  apply (simp add: infunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  apply (rule conjI)
+  apply (rule guniv_sub, assumption+)
+  by (rule guniv_sub, assumption+)
+
+lemma [MR]: "[|
+    try (exconstraint  (?? i'. i' u<= i) (i' u<= i))  ;
+    try (exconstraint (inflvl i'))  ;
+    constraint (i' u<= j)  ;
+    foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
+    foconstraint (i' <: univlvl) |] ==>
+  infunify (guniv i) (guniv j) (guniv i')"
+  apply (simp add: infunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  apply (rule conjI)
+  apply (rule guniv_sub, assumption+)
+  by (rule guniv_sub, assumption+)
+*)
+
+lemma [MR]: "[|
+    try (exconstraint (inflvl i))  ;
+    foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
+    constraint (i u<= j)  |] ==>
+  infunify (guniv i) (guniv j) (guniv i)"
+  apply (simp add: infunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  by (rule guniv_sub, assumption+)
+
+lemma [MR]: "[|
+    try (exconstraint (inflvl j))  ;
+    foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  ;
+    constraint (j u<= i)  |] ==>
+  infunify (guniv i) (guniv j) (guniv j)"
+  apply (simp add: infunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  by (rule guniv_sub, assumption+)
+
+lemma [MR]: "[|
+    try (exconstraint  (inflvl i)) ;
+    try (exconstraint  (inflvl j)) ;
+    primunify i j  |] ==>
+  infunify (guniv i) (guniv j) (guniv i)"
+  by (simp add: infunify_const_def primunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+
+lemma [MR]: "[|
+    try (exconstraint  (i u<= j)) ;
+    foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  |] ==>
+  infunify (guniv i) (guniv j) (guniv i)"
+  apply (simp add: infunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  by (rule guniv_sub, assumption+)
+
+lemma [MR]: "[|
+    try (exconstraint  (j u<= i)) ;
+    foconstraint (i <: univlvl)  ;  foconstraint (j <: univlvl)  |] ==>
+  infunify (guniv i) (guniv j) (guniv j)"
+  apply (simp add: infunify_const_def constraint_const_def
+    foconstraint_const_def constraint_typing_def
+    univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  by (rule guniv_sub, assumption+)
 
 lemma [MR]: "
   infunify A A A"
@@ -1115,9 +1197,13 @@ ML {*  elab @{context} @{term "(fun f. fun x. bla(x))"}  *}
 
 
 
-(* NB: no unification of universe constraints for the same type yet *)
+(* NB: no merge of universe constraints for the same type yet,
+   because typing constraint merge rule is not active yet *)
+(* FIXME: if pseudoterm starts with a fun, the first bound variable 
+   somehow gets renamed to x *)
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
+(* FIXME: first bound variable f somehow gets renamed to x in pseudo-term !?! *)
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 
 (* minor FIXME: stupid __reordfree0 bound variable name. can actually be eta-contracted away here *)
@@ -1230,14 +1316,32 @@ lemma [constraint_simp_rule]: "constraint (i <: univlvl) ==> i u<= i"
   by (simp add: constraint_const_def constraint_typing_def)
 
 
+
+definition
+  "typing_constraint_merge = 0"
+definition
+  tracing_if_different where
+  [MRjud 3 0]: "tracing_if_different(t1, t2, msg) == True"
+
+lemma [MR]: "
+    tracing(msg) ==>
+  tracing_if_different(t1, t2, msg)"
+  by (simp add: tracing_if_different_def)
+
+lemma [MR]: "
+  tracing_if_different(t, t, msg)"
+  by (simp add: tracing_if_different_def)
+
 (* NB: these can be considered constraint simp rules because there are no
    propagation rules that process t <: A, t <:: A constraints further *)
-lemma [constraint_simp_rule_all_matches]: "[|
-    infunify A A2 A'  ;  constraint (t <: A') |] ==>
+(* NB: no reevaluation if A' is instantiated further constitutes a performance optimization,
+    since A' in t <: A' constraints will only ever be <=-refined during constraint simplification *)
+lemma [constraint_simp_rule all_matches no_re_eval_on_head_reconsideration symmetric irreflexive]: "[|
+    infunify A A2 A'  ;  constraint (t <: A')  |] ==>
   t <: A &&& t <: A2"
     apply (simp add: constraint_const_def infunify_const_def conjunctionI constraint_typing_def)
     by (rule conjunctionI) auto
-lemma [constraint_simp_rule_all_matches]: "[|
+lemma [constraint_simp_rule all_matches no_re_eval_on_head_reconsideration symmetric irreflexive]: "[|
     infmetaunify A A2 A'  ;  constraint (t <:: A')  |] ==>
   t <:: A &&& t <:: A2"
     apply (simp add: constraint_const_def infmetaunify_const_def constraint_meta_typ_def)
@@ -1342,8 +1446,7 @@ ML {*
 *}
 
 setup {*
-  Context.theory_map (MetaRec.add_constraint_simproc true
-    HiddenUnivlvlDischarge.hidden_terminal_univlvl_discharge_simproc)
+  HiddenUnivlvlDischarge.setup
 *}
 
 
@@ -1424,8 +1527,8 @@ ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 ML {*  elab @{context} @{term "<x, f # x>"}  *}
 ML {*  elab @{context} @{term "<g # x, f # x>"}  *}
 ML {*  elab @{context} @{term "<g # x, f # (g # x)>"}  *}
-(* FIXME: nontermination due to meta typing constraint merge rule? *)
-ML {*  elab @{context} @{term "<x, <g # x, f # x # (g # x)>>"}  *}
+ML {*  Timing.timeit (*MetaRec.output_local_cumul_timing_for ["hidden_univlvl_discharge_proc"]*)
+  (fn () => elab @{context} @{term "<x, <g # x, f # x # (g # x)>>"})  *}
 ML {*  elab @{context} @{term "<x, <y, f # x # y>>"}  *}
 ML {*  elab @{context} @{term "<x, <y, f # y # x>>"}  *}
 ML {*  elab @{context} @{term "<h # f # x, i # g # y>"}  *}
@@ -1896,7 +1999,7 @@ lemma [elabMR_unchecked]: "[|
   apply (simp add: elabjud_def constraint_const_def foconstraint_const_def)
   by (rule groups_lawsD)
 
-lemma [constraint_simp_rule]: "[|
+lemma [constraint_simp_rule no_re_eval_on_head_reconsideration]: "[|
     freshunifvar dA  ;  freshunifvar dB  ;
     primunify d (prod_group(A,B,dA,dB))  ;
     foconstraint (dA dictof groups(A))  ;
@@ -1905,12 +2008,18 @@ lemma [constraint_simp_rule]: "[|
   apply (simp add: primunify_const_def constraint_const_def foconstraint_const_def)
   by (rule prod_group_in_groups)
 
-lemma [constraint_propag_rule]: "d dictof groups(A) ==> monoid_of_group(d) dictof monoids(A)"
+lemma group_to_monoid_propag[constraint_propag_rule]:
+    "d dictof groups(A) ==> monoid_of_group(d) dictof monoids(A)"
   by (rule groups_are_monoids)
 
 
-lemma dict_sharing[constraint_simp_rule_all_matches]: "
-   [|  primunify d1 d2  ;  constraint (d1 dictof C)  |] ==>  d1 dictof C &&& d2 dictof C"
+(* NB: irreflexivity, i.e. intensional inequality of d1, d2
+    is correctness-relevant, because constraint simplification avoids further propagation,
+    e.g. with group_to_monoid_propag *)
+lemma dict_sharing[constraint_simp_rule all_matches no_re_eval_on_head_reconsideration
+    symmetric irreflexive]: "
+   [|  try (intensionally_inequal(d1, d2))  ;    primunify d1 d2  ;
+       constraint (d1 dictof C)  |] ==>  d1 dictof C &&& d2 dictof C"
   by (simp add: primunify_const_def constraint_const_def conjunctionI)
 
 
@@ -1919,14 +2028,13 @@ ML {*
 *}
 
 
-(* FIXME: monoid constraint not simplified *)
 ML {*
   val pats = [@{cpat "?d dictof groups(A * B)"},
     @{cpat "?d' dictof monoids(A)"}] |> map (Thm.term_of #> FOLogic.mk_Trueprop)
   val res = exception_trace (fn () => test_constraint_simp  @{context} pats)
   val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
 *}
-  
+
 
 
 
@@ -2022,7 +2130,9 @@ lemma [elabMR_unchecked]: "[|
 
 
 
-(* FIXME: hidden universe leve ?i48 not discharged *)
+(* FIXME: hidden universe level ?i48 not discharged *)
+(* FIXME: hiddenness is wrongly computed because some univlvl only occurs in
+     elaborated term, but not in any constraints ! *)
 ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 
