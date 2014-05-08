@@ -1363,63 +1363,8 @@ fun invoke_linear_ctxt_boundary_handlers boundary ctxt =
 
 
 
-fun cert_standalone_term_inst thy tenv =
-  Vartab.dest tenv |> map (fn (ixn, (T, t)) => (Var (ixn, T), t) |> pairself (cterm_of thy))
-
-(* After matching we check if any unification variables have been instantiated
-   and fail then.  *)
-fun gen_pattern_matches_opt match ctxt (pat,  term) =
-  (let
-    val thy = Proof_Context.theory_of ctxt
-    val (tyenv, tenv) = match thy (pat, term) (Vartab.empty, Vartab.empty)
-    val Tinst = Vartab.dest tyenv |> map (fn (ixn, (sort, ty)) => ((ixn, sort), ty))
-    val inst = Vartab.dest tenv |> map (fn (ixn, (T, t)) => ((ixn, Envir.norm_type tyenv T), t))
-   in SOME (Tinst, inst) end)
-   (* NB: DecompPattern.decompose_match also raises Pattern.MATCH and not a distinct exception *)
-  handle Pattern.MATCH => NONE
-
-fun gen_pattern_match_opt match ctxt (pat, term) =
-  gen_pattern_matches_opt (fn thy => fn ([pat'], [term']) => match thy (pat', term')) ctxt ([pat], [term])
 
 
-(* nimmt beta-normale HO-Patterns pat und term an, eta-expandiert on-the-fly
-   BTW: Typen von pat, term werden von Pattern.match selbst gematcht *)
-val pattern_match_opt = gen_pattern_match_opt Pattern.match
-val pattern_matches_opt =
-  let fun match thy (pats, terms) = fold (Pattern.match thy) (pats ~~ terms)
-  in gen_pattern_matches_opt match end
-fun cpattern_matches_opt ctxt (cpats, cterms) =
-  ([], []) |> fold (fn (cpat, cterm) => fn inst =>
-      let
-        val (cpat', cterm') = (cpat, cterm) |> pairself (Thm.instantiate_cterm inst)
-        val inst2 = Thm.match (cpat', cterm')
-      in (fst inst @ fst inst2, snd inst @ snd inst2) end)
-    (cpats ~~ cterms)
-  |> SOME
-  handle Pattern.MATCH => NONE
-fun cpattern_match_opt ctxt (cpat, cterm) = cpattern_matches_opt ctxt ([cpat], [cterm])
-  
-
-val decompose_pattern_match_opt = gen_pattern_match_opt DecompPattern.decompose_match
-
-fun cert_inst thy (Tinst, inst) =
-  (Tinst |> map ((fn ((ixn, S), T) => (TVar (ixn, S), T)) #> pairself (ctyp_of thy)),
-   inst |> map ((fn ((ixn, T), t) => (Var (ixn, T), t)) #> pairself (cterm_of thy)))
-
-fun no_lambdas (t1 $ t2) = no_lambdas t1 andalso no_lambdas t2
-  | no_lambdas (Abs(_,_,_)) = false
-  | no_lambdas _ = true
-
-(* TODO(opt): decomposing pattern matching mit cterm verwaltung *)
-fun cdecompose_pattern_match_opt ctxt (cpat, cterm) =
-  (* TODO: nimmt die einfache Semantik von decompose pattern matching an,
-      ohne Verschraenkung von first-order und higher-order pattern matching *)
-  (* der no_lambdas Fall ist 70-80 Mal haeufiger *)
-  if no_lambdas (Thm.term_of cpat) then (* so no implicit eta expansion of cterm can happen *)
-    cpattern_match_opt ctxt (cpat, cterm)
-  else
-    decompose_pattern_match_opt ctxt (Thm.term_of cpat, Thm.term_of cterm)
-    |> Option.map (cert_inst (Proof_Context.theory_of ctxt))
 
 
 
@@ -1427,6 +1372,7 @@ fun pattern_fun_to_env_mapper f input env =
   let val (tyenv2, tenv2) = f input (Envir.type_env env, Envir.term_env env)
   in Envir.Envir { maxidx = Envir.maxidx_of env, tenv = tenv2, tyenv = tyenv2 } end
 
+(* TODO(refactor): use is inlined in some other places *)
 fun envdiff_str ctxt env1 env2 =
   env2 |> Envir.term_env |> fold Vartab.delete (Vartab.keys (Envir.term_env env1))
   |> Vartab.dest |> map (fn (ixn, (T, t)) =>
@@ -1466,10 +1412,8 @@ fun pattern_matches_envctxt ctxt (pats, terms) =
         SOME ctxt_ => pattern_match_envctxt ctxt_ (pat, term)
       | NONE => NONE)
     (pats ~~ terms)
-(* FIXME: decompose_match with identification of variables that are shared in object and pattern,
-     as in pattern_match_envctxt ?! *)
 val decompose_pattern_match_envctxt =
-  gen_pattern_match_envctxt DecompPattern.decompose_match norm_with_env_in_run_state
+  gen_pattern_match_envctxt DecompPattern.decompose_match_w_shared_vars norm_with_env_in_run_state
 
 
 fun pattern_unifies thy (t1, t2) =

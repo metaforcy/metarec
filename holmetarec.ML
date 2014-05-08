@@ -525,8 +525,10 @@ end
                  val factconcl = fact |> Thm.concl_of
                  (* TODO(refactor?): minor code duplication with MetaRec.add_assm *)
                  val (pobj2, iobjs2, oobjs2) = factconcl |> jud_matcher |> the
-                 val _ = tracing ("pobj_pat, ibojs_pat, oobjs_pat: "^commas ((pobj_pat :: iobjs_pat @ oobjs_pat) |> map (Syntax.string_of_term ctxt)))
-                 val _ = tracing ("pobj2, ibojs2, oobjs2: "^commas ((pobj2 :: iobjs2 @ oobjs2) |> map (Syntax.string_of_term ctxt)))
+                 val _ = tracing ("pobj_pat, ibojs_pat, oobjs_pat: "
+                   ^commas ((pobj_pat :: iobjs_pat @ oobjs_pat) |> map (Syntax.string_of_term ctxt)))
+                 val _ = tracing ("pobj2, ibojs2, oobjs2: "
+                   ^commas ((pobj2 :: iobjs2 @ oobjs2) |> map (Syntax.string_of_term ctxt)))
                  val is_fact =
                     Thm.nprems_of fact = 0
                     andalso null (Term.add_vars factconcl [])
@@ -536,11 +538,10 @@ end
                      MetaRec.err_with_trace ctxt ("collectHOLfacts proc: internal error: not a fact in fact table")
                    else ()
               in
-                case MetaRec.decompose_pattern_match_opt ctxt (pat, factconcl) of
-                  SOME inst =>
+                case MetaRec.decompose_pattern_match_envctxt ctxt (pat, factconcl) of
+                  SOME ctxt2 =>
                     (iobjs_pat @ oobjs_pat, iobjs2 @ oobjs2)
-                    |> pairself (map (Term_Subst.instantiate inst #> Envir.beta_norm))
-                    |> MetaRec.pattern_matches_opt ctxt |> is_some
+                    |> MetaRec.pattern_matches_envctxt ctxt2 |> is_some
                 | NONE => false
               end)
       
