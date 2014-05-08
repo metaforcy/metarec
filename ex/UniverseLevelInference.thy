@@ -649,7 +649,6 @@ lemma [elabMR_unchecked]: "[|
 
 
 
-
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [elabMR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
@@ -1199,11 +1198,8 @@ ML {*  elab @{context} @{term "(fun f. fun x. bla(x))"}  *}
 
 (* NB: no merge of universe constraints for the same type yet,
    because typing constraint merge rule is not active yet *)
-(* FIXME: if pseudoterm starts with a fun, the first bound variable 
-   somehow gets renamed to x *)
 ML {*  elab @{context} @{term "(fun f. fun x. f # x)"} *}
 
-(* FIXME: first bound variable f somehow gets renamed to x in pseudo-term !?! *)
 ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 
 (* minor FIXME: stupid __reordfree0 bound variable name. can actually be eta-contracted away here *)

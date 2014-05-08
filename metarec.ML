@@ -56,14 +56,10 @@ struct
 
 
 
-(* TODO(feature): globally track unification variables (those introduced by fresh_unifvar_proc;
-     as opposed to matching variables) in run_state and disallow their instantiation during rule matching *)
-
 (* TODO(feature):
-     * tracking of originating rule  of constraints and delayed unification problems to allow better error message 
-     * tracking von Unifikationen waehrend Constraint-{Propagierung, Vereinfachung}
-       (dann braucht man keine on-the-fly Propagierung von Constraints sobald sie entstehen um
-       bessere Fehlermeldungen zu kriegen)
+     * globally track unification variables (those introduced by fresh_unifvar_proc;
+       as opposed to matching variables) in run_state and disallow their instantiation during rule matching
+     * tracking of originating rule delayed unification problems to allow better error message 
 *)
 
 
@@ -463,6 +459,7 @@ type run_info_ty = bool * int * run_state option
 datatype proofterm = Assumption of term | AllI of (string * typ) * proofterm | ImpI of term * proofterm
   | ThmPrf of thm * ((indexname * sort) * typ) list * ((indexname * typ) * term) list
   | MP of proofterm * proofterm | AllE of proofterm * term
+  | BoundRenaming of term * proofterm
 
 
 (* proofterm with its proposition and open assumptions *)
@@ -1805,6 +1802,8 @@ fun prf_to_display_term ctxt prfp =
           Data.app_prf_displayt (transf prf1) (transf prf2)
       | transf (AllE (prf, t)) =
           Data.app_prf_displayt (transf prf) (norm t)
+      | transf (BoundRenaming (t, prf)) =
+          Data.app_prf_displayt (norm t) (transf prf)
     fun err msg = err_with_trace ctxt ("prf_to_display_term: failed while transforming proof of "
       ^str_of_normed_term ctxt (prop_of_proofp prfp)
       ^":\n"^msg)
@@ -1972,6 +1971,19 @@ fun allE_prf ctxt (ProofPack (prop, prf, assms)) t =
 fun allE_rev_prf ctxt t prf = allE_prf ctxt prf t
 
 
+fun bound_rename_prf ctxt renamed_prop (ProofPack (prop, prf, assms)) =
+  let
+    val norm = norm_with_env_in_run_state ctxt
+    val _ =
+      if aconv_norm norm (renamed_prop, prop) then ()
+      else err_with_trace ctxt ("internal error: bound_rename_prf failed: "
+        ^" renamed prop "^Syntax.string_of_term ctxt (norm renamed_prop)
+        ^" is not alpha-equal to "^Syntax.string_of_term ctxt (norm prop))
+  in
+    ProofPack (renamed_prop, BoundRenaming(renamed_prop, prf), assms)
+  end
+
+
 
 fun fresh_proofp_of_rule (DirectRule th) ctxt = fresh_thm_prf th ctxt 
   | fresh_proofp_of_rule (LocalRule proofp) ctxt =  
@@ -2086,6 +2098,8 @@ fun fold_terms_prf f ctxt prfp =
           foldp prf1 #> foldp prf2
       | foldp (AllE (prf, t)) =
           foldp prf #> f (norm_with_env_in_run_state ctxt t)
+      | foldp (BoundRenaming (t, prf)) =
+          f (norm_with_env_in_run_state ctxt t) #> foldp prf
   in
     f (norm_with_env_in_run_state ctxt (prop_of_proofp prfp))
     #> foldp (proof_of_proofp prfp)
@@ -2152,11 +2166,13 @@ fun replay_prf ctxt prfp =
            Thm.implies_elim th1 th2
          end
       | replay (AllE (prf, t)) =
+          let val th = replay prf
+          in Thm.forall_elim (certnorm t) th |> beta_convert end
+      | replay (BoundRenaming (t, prf)) =
           let
+            val renaming_impl = Thm.trivial (certnorm t)
             val th = replay prf
-          in
-            Thm.forall_elim (certnorm t) th |> beta_convert
-          end
+          in Thm.implies_elim renaming_impl th end
             
 
     val th_fxd = replay prf
@@ -3114,22 +3130,23 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
     fun rulematch () =
       let
         fun rename_proofp proofp ctxt4 = 
-          proofp |> map_prop_of_proofp (fn prop =>
-            let
-              (* val _ = tracing ("before renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of rule))) *)
-                (* rename bound variables for better error messages *)
-                (* use uninstantiated rule to avoid confusion with var:=abstraction instantiations *)
-                (* pobj_of_rule, iobjs_of_rule  und  obj, iobjs  beta-normal wg add_rule *)
-              val (pobj_of_rule, iobjs_of_rule, _) = prop |> Logic.strip_imp_concl |> jud_matcher |> the
-              (* FIXME: bound variable name that we first descend into is not shared ?!?! should pobj, iobjs be normed ?! *)
-              val prop2 = prop
-                |> Term.rename_abs (pack_pobj_iobjs pobj_of_rule iobjs_of_rule)
-                     (pack_pobj_iobjs pobj iobjs)
-                |> the_default prop
-              (* val _ = tracing ("after renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of res))) *)
-            in
-              prop2
-            end)
+          let
+            val prop = prop_of_proofp proofp
+            (* val _ = tracing ("before renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of rule))) *)
+              (* rename bound variables for better error messages *)
+              (* use uninstantiated rule to avoid confusion with var:=abstraction instantiations *)
+              (* pobj_of_rule, iobjs_of_rule  und  obj, iobjs  beta-normal wg add_rule *)
+            val (pobj_of_rule, iobjs_of_rule, _) = prop |> Logic.strip_imp_concl |> jud_matcher |> the
+            (* TODO(correctness): should pobj, iobjs be normed ?! *)
+            val prop2_opt = prop
+              |> Term.rename_abs (pack_pobj_iobjs pobj_of_rule iobjs_of_rule)
+                   (pack_pobj_iobjs pobj iobjs)
+            (* val _ = tracing ("after renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of res))) *)
+          in
+            case prop2_opt of
+              SOME prop2 => proofp |> bound_rename_prf ctxt4 prop2
+            | NONE => proofp
+          end
 
         fun app_rule proofp' ctxt4 = 
           let
@@ -4429,6 +4446,8 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
     (* val _ = tracing ("metarec derivation was successful (but no replay tried yet) with: "
           ^str_of_normed_term ctxt2 (prop_of_proofp prf)) *)
+    (* val _ = tracing ("prf for metarec derivation is "
+      ^Syntax.string_of_term ctxt2 (prf_to_display_term ctxt2 prf)) *)
     (* val _ = 
       let
         val {delayed_unifs, constraints, ...} = get_the_run_state (Context.Proof ctxt2)
