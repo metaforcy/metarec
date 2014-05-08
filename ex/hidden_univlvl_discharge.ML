@@ -46,6 +46,10 @@ struct
   fun calc_hidden_terminal_univlvl_discharge Cs ctxt =
     let
       val gctxt = Context.Proof ctxt
+      val (concl, vars_in_concl) = case MetaRec.get_normed_concl_stats ctxt of
+          SOME (MetaRec.ConclStats (concl, _, vars)) => (concl, vars)
+        | NONE => error ("calc_hidden_terminal_univlvl_discharge: no concl stats available "
+          ^"in linear ctxt in runstate")
 
       fun dest_univ_ieq C =
         case MetaRec.decompose_judgement gctxt C of
@@ -85,9 +89,12 @@ struct
         cat_lines (Term_Graph.dest ul_graph |> map (fn ((i, prevs), succs) =>
           "  "^Syntax.string_of_term ctxt i^" -> "^commas (succs |> map (Syntax.string_of_term ctxt) )
             ^"   (eqs from: "^commas (prevs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))^")")))
-        
+      
+      val _ = tracing ("concl is "^Syntax.string_of_term ctxt concl)
+
       val hidden_uls = uls |> filter_out (fn i =>
         not (can Term.dest_Var i)
+        orelse member (op =) vars_in_concl (Term.dest_Var i)
         orelse Cs |> exists (fn C =>
           not (is_some (dest_univlvl ctxt C)) andalso not (is_some (dest_univ_ieq C))
           andalso member (op =) (Term.add_vars C []) (Term.dest_Var i)))

@@ -1401,6 +1401,7 @@ ML {*
         |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
         |> Context.proof_map (MetaRec.map_constraints_in_run_state (K
              (Cs |> map (rpair (MetaRec.ConstraintTrace [])))))
+        |> MetaRec.put_concl_in_lin_ctxt @{prop "True"}
       val ((simpth, uninst_uls, inst_uls), _) =
         HiddenUnivlvlDischarge.calc_hidden_terminal_univlvl_discharge Cs ctxt
 
@@ -1605,6 +1606,7 @@ ML {*
         |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
         |> Context.proof_map (MetaRec.map_constraints_in_run_state (K (Cs
              |> map (rpair (MetaRec.ConstraintTrace [])))))
+        |> MetaRec.put_concl_in_lin_ctxt @{prop "True"}
       val ((Cs', implied_Cs), ctxt2) = MetaRec.constraint_simplification true ctxt
       val cert = cterm_of (Proof_Context.theory_of ctxt0)
     in
@@ -2126,9 +2128,6 @@ lemma [elabMR_unchecked]: "[|
 
 
 
-(* FIXME: hidden universe level ?i48 not discharged *)
-(* FIXME: hiddenness is wrongly computed because some univlvl only occurs in
-     elaborated term, but not in any constraints ! *)
 ML {*  elab @{context} @{term "(map # f # [nat])"}  *}
 
 

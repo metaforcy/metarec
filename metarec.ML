@@ -1703,11 +1703,30 @@ fun prop_of_rule ctxt (DirectRule th) = prop_of th
 
 
    (* applied constraint rule * input constraints *)
- datatype chr_inst_trace = ChrInstTrace of term  * term list 
- structure ChrInstTracking = Proof_Data(
-   type T = (typ * (term * chr_inst_trace)) Vartab.table
-   fun init _ = Vartab.empty
- );
+datatype chr_inst_trace = ChrInstTrace of term  * term list 
+structure ChrInstTracking = Proof_Data(
+  type T = (typ * (term * chr_inst_trace)) Vartab.table
+  fun init _ = Vartab.empty
+);
+
+
+
+structure ConclInLinCtxt = Proof_Data(
+  type T = term option
+  fun init _ = NONE
+);
+
+datatype concl_stats = ConclStats of term * (indexname * sort) list * (indexname * typ) list
+fun mk_normed_concl_stats ctxt concl =
+  let val concl' = norm_with_env_in_run_state ctxt concl
+  in ConclStats (concl', Term.add_tvars concl' [], Term.add_vars concl' []) end
+
+fun get_normed_concl_stats ctxt =
+  get_linear_ctxt_in_run_state ctxt |> ConclInLinCtxt.get
+  |> Option.map (mk_normed_concl_stats ctxt)
+fun put_concl_in_lin_ctxt concl = map_linear_ctxt_in_run_state (ConclInLinCtxt.put (SOME concl) )
+
+
 
 (* TODO(opt):
      macht es Sinn nur die letzten n Regeln-Tracing-Closures auf dem Trace
@@ -4443,7 +4462,6 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
 
     val ((prf, oobjs), ctxt2) = metarec_worker true ctxt (SOME failcont) jid (pobj', iobjs')
       ||> invoke_linear_ctxt_boundary_handlers ToplevelMetarecBoundary
-
     (* val _ = tracing ("metarec derivation was successful (but no replay tried yet) with: "
           ^str_of_normed_term ctxt2 (prop_of_proofp prf)) *)
     (* val _ = tracing ("prf for metarec derivation is "
@@ -4459,51 +4477,54 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
           ^Display.string_of_thm ctxt2 th_1)
        end *)
 
-    val (prf2, ctxt3) = metarec_constraint_simp false prf ctxt2
+    val prop = prop_of_proofp prf
+    val ctxt3 = ctxt2 |> put_concl_in_lin_ctxt prop
+
+    val (prf2, ctxt4) = metarec_constraint_simp false prf ctxt3
     (* val _ = 
       let
-        val {delayed_unifs, constraints, ...} = get_the_run_state (Context.Proof ctxt3)
+        val {delayed_unifs, constraints, ...} = get_the_run_state (Context.Proof ctxt4)
         val _ = tracing ("replaying proof after constraint min")
         val _ = tracing ("  delayed unifs are "
-          ^commas (get_delayed_unifs_in_run_state ctxt3
-             |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt3))
-          ^"\n  constraints are "^commas (get_constraints_in_run_state ctxt3
-             |> map (fst #> str_of_normed_term ctxt3)))
-        val th_2 = prf2 |> fold_rev (impI_prf ctxt3) (map (Logic.mk_equals o fst) delayed_unifs
-            @ map fst constraints)
-          |> replay_prf ctxt3 
-      in
-        tracing ("proof replay after constraint min: "^Display.string_of_thm ctxt3 th_2)
-      end *)
-
-    val (prf3, ctxt4) = metarec_structural_unifications false prf2 ctxt3
-    (* val _ = 
-      let
-        val {constraints, ...} = get_the_run_state (Context.Proof ctxt4)
-        val _ = tracing ("replaying proof after structural unifications")
-        (* val _ = tracing ("  delayed unifs are "
           ^commas (get_delayed_unifs_in_run_state ctxt4
-             |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt4)))  *)
-        val th_3 = prf3 |> fold_rev (impI_prf ctxt4 o fst) constraints
+             |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt4))
+          ^"\n  constraints are "^commas (get_constraints_in_run_state ctxt4
+             |> map (fst #> str_of_normed_term ctxt4)))
+        val th_2 = prf2 |> fold_rev (impI_prf ctxt4) (map (Logic.mk_equals o fst) delayed_unifs
+            @ map fst constraints)
           |> replay_prf ctxt4 
       in
-        tracing ("proof replay after structural unifications: "^Display.string_of_thm ctxt4 th_3)
+        tracing ("proof replay after constraint min: "^Display.string_of_thm ctxt4 th_2)
       end *)
 
-    val (prf4, ctxt5) = metarec_constraint_simp true prf3 ctxt4
+    val (prf3, ctxt5) = metarec_structural_unifications false prf2 ctxt4
+    (* val _ = 
+      let
+        val {constraints, ...} = get_the_run_state (Context.Proof ctxt5)
+        val _ = tracing ("replaying proof after structural unifications")
+        (* val _ = tracing ("  delayed unifs are "
+          ^commas (get_delayed_unifs_in_run_state ctxt5
+             |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt5)))  *)
+        val th_3 = prf3 |> fold_rev (impI_prf ctxt5 o fst) constraints
+          |> replay_prf ctxt5 
+      in
+        tracing ("proof replay after structural unifications: "^Display.string_of_thm ctxt5 th_3)
+      end *)
+
+    val (prf4, ctxt6) = metarec_constraint_simp true prf3 ctxt5
 
     (* NB: we always need a final pass for structural unifications after the last constraint simplification pass.
          Still necessary now that contextual discharge of typing constraints works without unification? *)
-    val (prf5, ctxt6) = metarec_structural_unifications true prf4 ctxt5
+    val (prf5, ctxt7) = metarec_structural_unifications true prf4 ctxt6
 
-    (* val _ = tracing ("replaying final proof for  "^str_of_normed_term ctxt6 (prop_of_proofp prf5)) *)
+    (* val _ = tracing ("replaying final proof for  "^str_of_normed_term ctxt7 (prop_of_proofp prf5)) *)
       (* TODO(opt): nur close_derivation machen wenn die Ableitung gross genug war ?! *)
       (* TODO(feature): try to un-normalize to original judgement? *)
-    val th = replay_prf ctxt6 prf5 |> Thm.close_derivation
+    val th = replay_prf ctxt7 prf5 |> Thm.close_derivation
 
-    val {delayed_unifs=delayed_unifs', constraints=constraints', ...} = get_the_run_state (Context.Proof ctxt6)
+    val {delayed_unifs=delayed_unifs', constraints=constraints', ...} = get_the_run_state (Context.Proof ctxt7)
     (* NB: oobjs can be instantiated further now, due to further unifications *)
-    val oobjs' = oobjs |> map (norm_with_env_in_run_state ctxt6) 
+    val oobjs' = oobjs |> map (norm_with_env_in_run_state ctxt7) 
   in
     ((th, oobjs'), (delayed_unifs' |> filter_out snd |> map fst, constraints' |> map fst))
   end
