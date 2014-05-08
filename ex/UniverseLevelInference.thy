@@ -626,6 +626,7 @@ lemma [elabMR_unchecked]: "[|
   x elabto x : A"
  unfolding elabjud_def constraint_const_def foconstraint_const_def constraint_typing_def .
 
+
 (* NB: in the case of non-atomic terms that are opaque to type inference
     we use general non-first-order constraints, as f or x might contain local fixes.
    We don't have to treat the (% x. f(x)) case because elaboration creates sets *)
@@ -1540,7 +1541,6 @@ ML {*  elab @{context} @{term "<(g # x) abstractas y, y, g # x, y>"}  *}
 (* tests for terminal hidden universe level discharge *)
   (* i73 hidden and terminal *)
 ML {*  elab @{context} @{term "f # (PI x:A. B(x))"}  *}
-  (* FIXME: typing constraint for C has no x:A in context *)
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y))"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:(B # x). C # x # y)"}  *}
 (* minor FIXME: reordfree naming visible *)
@@ -1614,7 +1614,7 @@ ML {*
     end
 *}
 
-(* FIXME: these tests omit the  i <: univlvl  constraints.
+(* minor FIXME: these tests omit the  i <: univlvl  constraints.
     that should only make a difference regarding hidden univlvl discharge *)
 ML {*
   val res = test_constraint_simp @{context}

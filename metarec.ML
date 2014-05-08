@@ -2733,6 +2733,8 @@ fun pot_note_in_lthy fact ctxt =
 
 
 and add_assm_terms_internal assms0 ctxt =
+  if null assms0 then ctxt
+  else
   let
     val {judgements, term_to_jud, ...} = get_current_ruledata (Context.Proof ctxt)
     val cert = cterm_of (Proof_Context.theory_of ctxt)
@@ -2795,7 +2797,7 @@ and add_assm_terms_internal assms0 ctxt =
     val {rules, ...} = get_current_ruledata (Context.Proof ctxt3)
     val {rules=rules2, ...} = get_current_ruledata (Context.Proof ctxt6)
       (* NB: we rely on the fact that the item net content is managed like a stack *)
-      (* TODO(opt): this is very slow?! *)
+      (* TODO(opt!!): this is very slow?! *)
     val new_rules = Symtab.dest rules2 |> maps (fn (jud_, itemnet) =>
       Item_Net2.content itemnet |> rev |> drop (Symtab.lookup rules jud_ |> Option.map Item_Net2.content |> the_default [] |> length)
       |> map (fn (ruleref, prior) => case ruleref of
@@ -2804,7 +2806,7 @@ and add_assm_terms_internal assms0 ctxt =
               ^Syntax.string_of_term ctxt6 (prop_of_proofp prfp))))
   in
     ctxt3
-    |> Context.proof_map (map_assms (append assms))
+    |> Context.proof_map (map_assms (fn As => append As assms))
     |> fold (fn (new_rule, rule_jud, prior) => fn ctxt_ =>
         let
           val (rule', ctxt_2) = construct_local_rule new_rule ctxt_
@@ -2882,7 +2884,9 @@ and solve_prems_standalone global_fail_cont local_fail_cont rule prems ctxt0 =
   let
     val run_st0_opt = get_run_state (Context.Proof ctxt0)
     val ctxt0_decld_prems = ctxt0 |> fold Variable.declare_term prems (* NB: for correct maxidx *)
-    val ctxt = ctxt0 |> Context.proof_map (set_run_state (init_run_state ctxt0_decld_prems) #> set_assms [])
+    (* NB: we don't  set_assms []  because ctxt is threaded linearly in frule execution, which
+       would lead to loss of assms in add_local_fact in add_assm *)
+    val ctxt = ctxt0 |> Context.proof_map (set_run_state (init_run_state ctxt0_decld_prems))
     val (prfps, ctxt2) = solve_prems true true global_fail_cont local_fail_cont (prop_of rule) prems ctxt
     val ths = map (replay_prf ctxt2) prfps
 
@@ -6358,7 +6362,6 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
     val rel_assms =
       get_assms (Context.Proof ctxt2) |> map norm
       |> filter_out (fn assm => null (inter (op =) (Term.add_frees assm []) local_frees0))
-      |> rev
     val rel_frees = local_frees0 |> fold Term.add_frees rel_assms
     val local_frees = rel_local_frees ctxt2 (SOME rel_frees)
 
@@ -6380,8 +6383,6 @@ fun constraint_gen_proc local_constraint ctxt fail_cont (t0, [], _) =
     val t_prf = t'_prf
       |> fold (allE_rev_prf ctxt2) local_frees
       |> fold (mp_rev_prf ctxt2 o assumption_prf) rel_assms
-
-    (* val _ = tracing ("generating constraint "^str_of_normed_term ctxt2 t'^" ...") *)
 
     val intro_th = if local_constraint then Data.constraintI else Data.foconstraintI
     val (res_prf, ctxt3) = mps_match_on_freshthm_prf intro_th [t_prf] ctxt2
