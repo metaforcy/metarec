@@ -1577,7 +1577,7 @@ ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
 
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv i. f # (guniv i)"} *}
-ML {*  elab_with_expected_error "pattern unification of *i* and *j* failed" @{context}
+ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv j ~> guniv i. f # (guniv j) # (guniv i)"} *}
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv j ~> guniv k ~> guniv i. f # (guniv j) # (guniv k) # (guniv i)"} *}
@@ -1587,6 +1587,7 @@ ML {*  elab_with_expected_error "universe_inconsistency" @{context}
 
 
 (* test of postprocessing that unlifts of first-order vars (here: universe level vars) *)
+(* FIXME: hidden terminal universe level ?i80 not discharged *)
 ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
 
 

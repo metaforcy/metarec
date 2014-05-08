@@ -3623,8 +3623,7 @@ and constraint_simplification allow_propagation ctxt00 =
               ^commas (inst_old_Cs |> map (fst #> Syntax.string_of_term ctxt))) *)
       in
         (constraint_graph, ctxt2)
-        |> fold (fn (inst_old_C, _) => reg_constraint true inst_old_C NONE NONE)
-             inst_old_Cs
+        |> reg_constraints true NONE (map (fst #> rpair NONE) inst_old_Cs)
       end
 
 
@@ -3876,31 +3875,21 @@ and constraint_simplification allow_propagation ctxt00 =
                            (let val norm = norm_with_env_in_run_state ctxt4
                             in ChrInstTrace (norm rl_prop, map norm cs_for_heads) end)
                   in
-                    (* FIXME: add new constraints in one chunk to constraint graph
-                         (to be processed by other rules after that),
-                         so that exconstraint judgement works correctly in
-                         further rule application over them  *)
                     if is_propagation then
                       (constraint_graph2, ctxt7)
-                      |> fold (fn (new_constr, new_constr_prf) => 
-                             if new_constr aconv (Data.mk_Trueprop Data.True) then
-                               I
-                             else
-                               reg_constraint false new_constr (SOME rl_prop) (SOME new_constr_prf))
-                           concls_prfs
-                      (* TODO(feature): allow dynamic constraint generation in propagation rules *)
-                      (* |> fold (fn new_constr => reg_constraint false new_constr (SOME rl_prop) NONE)
-                           new_dynamic_constraints *)
+                      |> reg_constraints false (SOME rl_prop)
+                           (concls_prfs |> filter_out (fn (C, _) => C aconv (Data.mk_Trueprop Data.True))
+                            |> map (apsnd SOME))
+                      (* TODO(feature): allow dynamic constraint generation in propagation rules:
+                           append to concls_prfs:   ...  @ (map (rpair NONE) new_dynamic_constraints) *)
                       |> SOME
                     else
                       (constraint_graph2, ctxt7)
-                      |> fold (fn (inp_constr, inp_constr_prf) =>
-                             (* NB: since inp_constr always already exists in the constraint graph,
-                                this just ensures a proof for it is registered *)
-                             reg_constraint false inp_constr (SOME rl_prop) (SOME inp_constr_prf))
-                           concls_prfs
-                      |> fold (fn new_constr => reg_constraint false new_constr (SOME rl_prop) NONE)
-                           new_constraints
+                      |> reg_constraints false (SOME rl_prop)
+                             (* NB: since the concl_prfs always already exists in the constraint graph,
+                                this just ensures a proof for them is registered *)
+                           (map (apsnd SOME) concls_prfs 
+                            @ map (rpair NONE) new_constraints)
                       |> SOME
                   end
               end
@@ -3918,12 +3907,26 @@ and constraint_simplification allow_propagation ctxt00 =
       end
 
 
+    and reg_constraints force_reconsideration origin_rule_app_opt Cs_and_implied_by_opts (constraint_graph, ctxt) =
+      let
+        (* NB: we first add new constraints in one chunk to constraint graph
+             and process them later, so that exconstraint judgement works correctly during
+             the CHR execution for the second to last constraints *)
+        val (Cs_and_exists, (constraint_graph2, ctxt2)) = (constraint_graph, ctxt)
+          |> fold_map (reg_constraint force_reconsideration origin_rule_app_opt)
+               Cs_and_implied_by_opts
+        val exec_Cs = Cs_and_exists
+          |> (not force_reconsideration) ? filter_out snd
+      in
+        (constraint_graph2, ctxt2)
+        |> fold (consider_rules_for_constraint force_reconsideration) exec_Cs
+      end
+
     (* TODO(feature): tracking of serveral implications leading to a constraint *)
     (* NB: force_reconsideration does *NOT* affect the constraints that are generated from this one,
          because the ones that are affected by an instantiation after their generation are all
          collected determined directly from the constraint graph *)
-    and reg_constraint force_reconsideration C0
-        origin_rule_app_opt implied_by_opt (constraint_graph, ctxt) = 
+    and reg_constraint force_reconsideration origin_rule_app_opt (C0, implied_by_opt) (constraint_graph, ctxt) = 
       let
         val C = norm_with_env_in_run_state ctxt C0
         val C_eta = C |> Envir.eta_contract
@@ -3986,52 +3989,51 @@ and constraint_simplification allow_propagation ctxt00 =
               readd_C_with implied_by_opt')
           else
             constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt'))
+
       in
-        if exists_already andalso not force_reconsideration then
-          let val _ = () (* tracing ("constraint "^Syntax.string_of_term ctxt C^" exists already") *)
-          in
-            (constraint_graph', ctxt)
-          end
-        else
-          let
-            (* val _ = tracing ("generated new constraint "^Syntax.string_of_term ctxt C
-              ^" implied by \n  "^
-                (case implied_by_opt of
-                  SOME prf => str_of_normed_term ctxt (prop_of_proofp prf)
-                | NONE => "nothing")
-              ^"\n  originating from "
-                ^(case origin_rule_app_opt of
-                   SOME rl => str_of_normed_term ctxt rl
-                 | NONE => "initial constraints or instantiation of existing constraint")) *)
-            fun is_propag_chr (((_, _), rl_ty), _) = (rl_ty = PropagationCHR)
-            val pot_propag_and_simp_rls = 
-              Net.match_term constraint_propag_and_simp_rules_hdidx C_eta
-              |> (exists_already andalso force_reconsideration) ?
-                   filter_out (fn (((_, chr_flags), _), _) =>
-                     member (op =) chr_flags NoReEvalOnHeadReconsideration)
-              |> (not allow_propagation) ?  filter_out is_propag_chr
-              |> map (fn (rl_flags_ty, head_idx) => (rl_flags_ty, SOME (head_idx, C0)))
-            val pot_propag_rls = pot_propag_and_simp_rls |> filter is_propag_chr
-            val pot_simp_rls = pot_propag_and_simp_rls |> filter_out is_propag_chr
-
-            (* val _ = tracing ("reg_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
-
-            (* val _ = tracing ("pot_propag_rls for new constraint "
-              ^ Syntax.string_of_term ctxt C ^" are\n"
-              ^cat_lines (pot_propag_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt))) *)
-
-            val res1_opt = (constraint_graph', ctxt)
-              |> gen_with_pot_rules SimpCHR pot_simp_rls
-          in
-            (* only apply propagation rule if no simplification rule was successful *)
-            case res1_opt of
-              SOME res1 => res1
-            | _ =>
-                (constraint_graph', ctxt)
-                |> gen_with_pot_rules PropagationCHR pot_propag_rls 
-                |> the_default (constraint_graph', ctxt)
-          end
+        (((C0, C_eta), exists_already), (constraint_graph', ctxt))
       end
+
+    and consider_rules_for_constraint force_reconsideration ((C0, C_eta), exists_already) (constraint_graph, ctxt) =
+      let
+        (* val _ = tracing ("generated new constraint "^Syntax.string_of_term ctxt C
+          ^" implied by \n  "^
+            (case implied_by_opt of
+              SOME prf => str_of_normed_term ctxt (prop_of_proofp prf)
+            | NONE => "nothing")
+          ^"\n  originating from "
+            ^(case origin_rule_app_opt of
+               SOME rl => str_of_normed_term ctxt rl
+             | NONE => "initial constraints or instantiation of existing constraint")) *)
+        fun is_propag_chr (((_, _), rl_ty), _) = (rl_ty = PropagationCHR)
+        val pot_propag_and_simp_rls = 
+          Net.match_term constraint_propag_and_simp_rules_hdidx C_eta
+          |> (exists_already andalso force_reconsideration) ?
+               filter_out (fn (((_, chr_flags), _), _) =>
+                 member (op =) chr_flags NoReEvalOnHeadReconsideration)
+          |> (not allow_propagation) ?  filter_out is_propag_chr
+          |> map (fn (rl_flags_ty, head_idx) => (rl_flags_ty, SOME (head_idx, C0)))
+        val pot_propag_rls = pot_propag_and_simp_rls |> filter is_propag_chr
+        val pot_simp_rls = pot_propag_and_simp_rls |> filter_out is_propag_chr
+
+        (* val _ = tracing ("reg_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
+
+        (* val _ = tracing ("pot_propag_rls for new constraint "
+          ^ Syntax.string_of_term ctxt C ^" are\n"
+          ^cat_lines (pot_propag_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt))) *)
+
+        val res1_opt = (constraint_graph, ctxt)
+          |> gen_with_pot_rules SimpCHR pot_simp_rls
+      in
+        (* only apply propagation rule if no simplification rule was successful *)
+        case res1_opt of
+          SOME res1 => res1
+        | _ =>
+            (constraint_graph, ctxt)
+            |> gen_with_pot_rules PropagationCHR pot_propag_rls 
+            |> the_default (constraint_graph, ctxt)
+      end
+
 
 
     and apply_simproc (serial, (exact_simpth_match, simproc)) (constraint_graph_, ctxt_) =
@@ -4060,7 +4062,7 @@ and constraint_simplification allow_propagation ctxt00 =
      (* constraint store with tracking which other constraints optionally imply this constraint *)
     val constraint_graph0 = Net.empty : (term * proof_pack option) Net.net
     val (constraint_graph', ctxt') = (constraint_graph0, ctxt00)
-      |> fold (fn C => reg_constraint false C NONE NONE) constraints0
+      |> reg_constraints false NONE (constraints0 |> map (rpair NONE))
       |> fold apply_simproc constraint_simprocs
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
