@@ -141,6 +141,10 @@ definition
 where
   "frule_const(P) == P"
 
+definition
+  exact_rule_const :: "prop => prop" ("exactrule _" [5] 10)
+where
+  "exact_rule_const(P) == P"
 
 
 
@@ -284,6 +288,8 @@ ML {*
     val brule_const_def = @{thm brule_const_def}
     val frule_const_name = @{const_name frule_const}
     val frule_const_def = @{thm frule_const_def}
+    val exact_rule_const_name = @{const_name exact_rule_const}
+    val exact_rule_const_def = @{thm exact_rule_const_def}
 
     val constraint_headterm = @{term constraint_const} |> max_polym
     val constraintI = @{thm constraintI}

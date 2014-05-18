@@ -412,14 +412,20 @@ structure HOLMetaRec = struct
   fun simpto_proc power ctxt (ct, [], _) =
     let
       val {rules, ...} = MetaRec.get_current_ruledata (Context.Proof ctxt)
-      val inet_content = Symtab.lookup rules "HOLMetaRecSyntax.rewto_const_jud"
-        |> Option.map (Item_Net2.content) |> these
+      val inet_content =
+        Item_Net2.retrieve rules
+          (MetaRec.pack_jid_pobj_iobjs "HOLMetaRecSyntax.rewto_const_jud"
+            (Var(("x", 0), Term.dummyT)) [])
       val simprules = inet_content
-        |> map_filter (fn (ruleref, _) =>
+        |> map_filter (fn ((ruleref, matching_ty), _) =>
              (* NB: we use here that synprocs are executed in a context with the *ground*
                   assumptions as direct rules *)
              case ruleref of
-               MetaRec.DirectRule th => SOME (@{thm rewtoD} OF [th])
+               MetaRec.DirectRule th => (case matching_ty of
+                   MetaRec.NormalRuleMatching => SOME (@{thm rewtoD} OF [th])
+                 | MetaRec.ExactRuleMatching =>
+                     MetaRec.err_with_trace ctxt ("simpto_proc: encountered rule with exact matching "
+                       ^MetaRec.str_of_normed_term ctxt (Thm.prop_of th)))
              | MetaRec.LocalRule prfp =>
                  MetaRec.err_with_trace ctxt ("simpto_proc: encountered LocalRule "
                    ^MetaRec.str_of_normed_term ctxt (MetaRec.prop_of_proofp prfp)))

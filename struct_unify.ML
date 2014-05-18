@@ -335,6 +335,7 @@ and cases thy binders (s,t) (env, delayed_flexflexs) = case (strip_comb s,strip_
                 let
                   val Fty' = Fty |> Envir.norm_type (Envir.type_env env)
                 in
+                  (* TODO(feature): more general dependency-restriction-solution useful here? *)
                   (smash_flexflex ((F, Fty'), ss) ((F, Fty'), ts) env, delayed_flexflexs)
                 end)
           else
@@ -431,6 +432,14 @@ and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
         fold (liftvars_over thy binders lev (ss_Ts0, ss_bnds0)) ts env
       end
 
+(* TODO(opt): only lift over those ss_reord that are "small", because sharing of
+    "large" terms is unlikely to correspond to type dependency *)
+(* TODO(correctness?): should we order ss_nonbnds according to the occurence in each other? *)
+(* canonical example: the structural instantiation solution for  ?X(t) == (PROD x:?A. ?B(x))  is
+      ?X := (% t. PROD x:?A'(t). ?B'(x, t))
+      ?A := ?A'(t)   "propagating the dependency on t"
+      ?B := ?B'(t)
+      ?A', ?B' fresh  *)
 and struct_inst thy binders ((F, Fty), ss0) term env =
   if occurs (F, term, env) then (ocheck_fail thy (F,term,binders,env); raise Unif)
   else

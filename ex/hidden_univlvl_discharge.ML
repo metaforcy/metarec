@@ -74,15 +74,19 @@ struct
         else
           error ("calc_hidden_terminal_univlvl_discharge: non-atomic universe level "
             ^Syntax.string_of_term ctxt i))
-      (* val _ = tracing ("univlvls are "^commas (uls |> map (Syntax.string_of_term ctxt)))
+      val _ = tracing ("univlvls are "^commas (uls |> map (Syntax.string_of_term ctxt)))
       val _ = tracing ("univlvl inequations are "^commas (ul_iqs
-        |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))) *)
+        |> map (mk_univ_ieq #> Syntax.string_of_term ctxt)))
 
       val ul_graph = Term_Graph.empty
         |> fold (fn i => Term_Graph.new_node (i, [])) uls
-        |> fold (fn ul_iq as (_, (i, j)) =>
-               Term_Graph.add_edge (i, j)
-               #> Term_Graph.map_node j (cons ul_iq))
+        |> fold (fn ul_iq as (_, (i, j)) => fn ul_graph =>
+               ul_graph |> Term_Graph.add_edge (i, j)
+               |> Term_Graph.map_node j (cons ul_iq)
+               handle Term_Graph.UNDEF k =>
+                 error ("calc_hidden_terminal_univlvl_discharge: missing universe level constraint for "
+                   ^Syntax.string_of_term ctxt k^" used in inequality "
+                   ^Syntax.string_of_term ctxt (mk_univ_ieq ul_iq)))
              ul_iqs
 
       val _ = tracing ("univlvl graph is\n"^
@@ -90,7 +94,7 @@ struct
           "  "^Syntax.string_of_term ctxt i^" -> "^commas (succs |> map (Syntax.string_of_term ctxt) )
             ^"   (eqs from: "^commas (prevs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))^")")))
       
-      val _ = tracing ("concl is "^Syntax.string_of_term ctxt concl)
+      (* val _ = tracing ("concl is "^Syntax.string_of_term ctxt concl) *)
 
       val hidden_uls = uls |> filter_out (fn i =>
         not (can Term.dest_Var i)
@@ -182,7 +186,7 @@ struct
           end)
         hidden_terminals
 
-      val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2)))
+      (* val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2))) *)
    
 
       fun uninst_ul_check i = i aconv (MetaRec.norm_with_env_in_run_state ctxt2 i)
@@ -203,14 +207,14 @@ struct
              ([uninst_uls, inst_ul_iqs, inst_uls] @ [map Thm.prop_of iq_ths])
       val iq_ths_fxd = iq_ths |> map freeze_th
 
-      val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
+      (* val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("instantiated univlvls ineqs: "^commas (inst_ul_iqs
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("uninstantiated univlvls fixed: "^commas (uninst_uls_fxd
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("fixed inequality thms: "^cat_lines (iq_ths_fxd
-        |> map (Display.string_of_thm ctxt2))) 
+        |> map (Display.string_of_thm ctxt2)))  *)
 
       (* NB: after applying iq_ths, we have to discharge their premises that
          became instantiated to   (.. umax ..) <: univlvl *)

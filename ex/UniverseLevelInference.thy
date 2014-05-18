@@ -5,6 +5,7 @@ begin
 
 
 
+
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
@@ -150,10 +151,16 @@ definition
   univannot_prod where
   "univannot_prod(k, A, B) = Pi(A, B)"
 
+definition
+  annot_metalam where
+  "annot_metalam(A, body) == body"
+
 syntax
   "_PRODu"     :: "[i, pttrn, i, i] => i"  ("(3PRODu _ _:_./ _)" 10)
+  "_mlam" :: "[i, pttrn, i] => i" ("(3mlam _:_./ _)" 10)
 translations
   "PRODu i x:A. B" == "CONST univannot_prod(i, A, %x. B)"
+  "mlam x:A. t" == "CONST annot_metalam(A, % x. t)"
 
 abbreviation
   simple_univannot_fun :: "i => i => i => i" ("_ ->[_] _" 60) where
@@ -163,6 +170,8 @@ term "PRODu i x:A. B(x)"
 term "A ->[k] B"
 (* FIXME: does not translate to simple_univannot_fun *)
 term "PRODu i _:A. B"
+
+term "mlam x:A. t(x)"
 
 
 
@@ -229,9 +238,110 @@ definition
 definition
   synthty_const :: "i => i => o" ("_ synthty _") where
   [MRjud 1 1]: " t synthty A == t : A"
+definition
+  metasynthty_const :: "'a :: {} => ('a => prop) => prop" ("_ metasynthty _") where
+  [MRjud 1 1]: " t metasynthty P == PROP P(t)"
+definition
+  metarefty_const :: "'a :: {} => ('a => prop) => prop" ("_ metarefty _") where
+  [MRjud 2 0]: " t metarefty P == PROP P(t)"
+definition
+  zfnorm_const :: "'a :: {} => 'a => prop" ("zfnorm _ _") where
+  [MRjud 1 1]: "zfnorm t t' == (t == t')"
+
+
+lemma [MR]: "
+  zfnorm t t"
+  by (simp add: zfnorm_const_def)
+
+lemma [MR]: "[|
+    zfnorm t1 t1'  ;
+    zfnorm t2 t2'  |] ==>
+  zfnorm t1(t2) t1'(t2')"
+ by (simp add: zfnorm_const_def)
+
+lemma [MR]: "[|
+    !! x . zfnorm t(x) t'(x)  |] ==>
+  zfnorm (% x. t(x)) (% x. t'(x))"
+ by (simp add: zfnorm_const_def)
+
+lemma [MR]: "[|
+    zfnorm A A'  ;
+    !! x . x synthty A' ==> zfnorm t(x) t'(x)  |] ==>
+  zfnorm (lam x:A. t(x)) (lam x:A'. t'(x))"
+ by (simp add: zfnorm_const_def synthty_const_def)
+
+lemma [MR]: "[|
+    zfnorm t1 t1'  ;
+    zfnorm t2 t2'  |] ==>
+  zfnorm (t1 ` t2) (t1' ` t2')"
+ by (simp add: zfnorm_const_def)
+
+(* Pure's beta-reduction happens implicitly *)
+lemma [MR]: "[|
+    a synthty A  ;
+    zfnorm a a'  ;
+    zfnorm t(a') t' |] ==>
+  zfnorm ((lam x:A. t(x)) ` a) t'"
+ by (simp add: zfnorm_const_def synthty_const_def)
+
+
 
 
 lemma [MR]: "t printsas t" by (simp add: printsasjud_def)
+lemma [MR]: "[|
+    t1 printsas t1'  ;
+    t2 printsas t2'  |] ==>
+  t1(t2) printsas t1'(t2')"
+  by (simp add: printsasjud_def)
+
+
+
+(* very low prio synthty rule *)
+lemma [MR]: "[|
+    t1 metasynthty (MssPI x:A. B(x))  ;
+    t2 synthty A  |] ==>
+  t1(t2) synthty B(t2)"
+  unfolding metasynthty_const_def synthty_const_def mPi_def .
+
+lemma [MR]: "[|
+    t1 metasynthty (MPI x : P. Q(x))  ;
+    t2 metarefty P  |] ==>
+  t1(t2) metasynthty Q(t2)"
+  unfolding metasynthty_const_def metarefty_const_def mPi_def .
+
+(* FIXME?: use subunify instead of exact argument type match? (subunify is defined further down) *)
+lemma [MR]: "[|
+    try( t1 metasynthty (MsPI x : A. Q(x)) )  ;
+    t2 synthty A  |] ==>
+  t1(t2) metasynthty Q(t2)"
+  unfolding metasynthty_const_def mPi_def try_const_def synthty_const_def .
+
+lemma [MR]: "
+    try (t synthty A)  ==>
+  t metasynthty (% t. Trueprop (t : A))"
+  unfolding synthty_const_def metasynthty_const_def try_const_def . 
+
+lemma [MR]: "[|
+    !! x. t(x) metasynthty P(x)  |] ==>
+  (% x. t(x)) metasynthty (MPI x : (% x. Trueprop(True)). P(x))"
+  unfolding metasynthty_const_def mPi_def .
+
+lemma [MR]: "[|
+    !! x. x synthty A ==> t(x) metasynthty B(x)  |] ==>
+ (mlam x:A. t(x)) metasynthty (MsPI x:A. B(x))"
+ unfolding metasynthty_const_def mPi_def synthty_const_def annot_metalam_def .
+
+
+lemma [MR]: "[|
+    t metasynthty P |] ==>
+  t metarefty P"
+  unfolding metarefty_const_def metasynthty_const_def .
+
+lemma [MR]: "
+  t metarefty (% x. Trueprop(True))"
+  by (simp add: metarefty_const_def)
+
+
 
 definition
   elabbrack :: "i => o" where
@@ -269,16 +379,8 @@ lemma freshunifvar_triv_rewr: "(freshunifvar x) == Trueprop(True)"
 
 
 ML_file "elab_rule_processing.ML"
+setup {* ElabRuleProcessing.setup *}
 
-
-setup {*
-  Attrib.setup (Binding.name "elabMR") (ElabRuleProcessing.elabMR_decl_attr true)
-    "Declaration of elaboration metarec clauses"
-  #> Attrib.setup (Binding.name "elabMR_unchecked") (ElabRuleProcessing.elabMR_decl_attr false)
-    "Declaration of unchecked elaboration metarec clauses"
-  #> Attrib.setup (Binding.name "constraint_moding_rewrite") 
-       ElabRuleProcessing.constraint_moding_rewr_decl_attr "Declaration of constraint moding rewrite rules"
-*}
 
 
 definition
@@ -301,9 +403,9 @@ definition
 
 
 
-lemma [constraint_moding_rewrite]: "(constraint (t <: A)) == Trueprop(t synthty A)"
+lemma [moding_rewrite]: "(constraint (t <: A)) == Trueprop(t synthty A)"
   by (simp add: synthty_const_def constraint_const_def constraint_typing_def)
-lemma [constraint_moding_rewrite]: "(foconstraint (t <: A)) == Trueprop(t synthty A)"
+lemma [moding_rewrite]: "(foconstraint (t <: A)) == Trueprop(t synthty A)"
   by (simp add: synthty_const_def foconstraint_const_def constraint_typing_def)
 
 lemma [MRjud 2 0]: "i < j == i < j" by simp
@@ -342,6 +444,7 @@ definition
 definition
   subunify_const :: "i => i => o" ("subunify _ _") where
   [MRjud 2 0]: "subunify A B == (A <= B)"
+
 
 
 
@@ -608,19 +711,22 @@ lemma [MR]: "
   
 
 
-
-
-(* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 (* low prio rule for type inference of free variable x *)
-(* TODO(opt)?: statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
-   sofort  Unifikation A == A'  durchfuehren. Entspricht also on-the-fly constraint simplification mit der
-   Typ-Constraint-Sharing-Regel von unten. Problematisch weil discharge der Annahmen zu den
+(* NB: we don't need a synthty rule for variables, because these
+  synthty judgement applications are declared in context already by elab_infer *)
+(* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts
+   in wellformedness checking *)
+(* TODO(opt!): statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
+   (was wir mit exconstraint abfragen), sofort  infunify A A' A''  durchfuehren.
+   Entspricht dann also on-the-fly constraint simplification
+   mit der Typ-Constraint-Sharing-Regel von unten. Das waere in allgemeiner Weise
+   problematisch weil discharge der Annahmen zu den
    constraints nur global am Ende der metarec Ableitung erfolgen kann. *)
 (* NB: in the case of atomic terms that are opqapue to type inference,
      we only use foconstraints, so fresh unifvar A is does not depend on local context.
      This is essential in order to avoid a context-dependent typing constraint for x,
      which should be a free variable so does not depend on the context *)
-lemma [elabMR_unchecked]: "[|
+lemma [MR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
     foconstraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  foconstraint (x <: A) |] ==>
   x elabto x : A"
@@ -630,14 +736,14 @@ lemma [elabMR_unchecked]: "[|
 (* NB: in the case of non-atomic terms that are opaque to type inference
     we use general non-first-order constraints, as f or x might contain local fixes.
    We don't have to treat the (% x. f(x)) case because elaboration creates sets *)
-lemma [elabMR_unchecked]: "[|
+lemma [MR_unchecked]: "[|
     freshunifvar A  ;  freshunifvar i  ;
     constraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  constraint (f(x) <: A) |] ==>
   f(x) elabto f(x) : A"
  unfolding elabjud_def constraint_const_def foconstraint_const_def constraint_typing_def .
 
 
-(* FIXME: derivation of synthesis rule does not cope with subunify *)
+(* NB: subunify premises left as is in synthesis rule. (can lead to u<= constraint generation) *)
 lemma [elabMR_unchecked]: "[|
     t1 elabto t1' : T  ;
     freshunifvar A  ;  freshunifvar B  ;
@@ -833,7 +939,6 @@ lemma [MR]: "[|
 
 
 
-
 lemma [MR]: "[|
   !! x. (PROP P(x)) printsas (PROP P'(x))  |] ==>
   (!! x. PROP P(x)) printsas (!! x. PROP P'(x))"
@@ -1017,8 +1122,7 @@ lemma constraint_typ_apply: "
   unfolding constraint_typing_def elabjud_def
   by (rule apply_type)
 
-(* could be useful for more general type constraint context discharge
-   into dependent products *)
+(* could be useful for more general type constraint context discharge *)
 ML {*
   (* returns SOME ((C', proof of normalized C0 with hyp C'), new context) on success *)
   fun typ_constraint_ctxt_discharger rel_fixes C0 ctxt =
@@ -2175,7 +2279,7 @@ ML {*
   fun elab_infer ts ctxt0 =
     let
       val ctxt = ctxt0 |> set_printing_enabled false
-      val _ = tracing ("input of inference: "^commas (ts |> map (Syntax.string_of_term ctxt)))
+      val _ = tracing ("elab_infer input: "^commas (ts |> map (Syntax.string_of_term ctxt)))
 
       val ((pt_props, other_ts), recomb_ts) = ts |> MetaRec.filter_split (fn t =>
         fastype_of t = Term.propT andalso
@@ -2221,7 +2325,7 @@ ML {*
         val ctxt = ctxt0 |> set_printing_enabled false
 
         (* NB: using makestring to avoid looping *)
-        val _ = tracing ("printing on "^commas (map (Syntax.string_of_term ctxt) ts))
+        val _ = tracing ("elab_printing on "^commas (map (Syntax.string_of_term ctxt) ts))
 
         fun print elab_t =
           MetaRec.metarec_fully_discharged ctxt ElabRuleProcessing.printsasjud_n (elab_t, [])
@@ -2238,10 +2342,14 @@ ML {*
       end
 *}
 
+(* FIXME: we deactivate elab_printing (which undoes the elaboration) for now, because
+    Syntax.string_of_term etc. in metarec code would then also invoke this.
+    Regarding elab_infer the situation is ok because it is only run if elabbrack
+    is present in input term. *)
 setup {*
   Context.theory_map
     (Syntax_Phases.term_check' ~100 "elab_infer" elab_infer
-     #> Syntax_Phases.term_uncheck' 100 "elab_printing" elab_printing)
+     (* #> Syntax_Phases.term_uncheck' 100 "elab_printing" elab_printing*))
 *}
 
 
@@ -2306,6 +2414,42 @@ begin
   lemma loclem: "z === z2" sorry
 end
 
+
+
+
+use "../objlang_unify.ML"
+use "zf_unify.ML"
+
+
+ML {* elab @{context} (@{cpat "guniv ?i"} |> Thm.term_of) *}
+
+(* FIXME: ?i <: univlvl constraint missing for hidden universe level constraint simp.
+     do we need an assumption -> constraint forwarding mechanism, i.e. frules that may
+     generate constraints? (this suggests running frules on proof terms possibly containing unifvars,
+     instead of fixed thms, which would also simplify MetaRec.add_assm_terms_internal)*)
+ML {*
+  val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},
+      @{cpat "exactrule (?x synthty ?A)"}, @{cpat "exactrule (?y synthty ?A)"}]
+    |> map Thm.term_of
+  val t1 = @{cpat "(lam z:?A. z) ` ?x"} |> Thm.term_of
+  val t2 = @{cpat "?y :: i"} |> Thm.term_of
+  val ctxt0 = @{context} |> fold Variable.declare_term (t1 :: t2 :: assms)
+    |> Variable.add_fixes_direct ([] |> fold Term.add_free_names assms)
+  val ctxt = ctxt0
+    |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
+    |> MetaRec.add_assm_terms_internal assms
+
+  val _ = tracing ("================================")
+  val elabres = elab ctxt (@{cpat "guniv ?i"} |> Thm.term_of)
+
+  val env = MetaRec.get_the_env_in_run_state ctxt
+  val env2 = ZF_Unify.obj_unify ctxt (t1, t2) env
+  val [t1', t2'] = [t1, t2] |> map (Envir.norm_term env2)
+*}
+
+
+
+ML {* *}
 
 (* meta-theory ist schon in der Coq-Literatur abgedeckt:
      atomare Constraints <-> algebraische Constraints in

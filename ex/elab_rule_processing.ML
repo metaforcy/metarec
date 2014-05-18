@@ -5,12 +5,12 @@ struct
 
 
   structure Data = Generic_Data(
-    type T = { constraint_moding_rewrites : thm Item_Net.T }
-    val empty = {constraint_moding_rewrites = Item_Net.init Thm.eq_thm_prop
+    type T = { moding_rewrites : thm Item_Net.T }
+    val empty = {moding_rewrites = Item_Net.init Thm.eq_thm_prop
       (Thm.lhs_of #> Thm.term_of #> single)}
     val extend = I
-    fun merge ({constraint_moding_rewrites}, {constraint_moding_rewrites = constraint_moding_rewrites2}) =
-      {constraint_moding_rewrites = Item_Net.merge (constraint_moding_rewrites, constraint_moding_rewrites2)}
+    fun merge ({moding_rewrites}, {moding_rewrites = moding_rewrites2}) =
+      {moding_rewrites = Item_Net.merge (moding_rewrites, moding_rewrites2)}
   );
 
 
@@ -131,9 +131,9 @@ struct
       d.h. Unif wird durch matching gegen Judgement-Outputs ersetzt
     * wechselseitig voneinander abhaengig folgendes v.l.n.r in Premissen:
       * Groundness-tracking der Matching Variablen,
-      * Constraints gemaess Constraint-Moding-Change-Rewrite-Rules umformen,
-        die konditional anwendbar sind abhaengig vom Moding der
-        Judgementargumente im Constraints. Z.B:
+      * Premissen die Judgements sind (v.a. constraints) gemaess
+        Moding-Change-Rewrite-Rules umformen, die konditional anwendbar
+        sind abhaengig vom Moding der Judgementargumente . Z.B:
            constraint (t <: A), t ground ~~~>  t synthty A
            dargestellt wird das als Rewrite-Regel
               constraint (t <: A)  ==  t synthty A
@@ -210,12 +210,12 @@ struct
       fun ground grnd_vars t = subset (op =) (Term.add_vars t [], grnd_vars)
      
 
-      fun constraint_cv ct grnd_vars = 
+      fun prem_cv ct grnd_vars = 
         case MetaRec.decompose_judgement gctxt (Thm.term_of ct) of
-            SOME (jud, (_, _, _)) =>
+            SOME (_, (_, _, _)) =>
               let
                 val pot_rews = Item_Net.retrieve (Data.get gctxt
-                  |> #constraint_moding_rewrites) (Thm.term_of ct)
+                  |> #moding_rewrites) (Thm.term_of ct)
                 val _ = () (* tracing ("pot_rews: "^commas (pot_rews |> map (Display.string_of_thm ctxt2))) *)
               in
                 ct |> Conv.try_conv (Conv.first_conv (pot_rews |> map (fn rewth => fn ct =>
@@ -233,7 +233,7 @@ struct
                           let val _ = () (* tracing ("required groundness failed for constraint moding rewrite: "^
                             Display.string_of_thm ctxt2 rewrd_constr_th) *)
                           in ct |> Conv.no_conv end
-                    | NONE => error ("constraint_cv: not a judgement after constraint rewriting "
+                    | NONE => error ("prem_cv: not a judgement after constraint rewriting "
                         ^Syntax.string_of_term ctxt2 (Thm.rhs_of rewth |> Thm.term_of))
                   end)))
                 |> (fn rewrd_constr_th =>
@@ -243,7 +243,7 @@ struct
           | NONE => (Conv.all_conv ct, grnd_vars |> add_grnd_vars_of_hhf_prem (Thm.term_of ct))
 
       val (synth_rl3, grnd_vars) = (synth_rl2, grnd_vars0)
-        |-> fold_fconv_rule (fold_prems_conv ~1 constraint_cv)
+        |-> fold_fconv_rule (fold_prems_conv ~1 prem_cv)
       val ground = ground grnd_vars
       (* val _ = tracing ("ground variables: "
         ^commas (grnd_vars |> map (Var #> Syntax.string_of_term ctxt2))) *)
@@ -302,10 +302,19 @@ struct
          val gctxt2 = gctxt |> fold (add_rule prio) [elab_rl, printsas_rl, synth_rl]
        in (SOME gctxt2, SOME elab_rl) end))
 
-  fun constraint_moding_rewr_decl_attr x = x |> Scan.lift (Scan.succeed (fn (gctxt, th) =>
-    (gctxt |> Data.map (fn {constraint_moding_rewrites} =>
-      {constraint_moding_rewrites = constraint_moding_rewrites |> Item_Net.update th}) |> SOME, 
+  fun moding_rewr_decl_attr x = x |> Scan.lift (Scan.succeed (fn (gctxt, th) =>
+    (gctxt |> Data.map (fn {moding_rewrites} =>
+      {moding_rewrites = moding_rewrites |> Item_Net.update th}) |> SOME, 
     SOME th)))
+
+
+  val setup =
+    Attrib.setup (Binding.name "elabMR") (elabMR_decl_attr true)
+      "Declaration of elaboration metarec clauses"
+    #> Attrib.setup (Binding.name "elabMR_unchecked") (elabMR_decl_attr false)
+      "Declaration of unchecked elaboration metarec clauses"
+    #> Attrib.setup (Binding.name "moding_rewrite") 
+         moding_rewr_decl_attr "Declaration of moding rewrite rules" 
 
 
 end

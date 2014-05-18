@@ -25,7 +25,7 @@ fun assume_constraints ts ctxt =
       let
         val assmC = @{thm constraintI} OF [assm]
         val moding_rewr_net = ElabRuleProcessing.Data.get (Context.Proof ctxt)
-          |> #constraint_moding_rewrites 
+          |> #moding_rewrites 
         val pot_rews = Item_Net.retrieve moding_rewr_net (prop_of assmC)
         val assmC_rewr = assmC |> Conv.fconv_rule (Conv.try_conv (Conv.rewrs_conv pot_rews))
       in

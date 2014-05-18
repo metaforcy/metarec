@@ -12,6 +12,8 @@ sig
   val brule_const_def : thm (* brule_const P == P *)
   val frule_const_name : string
   val frule_const_def : thm (* frule_const P == P *)
+  val exact_rule_const_name : string
+  val exact_rule_const_def : thm (* exact_rule_const P == P *)
 
   val constraint_headterm : term
   val constraintI : thm (* P ==> constraint P *)
@@ -188,6 +190,16 @@ fun t1 abeconv t2 = (Envir.beta_eta_contract t1) aconv (Envir.beta_eta_contract 
 fun t1s abeconvs t2s = forall (op abeconv) (t1s ~~ t2s)
 fun aconv_norm norm (t1, t2) = (norm t1) aconv (norm t2)
 
+
+fun mk_exact_rule t = Const(Data.exact_rule_const_name, Term.propT --> Term.propT) $ t
+fun dest_exact_rule t = case t of
+    Const(n, _) $ t' =>
+      if n = Data.exact_rule_const_name then t'
+      else raise TERM("dest_exact_rule", [t])
+  | _ => raise TERM("dest_exact_rule", [t])
+val remove_exact_rule_marker_cv = Conv.fconv_rule (Conv.concl_conv ~1
+  (Conv.try_conv (Conv.rewr_conv Data.exact_rule_const_def)))
+val concl_wo_exactrule_cv = remove_exact_rule_marker_cv #> Thm.concl_of
 
 
 fun ground t = null (Term.add_vars t []) andalso null (Term.add_tvars t [])
@@ -375,7 +387,6 @@ type analyzer_ty =
 
 
 
-fun pack_pobj_iobjs pobj iobjs = Term.list_comb (Free("packed_pobj_iobjs", Term.dummyT), pobj :: iobjs)
 fun dummy_comb ts = Term.list_comb (Free("dummy", Term.dummyT), ts)
 
 
@@ -556,17 +567,28 @@ fun gen_decompose_judgement term_to_jud (judgements : judgements_type) string_of
       | NONE => error ("decompose_judgement: jid "^quote jid^" is not valid"))
   | _ => NONE
 
+fun pack_jid_pobj_iobjs jid pobj iobjs =
+  Term.list_comb (Free(jid, Term.dummyT), pobj :: iobjs)
+
+(* NB: this is an approximative fixing that does not avoid name clashing, only used for net indexing *)
+fun exact_rule_lookup_idx jid pobj iobjs =
+  let val fix = Term.map_aterms (fn Var((n, _), T) => Free(n, T) | t => t)
+  in pack_jid_pobj_iobjs jid (fix pobj) (map fix iobjs) |> Envir.eta_contract end
+
 (* NB: we index local rules under their conclusion in the *present* instantiation (which
    might be more partial than the instantiation in the current context, but in the only
    relevant call from add_assm_terms_internal this is not the case). If it gets more
    instantiated later on, the rule matching will only be less precise.
    Local rules can get coinciding conclusions when unification variables in them are further
    instantiated. In that case they were always in the same Net-Leaf anyway and are always retrieved together *)
-fun rule_net_index (judgements : judgements_type) term_to_jud (rule, prior) =
+fun rule_net_index (judgements : judgements_type) term_to_jud ((rule, matching_ty), _) =
   (case rule of DirectRule th => prop_of th | LocalRule prf => prop_of_proofp prf)
   |> Logic.strip_imp_concl
   |> gen_decompose_judgement term_to_jud judgements (fn _ => "<term (no term printer)>")
-  |> Option.map (fn (_, (pobj, iobjs, oobjs)) => pack_pobj_iobjs pobj iobjs)
+  |> Option.map (fn (jid, (pobj, iobjs, oobjs)) =>
+       case matching_ty of
+         NormalRuleMatching => pack_jid_pobj_iobjs jid pobj iobjs |> Envir.eta_contract
+       | ExactRuleMatching => exact_rule_lookup_idx jid pobj iobjs)
   |> the_list
 
 (* NB: eq_for_net should only be called on theory merge, because otherwise don't use the
@@ -575,13 +597,13 @@ fun rule_net_index (judgements : judgements_type) term_to_jud (rule, prior) =
       to be generalized accordingly) and should then be
          (rule1, rule2) |> pairself prop_of_rule ctxt |> (op aconv)
       (note that prop_of_rule norms LocalRules wrt their current instantiation in ctxt) *)
-fun eq_for_net ((rule1, _), (rule2, _)) =
+fun eq_for_net (((rule1, _), _), ((rule2, _), _)) =
   case rule1 of
     DirectRule th1 =>
       (case rule2 of
         DirectRule th2 => Thm.eq_thm_prop (th1, th2)
-      | LocalRule _ => error "internal error: eq_for_net was on a local rule")
-  | LocalRule _ => error "internal error: eq_for_net was on a local rule"
+      | LocalRule _ => error "internal error: eq_for_net on a local rule")
+  | LocalRule _ => error "internal error: eq_for_net on a local rule"
 
 
 
@@ -648,14 +670,17 @@ datatype constraint_rule_ty = PropagationCHR | SimpCHR
   (* TODO(opt): actually implement the symmetric, irreflexive and head-based memoization optimizations *) 
 datatype chr_flag = NoReEvalOnHeadReconsideration | SymmetricCHR | IrreflexiveCHR
   | ExactMatchCHR | AllMatchesSimpCHR
-datatype LinCtxtBoundary = ToplevelMetarecBoundary | ConstraintSimpBoundary
+datatype lin_ctxt_boundary = ToplevelMetarecBoundary | ConstraintSimpBoundary
   | DelayedUnificationsBoundary | SolvedChrPremisesBoundary | SolvedFrulePremisesBoundary
+datatype rule_matching_ty = NormalRuleMatching | ExactRuleMatching
 
 type ruledata_type = {
-    (* net for backward rules indexed by non-wellformed term combination  pack_pobj_iobjs pobj iobjs
+    (* net for backward rules indexed by non-wellformed term combination  pack_jid_pobj_iobjs jid pobj iobjs
        when retrieving backward rules are sorted by given priority first, 
-       then by reverse order of their addition (i.e. latest additions get priority) *)
-    rules: ((rule_ty * int) Item_Net2.T) Symtab.table,
+       then by reverse order of their addition (i.e. latest additions get priority).
+       exact-matching rules are also stored in this net, indexed by fixed inputs
+       (without taking care about var/free-Name collisions, i.e. approximatively)*)
+    rules: ((rule_ty * rule_matching_ty) * int) Item_Net2.T,
     judgements: judgements_type,
     term_to_jud: string Net.net,
     assms: term list, (* TODO(refactor?): better move assms to run_state? but they are not threaded linearly ... *)
@@ -672,7 +697,7 @@ type ruledata_type = {
     trace: ((unit -> term) list) * ((unit -> string) list),
 
     facts: thm Net.net,
-      (* facts indexed by non-wellformed term combination  pack_pobj_iobjs pobj iobjs *)
+      (* facts indexed by non-wellformed term combination  pack_jid_pobj_iobjs jid pobj iobjs *)
     facts_lhs_idx: thm Net.net,
       (* konservative Approx der Abhaengigkeiten zwischen Judgements und frules
          enthaelt auch die Abhaengigkeiten, die durch (aus bestehenden frules)
@@ -699,14 +724,16 @@ type ruledata_type = {
 
       (* constraint {propagation, simplification} rules indexed by all of their heads respectively;
          the zero-based position of the head which indexes is also stored *)
+      (* TODO(opt): use fixed indexing head for ExactMatchCHRs, cf. exact rule lookup and storage *)
     constraint_propag_and_simp_rules_hdidx: (((thm * chr_flag list) * constraint_rule_ty) * int) Net.net,
     constraint_simprocs: (serial * (bool * (term list -> Proof.context -> thm option * Proof.context))) list,
 
-    linear_ctxt_boundary_handlers: (serial * (LinCtxtBoundary -> Proof.context -> Proof.context)) list
+    linear_ctxt_boundary_handlers: (serial * (lin_ctxt_boundary -> Proof.context -> Proof.context)) list
   }
 
 val empty_ruledata : ruledata_type = {
-     rules = Symtab.empty, judgements = judgements_start,
+     rules = Item_Net2.init eq_for_net,
+     judgements = judgements_start,
      term_to_jud = Net.empty, assms = [],
      syn_procs = Symtab.empty,
      comp_rules = NONE, trace_depth = (3, 3), trace=([], []),
@@ -771,10 +798,7 @@ structure RuleData = Generic_Data(
           val _ = check_depgraph Display.string_of_thm_without_context frules' depgraph'
         in
           {
-            rules = rules1 |> Symtab.fold (fn (jud2, net2) =>
-                Symtab.map_default (jud2, net2) (fn net =>
-                  Item_Net2.merge (rule_net_index judgements' term_to_jud') (net, net2)))
-              rules2,
+            rules = Item_Net2.merge (rule_net_index judgements' term_to_jud') (rules1, rules2),
             judgements = judgements', term_to_jud = term_to_jud', assms = [],
             syn_procs = Symtab.merge (K true) (syn_procs1, syn_procs2),
             comp_rules =
@@ -1463,15 +1487,6 @@ fun strip_abss t =
       end
   | _ => ([], t)
 
-(* TODO(refactor): collect fixed bounds and pass to f *)
-(* t is assumed to be beta normal *)
-fun fold_varapps f fixes t =
-  case Term.strip_comb t of
-    (Var(ixn, T), ts) => f fixes (ixn, T) ts
-  | (Abs (n, T, t2), []) =>
-      let val (x, fixed_t2) = Term.dest_abs (n, T, t2)
-      in fold_varapps f (cons (Free (x, T)) fixes) fixed_t2 end
-  | (a, ts) => fold (fold_varapps f fixes) ts
 
 
 
@@ -1563,14 +1578,9 @@ fun try_solve_delayed_unifs unif ctxt delayed_unifs st =
 
 
 fun check_same_prior l =
-  let
-    fun aux prio ((_, prio') :: l') = prio = prio' andalso aux prio l'
-      | aux prio [] = true
-  in
-    case l of
-      [] => true
-    | (_, prio) :: l' => aux prio l'
-  end
+  case l of
+    [] => true
+  | (_, prio) :: l' => forall (fn (_, prio') => prio' = prio) l'
   
 
 fun order_by_priority l =
@@ -1668,8 +1678,12 @@ fun gen_msg_with_facts ctxt msg =
       ^cat_lines (Net.content facts |> map (Display.string_of_thm ctxt))
       ^"\n\n========================================================"
       ^"\ncurrent rules are:\n"
-      ^cat_lines (Symtab.dest rules |> maps (snd #> Item_Net2.content
-         #> map (fst #> prop_of_rule ctxt #> Syntax.string_of_term ctxt))))
+      ^cat_lines (Item_Net2.content rules
+         |> map (fn ((th, matching_ty), prior) =>
+              Syntax.string_of_term ctxt (prop_of_rule ctxt th)
+              ^(case matching_ty of
+                 NormalRuleMatching => ""
+               | ExactRuleMatching => "  (exact matching)"))))
    end
 fun err_with_facts ctxt msg = error (gen_msg_with_facts ctxt msg)
 fun err_with_trace_and_facts ctxt msg =
@@ -2020,12 +2034,25 @@ fun declare_prf prfp ctxt = fold_terms_prf Variable.declare_term ctxt prfp ctxt
 
 
 (* TODO(opt): sharing of certified terms as they are shared in env *)
-fun replay_prf ctxt prfp =
+(* NB: non-local non-ground hyps are discharged, if they are allowed at all *)
+fun replay_prf allow_nonground_hyps ctxt prfp =
   let
     val prf = proof_of_proofp prfp
+    val hyps = assms_of_proofp prfp |> map (norm_with_env_in_run_state ctxt)
+    val nongrnd_hyps = filter_out ground hyps
+
+    val _ =
+      if null nongrnd_hyps orelse allow_nonground_hyps then ()
+      else
+        err_with_trace ctxt ("replay_prf: proof of\n  "
+          ^str_of_normed_term ctxt (prop_of_proofp prfp)
+          ^"\nhas some nonground hyps (we also print ground ones):\n  "
+          ^commas (hyps |> map (str_of_normed_term ctxt)))
+
     val cert = cterm_of (Proof_Context.theory_of ctxt)
     val certT = ctyp_of (Proof_Context.theory_of ctxt)
 
+    (* TODO(opt?): just collect vars from proposition and hyps *)
     val vars = add_vars_prf ctxt prfp []
     val tvars = add_tvars_prf ctxt prfp []
     val ctxt2 = ctxt |> declare_prf prfp
@@ -2090,14 +2117,14 @@ fun replay_prf ctxt prfp =
         ^"\n"^cat_lines (map (Display.string_of_thm ctxt2) ths)
         ^"\n\nproof is\n"
         ^str_of_normed_term ctxt2 (prf_to_display_term ctxt2 prfp))
+    val th_fxd_disch = th_fxd
+      |> Drule.implies_intr_list (map certnorm nongrnd_hyps)
 
-    val maxidx' = Thm.maxidx_of th_fxd + 1
+    val maxidx' = Thm.maxidx_of th_fxd_disch + 1
     val T_reinst = tvar_fixing |> map (fn ((ixn, S), fx_n) => (((fx_n, maxidx'), S), TVar(ixn, S)))
     val reinstT = Term_Subst.instantiateT T_reinst
 
-    (* NB: if th_fxd has hyps containing tvar_fixing or var_fixing we get the
-         usual generaliziation exception here *)
-    val th = th_fxd
+    val th = th_fxd_disch
       |> Thm.generalize (map snd tvar_fixing, map snd var_fixing) maxidx'
       |> Thm.instantiate
            (T_reinst |> map (fn (ixnS, T') => pairself certT (TVar ixnS, T')),
@@ -2108,7 +2135,7 @@ fun replay_prf ctxt prfp =
         ^"\nfixed replay gave "^Display.string_of_thm ctxt2 th_fxd
         ^"\nerror:  "^msg
         ^"\n\ngeneralizing over: "^commas (map snd tvar_fixing @ map snd var_fixing)
-        ^"\n\nhyps are: "^commas (Thm.hyps_of th_fxd |> map (Syntax.string_of_term ctxt2)))
+        ^"\n\nhyps of fixed replay are: "^commas (Thm.hyps_of th_fxd |> map (Syntax.string_of_term ctxt2)))
   in
     th
   end
@@ -2392,9 +2419,6 @@ fun abstr_inst (avail_vars, avail_tvars) =
 
 
 
-(* TODO(refactor): realize with fold_varapps; but normalization on each step is in the way.
-     necessary if variables are sometimes partially applied, but this should not be the case
-     for freshunifvar-generated ones.  *)
 fun unlift_unifvar_occs allowed_deps t0 ctxt =
   let
     (* from Pure/term.ML *)
@@ -2621,21 +2645,20 @@ fun pot_note_in_lthy fact ctxt =
 
 
 
-and add_assm_terms_internal assms0 ctxt =
-  if null assms0 then ctxt
+(* NB: assms are assumed to be normalized wrt. env in run state *)
+and add_assm_terms_internal assms ctxt =
+  if null assms then ctxt
   else
   let
     val {judgements, term_to_jud, ...} = get_current_ruledata (Context.Proof ctxt)
     val cert = cterm_of (Proof_Context.theory_of ctxt)
 
-    (* TODO(opt): assms0 are normalized already in the call from solve_prems *)
-    val assms = map (norm_with_env_in_run_state ctxt) assms0
     val g_assms = filter ground assms
     val ng_assms = filter_out ground assms
 
     (* NB: nur fuer non-ground assms diesen Kontext-Extraktions-Hack machen damit
         ground-assms die auch Fakten sind weiterhin im Fakten-Pool bleiben *)
-    (* TODO(opt): certification is slow here. can we do anything about this?
+    (* TODO(opt!): certification is slow here. can we do anything about this?
          probably only if we can guarantee no implicit forward rules will match
          on the ground assumption, so we don't have to add it via the normal
          mechanism that expects thms *)
@@ -2679,38 +2702,47 @@ and add_assm_terms_internal assms0 ctxt =
           ^"\n  R_th_disch is "^Display.string_of_thm ctxt_2 R_th_disch
           ^"\n  ng_assms are "^commas (map (str_of_normed_term ctxt_2) ng_assms)
           ^"\n  ng_assms_fxd are "^commas (map (str_of_normed_term ctxt_2) ng_assms_fxd)) *)
+
+        val matching_ty =
+          if cassms_used |> exists (can dest_exact_rule o Thm.term_of)
+          then ExactRuleMatching
+          else NormalRuleMatching
       in
-        (LocalRule prf, ctxt_2)
+        ((prf, matching_ty), ctxt_2)
       end
     
     val {rules, ...} = get_current_ruledata (Context.Proof ctxt3)
     val {rules=rules2, ...} = get_current_ruledata (Context.Proof ctxt6)
       (* NB: we rely on the fact that the item net content is managed like a stack *)
-      (* TODO(opt!!): this is very slow?! *)
-    val new_rules = Symtab.dest rules2 |> maps (fn (jud_, itemnet) =>
-      Item_Net2.content itemnet |> rev |> drop (Symtab.lookup rules jud_ |> Option.map Item_Net2.content |> the_default [] |> length)
-      |> map (fn (ruleref, prior) => case ruleref of
-             DirectRule th => (th, jud_, prior)
-           | LocalRule prfp => err_with_trace ctxt6 ("add_assm_terms_internal: internal error: locally generated rule is not direct: "
-              ^Syntax.string_of_term ctxt6 (prop_of_proofp prfp))))
+    val new_local_rules = Item_Net2.content rules2 
+      |> take (Item_Net2.size rules2 - Item_Net2.size rules)
+      |> map (fn ((ruleref, matching_ty), prior) => case ruleref of
+             DirectRule th => ((th, matching_ty), prior)
+           | LocalRule prfp => err_with_trace ctxt6
+              ("add_assm_terms_internal: internal error: locally generated rule is not direct: "
+              ^Syntax.string_of_term ctxt6 (prop_of_proofp prfp)))
   in
     ctxt3
     |> Context.proof_map (map_assms (fn As => append As assms))
-    |> fold (fn (new_rule, rule_jud, prior) => fn ctxt_ =>
+    |> fold (fn ((new_local_rule, _), prior) => fn ctxt_ =>
         let
-          val (rule', ctxt_2) = construct_local_rule new_rule ctxt_
+          val ((rule'_prf, matching_ty'), ctxt_2) = construct_local_rule new_local_rule ctxt_
+          val _  = case matching_ty' of
+              ExactRuleMatching => tracing ("add_assm_terms_internal: adding local exact rule "^
+                str_of_normed_term ctxt_2 (prop_of_proofp rule'_prf))
+            | _ => ()
         in
           (* minor FIXME: we don't update the depgraph. this is already in anticipation of removal of
                the automatic dependency tracking feature *)
           (* NB: if a local rule gets instantiated further, we do not update the net indexing.
              this is ok because the net matching will then just be more approximative than necessary *)
           ctxt_2 |> Context.proof_map (map_rule_stuff
-            (Symtab.map_default (rule_jud, Item_Net2.init eq_for_net)
-              (* NB: the local rule rule' is normed wrt current run state, since assms are normed *)
-              (Item_Net2.cons (rule', prior) (rule_net_index judgements term_to_jud)))
+            (* NB: the local rule rule' is normed wrt current run state, since assms are normed *)
+            (Item_Net2.cons ((LocalRule rule'_prf, matching_ty'), prior)
+               (rule_net_index judgements term_to_jud))
             I)
         end)
-      new_rules
+      new_local_rules
   end
 
 (* TODO(semantics): dynamisch auf Wohlgeformtheit der entstehenden Metafunktion
@@ -2737,6 +2769,7 @@ and add_assm checked th ctxt =
           but (local) rules are freshified right before their application anyway *)
         Thm.forall_elim_vars 0 th
     val prop = prop_of rule
+
     val is_rule = gen_check_rule checked checked ctxt prop |> is_some
     val is_fact = is_rule andalso null (Logic.strip_imp_prems prop) andalso ground prop 
     val frule_opt = 
@@ -2749,7 +2782,7 @@ and add_assm checked th ctxt =
 
     val ctxt' = ctxt
       |> (if is_fact then (* Fakten werden automatisch brules *)
-            add_local_fact rule 
+            add_local_fact rule
           else if is_rule then
             Context.proof_map (gen_add_rule true checked ctxt 0 rule)
           else case frule_opt of
@@ -2777,7 +2810,7 @@ and solve_prems_standalone global_fail_cont local_fail_cont rule prems ctxt0 =
        would lead to loss of assms in add_local_fact in add_assm *)
     val ctxt = ctxt0 |> Context.proof_map (set_run_state (init_run_state ctxt0_decld_prems))
     val (prfps, ctxt2) = solve_prems true true global_fail_cont local_fail_cont (prop_of rule) prems ctxt
-    val ths = map (replay_prf ctxt2) prfps
+    val ths = map (replay_prf false ctxt2) prfps
 
     val env = get_the_env_in_run_state ctxt2
     val ctxt3 = ctxt2 |> Context.proof_map (set_run_state run_st0_opt)
@@ -3016,23 +3049,34 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
         SOME (jud_matcher, _, _) => jud_matcher
       | NONE => err_with_trace ctxt ("metarec_worker: judgment "^quote jid^" not known")
 
-    val pot_rules = case Symtab.lookup rules jid of
-        SOME inet =>
-          Item_Net2.retrieve_match inet
-            (pack_pobj_iobjs pobj iobjs |> Envir.eta_contract)
-          |> order_by_priority
-      | NONE => [] (* error ("metarec_worker: no rules registered for judgement "^quote jid) *)
+    (* NB: we don't need a second lookup of non-fixed inputs, because unifvars
+       only match against unifvars in non-unifying net lookup *)
+    val pot_rules = 
+      Item_Net2.retrieve_match rules (exact_rule_lookup_idx jid pobj iobjs)
+      |> order_by_priority
+
+    (* val exact_pot_rules = pot_rules |> filter (fn (_, matching_ty) => matching_ty = ExactRuleMatching) 
+    val _ =
+      if null exact_pot_rules then ()
+      else
+        tracing ("metarec_worker: exact potential rules:\n"
+          ^cat_lines (exact_pot_rules |> map (fn (rule, _) =>
+            Syntax.string_of_term ctxt (prop_of_rule ctxt rule)))) *)
 
     fun no_match failed_rules =
-      let val no_match_msg =
-        "metarec_worker: no matching rule for animation of judgement "
-        ^quote jid^" for primary object\n"^Syntax.string_of_term ctxt pobj
-         ^"\nand further inputs\n"^cat_lines (map (Syntax.string_of_term ctxt) iobjs)
-         ^(if null failed_rules then
-             ""
-           else
-             "\nfailed rules:\n"^cat_lines (map (Syntax.string_of_term ctxt o prop_of_proofp) failed_rules))
-         ^"\npotential rules:\n"^cat_lines (map (Syntax.string_of_term ctxt o prop_of_rule ctxt) pot_rules)
+      let
+        fun ruleprop_to_str (prop, matching_ty) =  
+          Syntax.string_of_term ctxt prop
+          ^(case matching_ty of ExactRuleMatching => " (exact matching)"
+           | NormalRuleMatching => "")
+        val no_match_msg =
+          "metarec_worker: no matching rule for animation of judgement "
+          ^quote jid^" for primary object\n"^Syntax.string_of_term ctxt pobj
+           ^"\nand further inputs\n"^cat_lines (map (Syntax.string_of_term ctxt) iobjs)
+           ^(if null failed_rules then ""
+             else
+               "\nfailed rules:\n"^cat_lines (map (apfst prop_of_proofp #> ruleprop_to_str) failed_rules))
+           ^"\npotential rules:\n"^cat_lines (map (apfst (prop_of_rule ctxt) #> ruleprop_to_str) pot_rules)
       in
         raise GlobalFail (ctxt, no_match_msg)
       end
@@ -3051,8 +3095,8 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
             val (pobj_of_rule, iobjs_of_rule, _) = prop |> Logic.strip_imp_concl |> jud_matcher |> the
             (* TODO(correctness): should pobj, iobjs be normed ?! *)
             val prop2_opt = prop
-              |> Term.rename_abs (pack_pobj_iobjs pobj_of_rule iobjs_of_rule)
-                   (pack_pobj_iobjs pobj iobjs)
+              |> Term.rename_abs (pack_jid_pobj_iobjs jid pobj_of_rule iobjs_of_rule)
+                   (pack_jid_pobj_iobjs jid pobj iobjs)
             (* val _ = tracing ("after renaming and inst: "^Syntax.string_of_term ctxt4 (mark_eta_redexes (prop_of res))) *)
           in
             case prop2_opt of
@@ -3084,18 +3128,14 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
             (* val _ = tracing ("premise-solving-instantiated and normalized rule is: "
               ^Syntax.string_of_term ctxt5 (prop_of rule'' |> mark_eta_redexes)) *)
 
-
-            val (_, iobjs_of_rule', oobjs_of_rule') =
-              Logic.strip_imp_concl prop' |> jud_matcher |> the
-
-            fun ext_rl_tr ctxt_ = add_to_rule_trace (K (prop_of_proofp proofp')) ctxt
-
             val res = proofp' |> fold (mp_rev_prf ctxt5) solved_prems
             (* val _ = tracing ("metarec_worker: after discharge of rule premises \n"
               ^str_of_normed_term ctxt5 (prop_of_proofp res)) *)
-            val oobjs_of_rule'' = oobjs_of_rule' |> map (norm_with_env_in_run_state ctxt5)
+
+            val oobjs_of_rule' = Logic.strip_imp_concl prop' |> jud_matcher |> the |> #3
+              |> map (norm_with_env_in_run_state ctxt5)
           in
-            ((res, oobjs_of_rule''), ctxt5)
+            ((res, oobjs_of_rule'), ctxt5)
           end
 
 
@@ -3119,16 +3159,30 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                  Aktivieren ueber DECOMPOSE marker vor den Patterns gegen die man
                  nur decompose-matchen will *)
         fun first_succ [] failed_rules = no_match failed_rules
-          | first_succ (rule :: rem_rules) failed_rules = 
+          | first_succ ((rule, matching_ty) :: rem_rules) failed_rules = 
               let
                 (* beta normal wg add_rule *)
-                val (proofp, ctxt2) = ctxt |> fresh_proofp_of_rule rule
+                val (proofp, ctxt2) = case matching_ty of
+                    NormalRuleMatching => ctxt |> fresh_proofp_of_rule rule
+                  | ExactRuleMatching => (case rule of
+                      DirectRule th => (unsafe_exact_thm_prf th, ctxt)
+                    | LocalRule proofp => (proofp, ctxt))
                 (* val _ = tracing ("freshified rule: "^str_of_normed_term ctxt2 (prop_of_proofp proofp)) *)
                 val (pobj_pat, iobj_pats, _) = proofp |> prop_of_proofp
                   |> Logic.strip_imp_concl |> jud_matcher |> the
 
-                fun match_iter [] [] succ_cont ctxt_ = succ_cont ctxt_
-                  | match_iter (iobj_pat :: rem_iobj_pats) (iobj :: rem_iobjs) succ_cont ctxt_ =
+                fun try_this_rule ctxt_ =
+                  let val proofp' = rename_proofp proofp ctxt_
+                  in
+                    app_rule proofp' ctxt_
+                    handle LocalFail (ctxt_2, msg) =>
+                      let val _ = () (* tracing ("application of rule\n  "
+                        ^str_of_normed_term ctxt_2 (prop_of_proofp proofp')
+                        ^"\nfailed:\n"^msg) *)
+                      in first_succ rem_rules ((proofp', matching_ty) :: failed_rules) end
+                  end
+                fun match_iter [] [] ctxt_ = try_this_rule ctxt_
+                  | match_iter (iobj_pat :: rem_iobj_pats) (iobj :: rem_iobjs) ctxt_ =
                       (* TODO(feature): only check normalized iobj_pat for pattern-ness.
                          But Decomp.match_w_shared_vars should be tolerant regarding pattern-ness
                          for instantiated variable heads then. *)
@@ -3137,7 +3191,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                          (case pattern_match_envctxt ctxt_ (iobj_pat, iobj) of
                            NONE => first_succ rem_rules failed_rules
                          | SOME ctxt_2 =>
-                             match_iter rem_iobj_pats rem_iobjs succ_cont ctxt_2)
+                             match_iter rem_iobj_pats rem_iobjs ctxt_2)
                       else
                         let
                           (* NB: we do not avoid deep pattern matching against unification variables ATM.
@@ -3150,8 +3204,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                           val iobj_pat'_absd = abs_frees iobj_pat'
                         in
                           if Pattern.pattern iobj_pat'_absd then
-                            match_iter (iobj_pat'_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs)
-                              succ_cont ctxt_
+                            match_iter (iobj_pat'_absd :: rem_iobj_pats) (abs_frees iobj :: rem_iobjs) ctxt_
                           else
                             first_succ rem_rules failed_rules
                             (* NB: kein verzoegertes Matching auf non-pattern Inputs in
@@ -3163,22 +3216,23 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                                  [| ... ; match non_pat against B |] ==> J .. B outs
                                in Regeln simulieren *)
                         end
+
               in
-                (* Implicitly degrades to structural first-order matching (which is also
-                   decompose in this sense) if pobj_pat is not a pattern. *)
-                case decompose_pattern_match_envctxt ctxt2 (pobj_pat, pobj) of
-                  NONE => first_succ rem_rules failed_rules
-                | SOME ctxt3 =>
-                    ctxt3 |> match_iter iobj_pats iobjs (fn ctxt4 =>
-                      let val proofp' = rename_proofp proofp ctxt4
-                      in
-                        app_rule proofp' ctxt4
-                        handle LocalFail (ctxt_, msg) =>
-                          let val _ = () (* tracing ("application of rule\n  "
-                            ^str_of_normed_term ctxt_ (prop_of_proofp proofp')
-                            ^"\nfailed:\n"^msg) *)
-                          in first_succ rem_rules (proofp' :: failed_rules) end
-                      end)
+                case matching_ty of
+                  NormalRuleMatching =>
+                    (* Implicitly degrades to structural first-order matching (which is also
+                       decompose in this sense) if pobj_pat is not a pattern. *)
+                    (case decompose_pattern_match_envctxt ctxt2 (pobj_pat, pobj) of
+                      NONE => first_succ rem_rules failed_rules
+                    | SOME ctxt3 => ctxt3 |> match_iter iobj_pats iobjs)
+                | ExactRuleMatching =>
+                    if forall (aconv_norm (norm_with_env_in_run_state ctxt2))
+                      ((pobj_pat :: iobj_pats) ~~ (pobj :: iobjs))
+                    then
+                      let val _ = () (* tracing ("metarec_worker: successful exact rule matching on "
+                        ^str_of_normed_term ctxt2 (prop_of_proofp proofp)) *)
+                      in try_this_rule ctxt2 end
+                    else first_succ rem_rules failed_rules
               end
       in
         first_succ pot_rules []
@@ -3721,6 +3775,8 @@ and constraint_simplification allow_propagation ctxt00 =
                
             fun lookup head =
               let
+                (* NB: not Net.match_term, because the matching direction is reversed *)
+                (* TODO(opt): if exact_match_chr we could use Net.match_term *)
                 val res = 
                   Net.unify_term constraint_graph (Envir.eta_contract head)
                   |> filter (fn (C', _) => configurated_matches ctxt2 ([head], [C']) |> is_some)
@@ -4047,8 +4103,8 @@ and constraint_simplification allow_propagation ctxt00 =
         |> (case simpth_opt of
              SOME simpth =>
                let
-                 val _ = tracing ("exactly applying simpth generated by constraint simproc:\n"
-                   ^Display.string_of_thm ctxt_2 simpth)
+                 (* val _ = tracing ("exactly applying simpth generated by constraint simproc:\n"
+                   ^Display.string_of_thm ctxt_2 simpth) *)
                  val flags =
                    if exact_simpth_match then [ExactMatchCHR]
                    else []
@@ -4067,22 +4123,25 @@ and constraint_simplification allow_propagation ctxt00 =
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
 
-    val constraints0_varixns = [] |> fold Term.add_vars constraints0 |> map fst
-    val envdiff = get_the_run_state (Context.Proof ctxt') |> #env |> Envir.term_env |> Vartab.dest
-      |> filter (fn (ixn, _) => member (op =) constraints0_varixns ixn)
-      |> subtract (pairself fst #> (op =))
-           (get_the_run_state (Context.Proof ctxt00) |> #env |> Envir.term_env |> Vartab.dest)
-    val _ = tracing ("resulting instantiation is:\n  "
-      ^commas (envdiff |> map (fn (ixn, (T, t)) =>
-         Syntax.string_of_term ctxt' (Var(ixn,T)) ^ " := "
-         ^ str_of_normed_term ctxt' t)))
-    val _ = tracing ("resulting constraint graph is:\n"
-      ^cat_lines (Net.content constraint_graph'
-        |> map (fn (C, implied_by_opt) =>
-             "  "^str_of_normed_term ctxt' C ^"  implied by  "
-             ^(case implied_by_opt of
-                NONE => "nothing"
-              | SOME prf => str_of_normed_term ctxt' (prop_of_proofp prf)))))
+    (* let val _ = 
+      let
+        val constraints0_varixns = [] |> fold Term.add_vars constraints0 |> map fst
+        val envdiff = get_the_run_state (Context.Proof ctxt') |> #env |> Envir.term_env |> Vartab.dest
+          |> filter (fn (ixn, _) => member (op =) constraints0_varixns ixn)
+          |> subtract (pairself fst #> (op =))
+               (get_the_run_state (Context.Proof ctxt00) |> #env |> Envir.term_env |> Vartab.dest)
+        val _ = tracing ("resulting instantiation is:\n  "
+          ^commas (envdiff |> map (fn (ixn, (T, t)) =>
+             Syntax.string_of_term ctxt' (Var(ixn,T)) ^ " := "
+             ^ str_of_normed_term ctxt' t)))
+        val _ = tracing ("resulting constraint graph is:\n"
+          ^cat_lines (Net.content constraint_graph'
+            |> map (fn (C, implied_by_opt) =>
+                 "  "^str_of_normed_term ctxt' C ^"  implied by  "
+                 ^(case implied_by_opt of
+                    NONE => "nothing"
+                  | SOME prf => str_of_normed_term ctxt' (prop_of_proofp prf)))))
+      in () end *)
 
 
     val constraints0_nodups = constraints0 |> distinct eq_C
@@ -4134,8 +4193,8 @@ and metarec_constraint_simp final_C_simp prf ctxt =
     (* NB: checking if fixes and assumes of constraints have become non-relevant due to later unifications
          eliminating them in this case already happens if they are newly generated from their solve_prems call *)
 
-    val _ = tracing ("metarec_constraint_simp started on constraints  "^
-      commas (map (str_of_normed_term ctxt o fst) constraints))
+    (* val _ = tracing ("metarec_constraint_simp started on constraints  "^
+      commas (map (str_of_normed_term ctxt o fst) constraints)) *)
 
     val (prf2, ctxt2) = (prf, ctxt) |> fold (fn (C0, ConstraintTrace C0_trace) => fn (prf_, ctxt_) =>
         if false (* null (Logic.strip_params C0) andalso null (Logic.strip_assums_hyp C0) *) then
@@ -4145,10 +4204,10 @@ and metarec_constraint_simp final_C_simp prf ctxt =
             val C = norm_with_env_in_run_state ctxt_ C0
             exception ConstraintSimpFailed
             fun fail_cont ctxt_ msg =
-              let val _ = tracing
+              let val _ = () (* tracing
                 ("failed to simplify a constraint "(*^"with fixes or assumes: "*)
                 ^str_of_normed_term ctxt_ C
-                ^"\n\nbecause:\n"^msg)
+                ^"\n\nbecause:\n"^msg) *)
               in
                 raise ConstraintSimpFailed
               end
@@ -4174,7 +4233,7 @@ and metarec_constraint_simp final_C_simp prf ctxt =
                       |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt_3))) 
                  val _ = tracing ("  constraints are "
                    ^commas (get_constraints_in_run_state ctxt_3 |> map (fst #> str_of_normed_term ctxt_3))) *)
-                 val _ = replay_prf ctxt_3 (C_prf
+                 val _ = replay_prf true ctxt_3 (C_prf
                    |> fold_rev (impI_prf ctxt_3 o fst) (get_constraints_in_run_state ctxt_3) 
                    |> fold_rev (impI_prf ctxt_3 o Logic.mk_equals o fst) (get_delayed_unifs_in_run_state ctxt_3)) (* for testing *)
                  (* val _ = tracing "  done" *)
@@ -4198,7 +4257,7 @@ and metarec_constraint_simp final_C_simp prf ctxt =
                    ^commas (get_constraints_in_run_state ctxt_ |> map (fst #> str_of_normed_term ctxt_)))
                  val _ = tracing ("  constraints are "
                    ^commas (get_constraints_in_run_state ctxt_4 |> map (fst #> str_of_normed_term ctxt_4))) *)
-                 val _ = replay_prf ctxt_4 (prf_2
+                 val _ = replay_prf true ctxt_4 (prf_2
                    |> fold_rev (impI_prf ctxt_4 o fst) (get_constraints_in_run_state ctxt_4)
                    |> fold_rev (impI_prf ctxt_4 o Logic.mk_equals o fst) (get_delayed_unifs_in_run_state ctxt_4)) (* for testing *)
                  (* val _ = tracing "  done" *)
@@ -4326,11 +4385,8 @@ and metarec_structural_unifications final_unifs prf ctxt =
 
 
 (* pobj, iobjs  may not contain any Vars
+     (not true anymore, because init_run_state uses current maxidx?)
    metarec calculates beta,comp_rule-normal  oobjs  with  J pobj iobjs oobjs *)
-(* Note: for implicit toplevel GEN: because of the successful groundness check all variables that
-     are present after metarec execution are unification variables that have been introduced in the derivation,
-     so just instantiate all of them to freshly fixed free variables that will be schematically quantified
-     on export later on. Doesn't this take place in replay_prf already?  *)
 and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
   let
     val thy = Proof_Context.theory_of ctxt0
@@ -4366,7 +4422,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
         val {delayed_unifs, constraints, ...} = get_the_run_state (Context.Proof ctxt2)
         val th_1 = prf |> fold_rev (impI_prf ctxt2) (map (Logic.mk_equals o fst) delayed_unifs
             @ map fst constraints)
-          |> replay_prf ctxt2 
+          |> replay_prf true ctxt2 
       in
         tracing ("metarec derivation was successful (but no constraint min yet) with: "
           ^Display.string_of_thm ctxt2 th_1)
@@ -4387,7 +4443,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
              |> map (fst #> str_of_normed_term ctxt4)))
         val th_2 = prf2 |> fold_rev (impI_prf ctxt4) (map (Logic.mk_equals o fst) delayed_unifs
             @ map fst constraints)
-          |> replay_prf ctxt4 
+          |> replay_prf true ctxt4 
       in
         tracing ("proof replay after constraint min: "^Display.string_of_thm ctxt4 th_2)
       end *)
@@ -4401,7 +4457,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
           ^commas (get_delayed_unifs_in_run_state ctxt5
              |> map (fst #> Logic.mk_equals #> str_of_normed_term ctxt5)))  *)
         val th_3 = prf3 |> fold_rev (impI_prf ctxt5 o fst) constraints
-          |> replay_prf ctxt5 
+          |> replay_prf true ctxt5 
       in
         tracing ("proof replay after structural unifications: "^Display.string_of_thm ctxt5 th_3)
       end *)
@@ -4415,7 +4471,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
     (* val _ = tracing ("replaying final proof for  "^str_of_normed_term ctxt7 (prop_of_proofp prf5)) *)
       (* TODO(opt): nur close_derivation machen wenn die Ableitung gross genug war ?! *)
       (* TODO(feature): try to un-normalize to original judgement? *)
-    val th = replay_prf ctxt7 prf5 |> Thm.close_derivation
+    val th = replay_prf true ctxt7 prf5 |> Thm.close_derivation
 
     val {delayed_unifs=delayed_unifs', constraints=constraints', ...} = get_the_run_state (Context.Proof ctxt7)
     (* NB: oobjs can be instantiated further now, due to further unifications *)
@@ -4684,11 +4740,20 @@ and check_rule_wellformedness ctxt prop0 =
   end
 
 
-and gen_check_rule calc_juddeps check_groundness ctxt prop =
+and gen_check_rule calc_juddeps check_groundness ctxt prop0 =
+  let
+    val (prop, matching_ty) =
+      let val (prems, concl0) = Logic.strip_horn prop0
+      in
+        case try dest_exact_rule concl0 of
+          SOME concl => (Logic.list_implies (prems, concl), ExactRuleMatching)
+        | NONE => (prop0, NormalRuleMatching)
+      end
+  in
     case decompose_judgement (Context.Proof ctxt) (Logic.strip_imp_concl prop) of
       SOME (concl_jud, (pobj, iobjs, oobjs)) =>
         if not calc_juddeps andalso not check_groundness then
-          SOME (concl_jud, [])
+          SOME (concl_jud, [], matching_ty)
         else
           (let
             (* TODO(functionality): diesen check weglassen? weil Pattern.match
@@ -4750,9 +4815,10 @@ and gen_check_rule calc_juddeps check_groundness ctxt prop =
 
             val _ = check_rule_wellformedness ctxt3 prop
           in
-            SOME (concl_jud, jud_deps)
+            SOME (concl_jud, jud_deps, matching_ty)
           end)
     | NONE => NONE
+  end
 
 and check_rule calc_juddeps check_groundness ctxt prop =  
   case gen_check_rule calc_juddeps check_groundness ctxt prop of
@@ -4772,31 +4838,37 @@ and check_rule calc_juddeps check_groundness ctxt prop =
      an Prioritaetsgraph der dann fuer Performance in numerische
      Prioris kompiliert wird
 *)
-and gen_add_rule local_rule check_groundness ctxt0 prior rule0 gctxt =
+and gen_add_rule local_rule check_groundness ctxt0 prior rule00 gctxt =
   let
      val {rules, depgraph, judgements, term_to_jud, ...} = get_current_ruledata gctxt
 
      val ctxt = ctxt0 |> add_to_msg_trace (fn () =>
-       "gen_add_rule on "^Display.string_of_thm ctxt0 rule0)
+       "gen_add_rule on "^Display.string_of_thm ctxt0 rule00)
        (* moeglichst wenig eta-normalisieren (nur das was der Simplifier braucht zum rewriten)
           um Namen von Bounds zu erhalten *)
-     val rule =
-       if local_rule then rule0
-       else rule0 |> normalize_lesseta_withvars ctxt
+     val rule0 =
+       if local_rule then rule00
+       else rule00 |> normalize_lesseta_withvars ctxt
      val _ = 
-       if local_rule orelse (prop_of rule) aconv (prop_of rule0) then
+       if local_rule orelse (prop_of rule0) aconv (prop_of rule00) then
          ()
        else
          warning ("gen_add_rule: rule was not normal wrt. computational rules; normalized to:"
-            ^"\n"^Display.string_of_thm ctxt rule)
-     val prop = Thm.prop_of rule
-     val (concl_jud, jud_deps) = check_rule (not local_rule) check_groundness ctxt prop
+            ^"\n"^Display.string_of_thm ctxt rule0)
+
+     val (concl_jud, jud_deps, matching_ty) =
+       check_rule (not local_rule) check_groundness ctxt (Thm.prop_of rule0)
      val depgraph' = depgraph |> fold (curry Graph.add_edge concl_jud) jud_deps
+
+     val rule = case matching_ty of
+         NormalRuleMatching => rule0
+       | ExactRuleMatching =>
+           let val _ = tracing ("gen_add_rule on exact rule "^Display.string_of_thm ctxt rule0)
+           in remove_exact_rule_marker_cv rule0 end
   in
     gctxt
     |> map_rule_stuff
-      (Symtab.map_default (concl_jud, Item_Net2.init eq_for_net)
-         (Item_Net2.cons (DirectRule rule, prior) (rule_net_index judgements term_to_jud)))
+      (Item_Net2.cons ((DirectRule rule, matching_ty), prior) (rule_net_index judgements term_to_jud))
       (K depgraph')
   end
 
@@ -4978,18 +5050,18 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
               |> fold (fn brule => fn ctxt2 =>
                      let
                        val {gen_brule_concls, ...} = get_current_ruledata (Context.Proof ctxt2)
-                       val concl = Thm.concl_of brule
+                       val pure_concl = concl_wo_exactrule_cv brule
                        val thy2 = Proof_Context.theory_of ctxt2
-                       val already_there = Net.unify_term gen_brule_concls (Envir.eta_contract concl)
+                       val already_there = Net.unify_term gen_brule_concls (Envir.eta_contract pure_concl)
                          |> map (fn brule2 =>
-                              if unifies thy2 (Thm.concl_of brule2, concl) then
+                              if unifies thy2 (concl_wo_exactrule_cv brule2, pure_concl) then
                                 if (prop_of brule2 aconv prop_of brule) then
                                   true
                                 else
                                   (* false *)
                                   err_with_trace ctxt2 ("gen_with_pot_frules: conclusions of generated brules overlap: "
                                   ^Syntax.string_of_term ctxt2 (Thm.concl_of brule2)
-                                  ^"   vs   "^Syntax.string_of_term ctxt2 concl)
+                                  ^"   vs   "^Syntax.string_of_term ctxt2 (Thm.concl_of brule))
                               else false)
                          |> exists I
                        fun transf mor =
@@ -4997,7 +5069,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                          else
                            let val brule' = Morphism.thm mor brule
                            in
-                             map_gen_brule_concls (Net.insert_term Thm.eq_thm_prop (Thm.concl_of brule', brule'))
+                             map_gen_brule_concls (Net.insert_term Thm.eq_thm_prop (concl_wo_exactrule_cv brule', brule'))
                                (* NB: cannot use ctxt2 because declarations emit theory checkpoints
                                     which change the theory *)
                                (* TODO(opt!!): proof_of teuer *)
@@ -5062,15 +5134,18 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
           * frule Anwendung soll nach wie vor mit matching stattfinden,
             also das explizit machen statt OF nutzen
           * Fakten-Check hier und in add_assm anpassen *)
-    val fact = normalize ctxt fact0
+    val fact_w_exactrule_marker = normalize ctxt fact0
+    val fact = fact_w_exactrule_marker |> remove_exact_rule_marker_cv
+
     val gctxt = Context.Proof ctxt
     val {facts, frules, frules_hdidx, facts_lhs_idx, ...} = get_current_ruledata gctxt
     val fact_prop = Thm.prop_of fact
     val (jud, pobj, iobjs, oobjs) =
       case decompose_judgement gctxt fact_prop of
         SOME (jud, (pobj, iobjs, oobjs)) => (jud, pobj, iobjs, oobjs)
-      | NONE => err_with_facts ctxt "gen_add_fact: fact has unknown judgement"
-    val lhs_idx = Free(jud, @{typ "prop"}) $ pack_pobj_iobjs pobj iobjs
+      | NONE => err_with_facts ctxt ("gen_add_fact: fact "
+          ^Display.string_of_thm ctxt fact^" has unknown judgement")
+    val lhs_idx = pack_jid_pobj_iobjs jud pobj iobjs
 
     (* TODO(correctness): wf-check des Facts
          (ist unpraktisch wenn man wfelem definiert,
@@ -5081,6 +5156,7 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
     fun fact_insert_transf mor =
       let
         val fact' = Morphism.thm mor fact
+        val fact_w_exactrule_marker' = Morphism.thm mor fact_w_exactrule_marker
           (* TODO: wenn man spaeter lokalisiert Judgements hat muss man wohl fact'
                decomposen um das richtige Judgement zu erfahren. Aufpassen mit
                Premissen die durch export morphismen entstehen  *)
@@ -5097,10 +5173,10 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
           (Net.insert_term Thm.eq_thm_prop (lhs_idx, fact'))
           (Symtab.cons_list (jud', fact'))
         (* use facts directly as brules *)
-        #> map_gen_brule_concls (Net.insert_term Thm.eq_thm_prop (Thm.concl_of fact', fact'))
+        #> map_gen_brule_concls (Net.insert_term Thm.eq_thm_prop (Thm.concl_of fact', fact_w_exactrule_marker'))
             (* nicht nochmal nen wf-Check machen *)
             (* TODO(opt!!): proof_of teuer auf Theorien *)
-        #> (fn gctxt => gctxt |> gen_add_rule true false (Context.proof_of gctxt) 0 fact')
+        #> (fn gctxt => gctxt |> gen_add_rule true false (Context.proof_of gctxt) 0 fact_w_exactrule_marker')
       end
   in
     ctxt
@@ -5277,7 +5353,7 @@ and gen_add_frule checked checked_grndness explicit traced frule0 gctxt =
                   (* the brule is checked with all available variables (available
                      via the frule heads and premises) fixed *)
                 val brule_inst = Term_Subst.instantiate inst brule
-                val (brule_concl_jud, brule_prem_juds) = check_rule true true ctxt' brule_inst
+                val (brule_concl_jud, brule_prem_juds, _) = check_rule true true ctxt' brule_inst
               in
                 Graph.add_edge (brule_concl_jud, frule_key)
                 #> fold (fn brule_prem_jud => Graph.add_edge (brule_concl_jud, brule_prem_jud))
@@ -5377,7 +5453,7 @@ fun print_new_facts gctxt =
 fun run_expl_frules lthy0 =
   let
     val lthy1 = lthy0 |> set_running_expl_frules true
-    val {depgraph, frules, new_facts=new_facts0, gen_brule_concls, ...} =
+    val {depgraph, frules, new_facts=new_facts0, ...} =
       get_current_ruledata (Context.Proof lthy1)
 
       (* sccs without dependencies go last *)
