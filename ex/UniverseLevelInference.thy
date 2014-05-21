@@ -326,6 +326,7 @@ lemma [MR]: "[|
   (% x. t(x)) metasynthty (MPI x : (% x. Trueprop(True)). P(x))"
   unfolding metasynthty_const_def mPi_def .
 
+(* FIXME? also allow annotation of mlam with meta-predicates? *)
 lemma [MR]: "[|
     !! x. x synthty A ==> t(x) metasynthty B(x)  |] ==>
  (mlam x:A. t(x)) metasynthty (MsPI x:A. B(x))"
@@ -690,6 +691,7 @@ lemma [MR]: "
   subunify A B"
 by (simp add: primunify_const_def subunify_const_def)
 
+(* TODO(opt): similiar optimizations as in infunify *)
 lemma [MR]: "[|
     foconstraint (i <: univlvl)  ;
     foconstraint (j <: univlvl)  ;
@@ -711,34 +713,45 @@ lemma [MR]: "
   
 
 
+definition
+  unknown_typing_constraint_for where
+  [MRjud 1 1]: "unknown_typing_constraint_for(x, A) == (x <: A)"
+
+lemma [MR_unchecked]: "[|
+    freshunifvar A  ;  freshunifvar i  ;
+    foconstraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  foconstraint (x <: A) |] ==>
+  unknown_typing_constraint_for (x, A)"
+  by (simp add: unknown_typing_constraint_for_def foconstraint_const_def)
+
+lemma [MR]: "
+    try (exconstraint (?? A. x <: A) (x <: A))  ==>
+  unknown_typing_constraint_for (x, A)"
+  by (simp add: unknown_typing_constraint_for_def try_const_def ex_constraint_const_def)
+
+
 (* low prio rule for type inference of free variable x *)
 (* NB: we don't need a synthty rule for variables, because these
   synthty judgement applications are declared in context already by elab_infer *)
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts
    in wellformedness checking *)
-(* TODO(opt!): statt immer neue Unifvar zu generieren bei bereits vorhandenem constraint (x <: A')
-   (was wir mit exconstraint abfragen), sofort  infunify A A' A''  durchfuehren.
-   Entspricht dann also on-the-fly constraint simplification
-   mit der Typ-Constraint-Sharing-Regel von unten. Das waere in allgemeiner Weise
-   problematisch weil discharge der Annahmen zu den
-   constraints nur global am Ende der metarec Ableitung erfolgen kann. *)
 (* NB: in the case of atomic terms that are opqapue to type inference,
      we only use foconstraints, so fresh unifvar A is does not depend on local context.
      This is essential in order to avoid a context-dependent typing constraint for x,
      which should be a free variable so does not depend on the context *)
-lemma [MR_unchecked]: "[|
-    freshunifvar A  ;  freshunifvar i  ;
-    foconstraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  foconstraint (x <: A) |] ==>
+lemma [MR_unchecked]: "
+    unknown_typing_constraint_for (x, A) ==>
   x elabto x : A"
- unfolding elabjud_def constraint_const_def foconstraint_const_def constraint_typing_def .
+ unfolding elabjud_def unknown_typing_constraint_for_def constraint_typing_def .
 
 
 (* NB: in the case of non-atomic terms that are opaque to type inference
     we use general non-first-order constraints, as f or x might contain local fixes.
    We don't have to treat the (% x. f(x)) case because elaboration creates sets *)
+(* NB: we cannot reuse unknown_typing_constraint_for, because (f(x) <: A) is
+   a non-global constraint *)
 lemma [MR_unchecked]: "[|
-    freshunifvar A  ;  freshunifvar i  ;
-    constraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  constraint (f(x) <: A) |] ==>
+    freshunifvar A  ;  freshunifvar  i  ;
+    constraint (A <: guniv i)  ;  foconstraint (i <: univlvl)  ;  constraint (f(x) <: A)  |] ==>
   f(x) elabto f(x) : A"
  unfolding elabjud_def constraint_const_def foconstraint_const_def constraint_typing_def .
 
@@ -979,6 +992,10 @@ lemma [MR]: "[|
 
 lemma [impl_frule]: "x elabto x : A ==> x :> A"
   by (simp add: syn_constraint_typing_def elabjud_def)
+  (* for assumption -> constraint propagation *)
+lemma [impl_frule]: "x synthty A ==> x <: A"
+  by (simp add: synthty_const_def constraint_typing_def)
+
 
 lemma [MR]: "
     constraint (t <: A) ==>
@@ -1285,7 +1302,8 @@ ML {*  elab @{context} @{term "(fun x. fun y. blub # y # x)"}  *}
 
 ML {*  elab @{context} @{term "(fun f. fun x. blub(f, x))"}  *}
 
-(* FIXME?: contextual discharge of typing constraint for only works if
+(* FIXME?(seems fixed with deprestr hack):
+     contextual discharge of typing constraint for only works if
      the order of arguments is the same as their occurrence in the context,
      and all context elements do occur as arguments.
      This is due to the dependent type formation in contextual discharge rule.
@@ -1433,6 +1451,8 @@ lemma [MR]: "
   tracing_if_different(t, t, msg)"
   by (simp add: tracing_if_different_def)
 
+(* NB: these typing constraint merge rules are necessary even with direct sharing of typing
+     constraint for term variables, because type unification variables can become identified *)
 (* NB: these can be considered constraint simp rules because there are no
    propagation rules that process t <: A, t <:: A constraints further *)
 (* NB: no reevaluation if A' is instantiated further constitutes a performance optimization,
@@ -2342,6 +2362,9 @@ ML {*
       end
 *}
 
+
+ML {**}
+
 (* FIXME: we deactivate elab_printing (which undoes the elaboration) for now, because
     Syntax.string_of_term etc. in metarec code would then also invoke this.
     Regarding elab_infer the situation is ok because it is only run if elabbrack
@@ -2378,6 +2401,7 @@ proof -
       sorry
   }
   thm this
+
 
   have "y === x ==> f === g"
     ML_prf {* Assumption.all_assms_of @{context} *}
@@ -2425,31 +2449,50 @@ ML {* elab @{context} (@{cpat "guniv ?i"} |> Thm.term_of) *}
 
 (* FIXME: ?i <: univlvl constraint missing for hidden universe level constraint simp.
      do we need an assumption -> constraint forwarding mechanism, i.e. frules that may
-     generate constraints? (this suggests running frules on proof terms possibly containing unifvars,
-     instead of fixed thms, which would also simplify MetaRec.add_assm_terms_internal)*)
+     generate thusly implied-by constraints?
+     (this suggests running implicit(!) frules on proof terms possibly containing unifvars,
+     instead of fixed thms, which would also simplify MetaRec.add_assm_terms_internal)
+    Easier to just metarec-local facts (i.e. local premise-free rules in outer ctxt) available as
+    implied-by constraints, thereby relying on usual frule mechanism to derive related facts. *)
 ML {*
-  val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},
-      @{cpat "exactrule (?x synthty ?A)"}, @{cpat "exactrule (?y synthty ?A)"}]
-    |> map Thm.term_of
-  val t1 = @{cpat "(lam z:?A. z) ` ?x"} |> Thm.term_of
-  val t2 = @{cpat "?y :: i"} |> Thm.term_of
-  val ctxt0 = @{context} |> fold Variable.declare_term (t1 :: t2 :: assms)
-    |> Variable.add_fixes_direct ([] |> fold Term.add_free_names assms)
-  val ctxt = ctxt0
-    |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
-    |> MetaRec.add_assm_terms_internal assms
+  fun test_obj_unify ctxt00 assms t1 t2 =
+    let
+      val ts = t1 :: t2 :: assms
 
-  val _ = tracing ("================================")
-  val elabres = elab ctxt (@{cpat "guniv ?i"} |> Thm.term_of)
+      val ctxt0 = ctxt00
+        |> Variable.add_fixes_direct ([] |> fold Term.add_free_names ts)
+        |> fold Variable.declare_term ts
+      val ctxt = ctxt0
+        |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
+        |> MetaRec.add_assm_terms_internal assms
 
-  val env = MetaRec.get_the_env_in_run_state ctxt
-  val env2 = ZF_Unify.obj_unify ctxt (t1, t2) env
-  val [t1', t2'] = [t1, t2] |> map (Envir.norm_term env2)
+      val _ = tracing ("============== begin object unification ==================")
+
+      val env2 = Timing.timeit (fn () =>
+        MetaRec.get_the_env_in_run_state ctxt
+        |> ZF_Unify.obj_unify ctxt (t1, t2))
+      val [t1', t2'] = [t1, t2] |> map (Envir.norm_term env2)
+    in
+      (t1', t2')
+    end
 *}
 
 
 
+ML {*
+  let 
+    val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},
+        @{cpat "exactrule (?x synthty (?A -> ?A))"}, @{cpat "exactrule (?y synthty (?A -> ?A -> ?A))"}]
+      |> map Thm.term_of
+    val t1 = @{cpat "(lam w:?A. lam z:?A. ?x ` z)"} |> Thm.term_of
+    val t2 = @{cpat "?y :: i"} |> Thm.term_of
+  in
+    test_obj_unify @{context} assms t1 t2 |> pairself (cterm_of @{theory})
+  end
+*}
+
 ML {* *}
+
 
 (* meta-theory ist schon in der Coq-Literatur abgedeckt:
      atomare Constraints <-> algebraische Constraints in
@@ -2517,5 +2560,5 @@ ML {* *}
 
 
 
-
+ML {* *}
 

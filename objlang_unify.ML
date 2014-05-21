@@ -21,6 +21,7 @@
 signature ObjLangUnifyData =
 sig
 
+  exception UnificationFailed of string
 
   (* NB: we assume that meta_unify also unifies the meta types of the terms *)
   val meta_unify : Proof.context -> term * term -> Envir.env -> Envir.env
@@ -42,6 +43,8 @@ sig
   (* meta abstraction, potentially annotated with otype for bound *)
   val mk_mlam : term * term option -> term -> term 
   val mk_opi : term * term -> term -> term
+  (* NB: mk_mpi is expected to convert an object-level type (for body or binder)
+     to a meta-level type as needed *)
   val mk_mpi : term * term option -> term -> term
 
   val dest_oapp : term -> (term * term) option

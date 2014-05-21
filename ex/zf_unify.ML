@@ -1,11 +1,17 @@
 
 structure ZFUnifyData =
 struct
+
+  exception UnificationFailed of string
+
   fun meta_unify ctxt (t1, t2) env =
-    case MetaRec.try_pat_unify ctxt (t1, t2) env of
+    (case MetaRec.try_pat_unify ctxt (t1, t2) env of
       SOME env2 => env2
     | NONE => error ("ZF.meta_unify: non-pattern problem "
-        ^Syntax.string_of_term ctxt (Logic.mk_equals (t1, t2)))
+        ^Syntax.string_of_term ctxt (Logic.mk_equals (t1, t2))))
+    handle MetaRec.TryPatUnify (ctxt_, (t1_, t2_), msg) =>
+      error ("ZF.meta_unify: "^msg)
+      (*raise UnificationFailed msg*)
 
   fun onorm ctxt env t0 =
     let
@@ -14,7 +20,7 @@ struct
       val t = Envir.norm_term env t0
     in
       let
-        val ((_, [t']), _) = MetaRec.metarec_with_failcont fail_cont ctxt
+        val ((_, [t']), _) = MetaRec.metarec_no_constraintsimp fail_cont ctxt
           "UniverseLevelInference.zfnorm_const_jud" (t, [])
       in t' end (* FIXME? t' fully normed? *)
       handle NormFail msg => 
@@ -41,17 +47,20 @@ struct
       exception SynthFail
       fun fail_cont _ _ = raise SynthFail
     in
-      case (MetaRec.metarec_with_failcont fail_cont ctxt jud (t, []) |> SOME
+      case (MetaRec.metarec_no_constraintsimp fail_cont ctxt jud (t, []) |> SOME
           handle SynthFail => NONE)
       of
-        SOME ((_, [oT]), (delayed_unifs, constraints)) =>
-          (* FIXME: what about delayed_unifs and constraints ?
+        SOME ((_, [oT]), ctxt2) =>
+          (* FIXME: what about delayed_unifs and constraints in runstate of ctxt2?
              change architecture to runstate-Propagation instead
              of just env-Propagation? *)
           SOME oT 
       | NONE => NONE
      end
 
+  (* FIXME: this assumes consistent variable generation, so at least we need
+       to run constraint simplification, esp. typing constraint merge rule,
+       on the constraints generated from previous synth_otyp calls *)
   fun refines_into_otyp ctxt env oT1 oT2 =
     let
       exception RefineFail
@@ -65,7 +74,7 @@ struct
         env_abeconv oT1 oT2
       (* FIXME? refining via subunify. can generate new constraints! *)
       (* else if fastype_of oT1 <> @{typ "i"} then *)
-        (* case (MetaRec.metarec_with_failcont fail_cont "UniverseLevelInference.subunify"
+        (* case (MetaRec.metarec_no_constraintsimp fail_cont ctxt "UniverseLevelInference.subunify"
           (oT1, [oT2]) |> SOME
           handle RefineFail => NONE)
         of
@@ -77,13 +86,13 @@ struct
 
   fun is_top_otyp ctxt env t0 =
     case onorm ctxt env t0 of
-      Const(@{const_name guniv}, _) => true
+      Const(@{const_name guniv}, _) $ _ => true
     | _ => false
 
 
   fun mk_typ_assm x typ = 
     case fastype_of typ of
-      @{typ "i"} => @{term synthty_const} $ x $ typ
+      @{typ "i"} => @{term synthty_const} $ x $ typ |> FOLogic.mk_Trueprop
     | Type("fun", [aT, _]) =>
         Const(@{const_name metasynthty_const},
           Sign.const_instance @{theory} (@{const_name metasynthty_const}, [aT]))
@@ -91,6 +100,7 @@ struct
 
   fun mk_oapp t1 t2 = @{term "op `"} $ t1 $ t2
   fun mk_olam (x, oT) body = @{term "Lambda"} $ oT $ Term.lambda x body
+  (* FIXME?: case of meta type oT_opt missing? *)
   fun mk_mlam (x, oT_opt) body = case oT_opt of
       SOME oT => @{term "annot_metalam"} $ oT $ Term.lambda x body
     | NONE => Term.lambda x body
@@ -98,16 +108,29 @@ struct
   fun mk_opi (x, A) body = @{term "ZF.Pi"} $ A $ Term.lambda x body
   fun mk_mpi (x, Aopt) body =
     let
+      fun mem_pred A = @{term "op :"} $ x $ A
+        |> FOLogic.mk_Trueprop |> Term.lambda x
+
       val aT = fastype_of x
-      val bT = case fastype_of body of
-          Type("fun", [bT, _]) => bT
-        | _ => error "mk_mpi: internal error: expected function type for body"
+      val (bT, body') = case fastype_of body of
+          Type("fun", [bT, _]) => (bT, body)
+        | @{typ "i"} => (@{typ "i"}, mem_pred body)
+        | _ => error ("mk_mpi: internal error: expected function type for body "
+           ^Syntax.string_of_term @{context} body
+           ^" (x is "^Syntax.string_of_term @{context} x
+              ^(Aopt |> Option.map (Syntax.string_of_term @{context} #> prefix " :: ")
+                |> the_default "")^")")
+
+      val Aopt' = Aopt |> Option.map (fn A => case fastype_of A of
+          @{typ "i"} => mem_pred A
+        | _ => A)
+
       val mPi_const =
         Const(@{const_name mPi}, 
           Sign.const_instance @{theory} (@{const_name mPi}, [aT, bT]))
-      val body_abs = Term.lambda x body
+      val body_abs = Term.lambda x body'
     in
-      case Aopt of
+      case Aopt' of
         SOME A => mPi_const $ A $ body_abs
       | NONE => mPi_const $ (Term.lambda x @{term "Trueprop(True)"}) $ body_abs
     end

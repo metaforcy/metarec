@@ -371,6 +371,8 @@ structure HOLMetaRec = struct
       raise distinguished_metarec_error (errcode, bad_ct, ctxt, msg2)
     end
 
+  (* TODO(refactor): make this a general simproc and use metarec_no_constraints
+       instead, and compose a prf for th *)
   fun onfailerr_proc ctxt (P_ct, [msg_ct, errcode_ct, bad_ct], _) =
     let
       val thy = Proof_Context.theory_of ctxt
@@ -391,7 +393,7 @@ structure HOLMetaRec = struct
           NONE => error ("onfailerr_proc: term of unknown judgement\n"
             ^Syntax.string_of_term ctxt (Thm.term_of P_ct))
         | SOME (jud, (pobj, iobjs, _)) => (jud, pobj, iobjs)
-      val ((res, _), ctxt2) = MetaRec.metarec_with_failcont failcont ctxt jud (pobj, iobjs)
+      val ((res, _), _) = MetaRec.metarec_with_failcont failcont ctxt jud (pobj, iobjs)
       val th = (@{thm onfailerrI} OF [res])
         |> Drule.instantiate' [SOME (Thm.ctyp_of_term bad_ct)]
              (map SOME [msg_ct, errcode_ct, bad_ct])
