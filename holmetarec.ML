@@ -494,8 +494,9 @@ end
     let
       val thy = Proof_Context.theory_of ctxt
       val pat0 = pat0_ct |> Thm.term_of |> Envir.beta_norm
-      val vars0 = Term.strip_all_vars pat0
 
+      (* TODO(opt, refactor): use Variable.focus *)
+      val vars0 = Term.strip_all_vars pat0
       val vars = ((Variable.variant_fixes (map fst vars0) ctxt |> fst) ~~ (map snd vars0))
         |> map (fn (n, T) => Var((n, 0), T))
 

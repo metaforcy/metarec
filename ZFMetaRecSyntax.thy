@@ -208,13 +208,13 @@ lemma constraintI: "PROP P ==> constraint (PROP P)"
 lemma constraintD: "constraint (PROP P) ==> (PROP P)"
   by (simp add: constraint_const_def)
 
-definition
+(*definition
   foconstraint_const :: "prop => prop" ("foconstraint _" [5] 10)
 where
   "foconstraint_const(P) == P"
 
 lemma foconstraintI: "PROP P ==> foconstraint (PROP P)"
-  by (subst foconstraint_const_def)
+  by (subst foconstraint_const_def) *)
 
 
 definition
@@ -234,14 +234,26 @@ lemma primunify_rev_def: "(primunify t1 t2) == (t2 == t1)"
 definition
   fresh_unifvar_const :: "i => 'a :: {} => prop"
 where
-  "fresh_unifvar_const (u,x) == PROP Trueprop(True)"
+  "fresh_unifvar_const (kind, x) == PROP Trueprop(True)"
+
+definition "normal_unifvar == 0"
+definition "first_order_unifvar == 0"
+definition "unlifted_unifvar == 0"
 
 abbreviation
   fresh_unifvar_abbrev :: "'a :: {} => prop" ("freshunifvar _") where
-  "fresh_unifvar_abbrev(x) == PROP fresh_unifvar_const (0, x)"
+  "fresh_unifvar_abbrev(x) == PROP fresh_unifvar_const (normal_unifvar, x)"
+abbreviation
+  fresh_fo_unifvar_abbrev :: "'a :: {} => prop" ("freshFOunifvar _") where
+  "fresh_fo_unifvar_abbrev(x) == PROP fresh_unifvar_const (first_order_unifvar, x)"
+abbreviation
+  fresh_unlifted_unifvar_abbrev :: "'a :: {} => prop" ("freshUNLIFTEDunifvar _") where
+  "fresh_unlifted_unifvar_abbrev(x) == PROP fresh_unifvar_const (unlifted_unifvar, x)"
 
-lemma fresh_unifvarI: "freshunifvar x"
+lemma fresh_unifvarI: "PROP fresh_unifvar_const (kind, x)"
   by (simp add: fresh_unifvar_const_def)
+
+
 
 
 definition
@@ -253,14 +265,15 @@ lemma deprestrI: "deprestr t1 t2"
 
 
 
-definition
+(*definition
   expl_app :: "('a :: {} => 'b :: {}) => 'a => 'b" (infixr "$" 200) where
-  "t1 $ t2 == t1(t2)"
+  "t1 $ t2 == t1(t2)" *)
 
 
 definition
   protect_eta_redex_var where
   "protect_eta_redex_var(t) == t"
+
 
 
 
@@ -293,10 +306,14 @@ ML {*
 
     val constraint_headterm = @{term constraint_const} |> max_polym
     val constraintI = @{thm constraintI}
-    val foconstraint_headterm = @{term foconstraint_const} |> max_polym
-    val foconstraintI = @{thm foconstraintI}
+    (*val foconstraint_headterm = @{term foconstraint_const} |> max_polym
+    val foconstraintI = @{thm foconstraintI} *)
+
     val fresh_unifvar_headterm = @{term fresh_unifvar_const} |> max_polym
     val fresh_unifvarI = @{thm fresh_unifvarI}
+    val fo_unifvar_const = @{term "first_order_unifvar"}
+    val unlifted_unifvar_const = @{term "unlifted_unifvar"}
+
     val unify_headterm = @{term primunify_const} |> max_polym
     val unifyI = @{thm primunifyI}
     val deprestr_headterm = @{term "dep_restr_const"} |> max_polym
@@ -322,8 +339,8 @@ ML {*
     
     val gen_colljudI = @{thm gen_colljudI}
 
-    val expl_app_const_name = @{const_name expl_app}
-    val expl_app_def = @{thm expl_app_def}
+    (* val expl_app_const_name = @{const_name expl_app}
+    val expl_app_def = @{thm expl_app_def} *)
 
     val matchout_headterm = @{term matchout_const} |> max_polym
     val matchout_def = @{thm matchout_const_def}

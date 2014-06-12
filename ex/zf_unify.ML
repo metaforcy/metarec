@@ -87,7 +87,11 @@ struct
   fun is_top_otyp ctxt env t0 =
     case onorm ctxt env t0 of
       Const(@{const_name guniv}, _) $ _ => true
-    | _ => false
+    | t => (case fastype_of t of
+        Type("fun", [aT, _]) =>
+          t aconv (Term.lambda (Free("x", aT)) @{term Trueprop(True)})
+      | _ => false)
+        
 
 
   fun mk_typ_assm x typ = 
@@ -105,7 +109,9 @@ struct
       SOME oT => @{term "annot_metalam"} $ oT $ Term.lambda x body
     | NONE => Term.lambda x body
 
-  fun mk_opi (x, A) body = @{term "ZF.Pi"} $ A $ Term.lambda x body
+  fun mk_opi (x, A) body =
+    @{term "ZF.Pi"} $ A $ Term.lambda x body
+
   fun mk_mpi (x, Aopt) body =
     let
       fun mem_pred A = @{term "op :"} $ x $ A
@@ -134,6 +140,9 @@ struct
         SOME A => mPi_const $ A $ body_abs
       | NONE => mPi_const $ (Term.lambda x @{term "Trueprop(True)"}) $ body_abs
     end
+
+
+
 
   fun dest_oapp (Const(@{const_name "ZF.apply"}, _) $ t1 $ t2) =
         SOME (t1, t2)

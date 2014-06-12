@@ -108,17 +108,6 @@ abbreviation
 lemma constraintI: "PROP P ==> constraint (PROP P)"
   by (simp add: constraint_const_def)
 
-definition
-  foconstraint_const :: "prop => prop"
-where
-  "foconstraint_const P == P"
-
-abbreviation
-  foconstraint_abbrev :: "prop => prop" ("foconstraint _" [5] 10) where
-  "foconstraint_abbrev P == PROP foconstraint_const P"
-
-lemma foconstraintI: "PROP P ==> foconstraint (PROP P)"
-  by (simp add: foconstraint_const_def)
 
 
 definition
@@ -133,17 +122,32 @@ abbreviation
 lemma unifyI: "t1 == t2 ==> unify t1 t2"
   by (simp add: unify_const_def)
 
+
+
 definition
   fresh_unifvar_const:: "unit => 'a :: {} => prop"
 where
-  "fresh_unifvar_const u x == (Trueprop True)"
+  "fresh_unifvar_const kind x == (Trueprop True)"
+
+definition "normal_unifvar == ()"
+definition "first_order_unifvar == ()"
+definition "unlifted_unifvar == ()"
 
 abbreviation
   fresh_unifvar_abbrev :: "'a :: {} => prop" ("freshunifvar _" 10) where
-  "fresh_unifvar_abbrev x == PROP fresh_unifvar_const () x"
+  "fresh_unifvar_abbrev x == PROP fresh_unifvar_const normal_unifvar x"
+abbreviation
+  fresh_fo_unifvar_abbrev :: "'a :: {} => prop" ("freshFOunifvar _" 10) where
+  "fresh_fo_unifvar_abbrev x == PROP fresh_unifvar_const first_order_unifvar x"
+abbreviation
+  fresh_unlifted_unifvar_abbrev :: "'a :: {} => prop" ("freshUNLIFTEDunifvar _" 10) where
+  "fresh_unlifted_unifvar_abbrev x == PROP fresh_unifvar_const unlifted_unifvar x"
 
-lemma fresh_unifvarI: "freshunifvar x"
+lemma fresh_unifvarI: "PROP fresh_unifvar_const kind x"
   by (simp add: fresh_unifvar_const_def)
+
+
+
 
 definition
   deprestr :: "'a::{} => 'b::{} => prop" where
@@ -151,9 +155,9 @@ definition
 lemma deprestrI : "PROP deprestr t1 t2"
   by (simp add: deprestr_def)
 
-definition
+(* definition
   explapp :: "('a :: {} => 'b :: {}) => 'a => 'b" (infixl "$" 200) where
-  "t1 $ t2 == t1 t2"
+  "t1 $ t2 == t1 t2" *)
 
 definition
   matchout_const :: "'a :: {} => 'a => prop" ("matchout _ _") where
@@ -166,6 +170,9 @@ lemma matchoutI: "matchout t t"
 definition
   protect_eta_redex_var where
   "protect_eta_redex_var t == t"
+
+
+
 
 
 ML {*
@@ -186,10 +193,12 @@ ML {*
 
     val constraint_headterm = @{term constraint_const} |> max_polym
     val constraintI = @{thm constraintI}
-    val foconstraint_headterm = @{term foconstraint_const} |> max_polym
-    val foconstraintI = @{thm foconstraintI}
+
     val fresh_unifvar_headterm = @{term fresh_unifvar_const} |> max_polym
     val fresh_unifvarI = @{thm fresh_unifvarI}
+    val fo_unifvar_const = @{term first_order_unifvar}
+    val unlifted_unifvar_const = @{term first_order_unifvar}
+
     val unify_headterm = @{term unify_const} |> max_polym
     val unifyI = @{thm unifyI}
     val deprestr_headterm = @{term "deprestr"} |> max_polym
@@ -214,9 +223,6 @@ ML {*
     val prop_nil = @{term "prop_nil"}
 
     val gen_colljudI = @{thm gen_colljudI}
-
-    val expl_app_const_name = @{const_name explapp}
-    val expl_app_def = @{thm explapp_def}
 
     val matchout_headterm = @{term matchout_const} |> max_polym
     val matchout_def = @{thm matchout_const_def}

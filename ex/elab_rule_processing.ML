@@ -26,7 +26,7 @@ struct
     val printsasjud_n = dest_jud_name @{prop "t' printsas t"}
     val synthtyjud_n = dest_jud_name @{prop "t synthty A"}
     val primunify_jud_n = dest_jud_name @{prop "primunify t t'"}
-    val freshunifvar_jud_n = dest_jud_name @{prop "freshunifvar t"}
+    val fresh_unifvar_jud_n = dest_jud_name @{prop "freshunifvar t"}
     val constraint_jud_n = dest_jud_name @{prop "constraint P"}
   end
 
@@ -51,6 +51,7 @@ struct
 
     fun opt_inv_elab_hhf ctxt prop =
       let
+        (* TODO(opt, refactor): use Variable.focus for parameter fixation *)
         val (param_fresh_ns, ctxt2) = ctxt |> Variable.variant_fixes
           (map fst (Logic.strip_params prop))
         val (params, body) = MetaRec.strip_alls param_fresh_ns prop
@@ -199,8 +200,10 @@ struct
 
       fun inout_vars_of_jud t = case MetaRec.decompose_judgement gctxt t of
           SOME (jud, (pobj, iobjs, oobjs)) =>
-            if jud = freshunifvar_jud_n then ([], []) (* ignoring unification variable declarations *)
-            else (fold Term.add_vars (pobj :: iobjs) [], fold Term.add_vars oobjs [])
+            if jud = fresh_unifvar_jud_n then
+              ([], []) (* ignoring unification variable declarations *)
+            else
+              (fold Term.add_vars (pobj :: iobjs) [], fold Term.add_vars oobjs [])
         | NONE => error ("add_grnd_vars_in_jud: not a judgement "^Syntax.string_of_term ctxt2 t)
       fun add_in_vars_of_jud t = union (op =) (inout_vars_of_jud t |> fst)
       fun add_out_vars_of_jud t = union (op =) (inout_vars_of_jud t |> snd)
@@ -251,15 +254,18 @@ struct
 
       val freshunifvar_decls = Thm.prems_of synth_rl3 |> map_filter (fn prem =>
         case MetaRec.decompose_judgement gctxt prem of
-          SOME (jud, (_, _, oobjs)) =>
-            if jud = freshunifvar_jud_n then SOME (hd oobjs) else NONE
+          SOME (jud, (pobj, _, oobjs)) =>
+            if jud = fresh_unifvar_jud_n
+            then SOME (pobj, hd oobjs)
+            else NONE
         | NONE => NONE)
       val elim_freshunifvar_decls = freshunifvar_decls
-        |> filter (fn uv => not (is_Var uv) orelse ground uv)
+        |> filter (fn (_, uv) => not (is_Var uv) orelse ground uv)
       (* val _ = tracing ("elim_freshunifvar_decls: "^commas (elim_freshunifvar_decls
         |> map (Syntax.string_of_term ctxt2))) *)
-      val elim_freshunifvar_rews = elim_freshunifvar_decls |> map (fn uv => @{thm freshunifvar_triv_rewr}
-        |> Drule.instantiate' [SOME (ctyp_of thy (fastype_of uv))] [SOME (cterm_of thy uv)])
+      val elim_freshunifvar_rews = elim_freshunifvar_decls |> map (fn (kind, uv) =>
+        @{thm freshunifvar_triv_rewr}
+        |> Drule.instantiate' [SOME (ctyp_of thy (fastype_of uv))] (map (SOME o cterm_of thy) [kind, uv]))
       (* val _ = tracing ("elim_freshunifvar_rews: "^commas (elim_freshunifvar_rews
         |> map (Display.string_of_thm ctxt2))) *)
 

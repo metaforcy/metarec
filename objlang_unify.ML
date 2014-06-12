@@ -18,6 +18,9 @@
          (instantiated generic) unification  ?  *)
 
 
+(* FIXME: we have to be able to represent universe level annotations on olam, opi binders.
+  Make information on olam, opi binders polymorphic instead of term-valued and allow
+  coercion of this information to mlam, mpi binder information. *)
 signature ObjLangUnifyData =
 sig
 
@@ -32,8 +35,8 @@ sig
      as a purely syntactic rewrite on otypeable terms. *)
   val unsafe_onorm : Proof.context -> Envir.env -> term -> term
   (* NB: unification vars may also need otyps as well as frees *)
-  val synth_otyp : Proof.context -> Envir.env -> term -> term option
-  val refines_into_otyp : Proof.context -> Envir.env -> term -> term -> bool
+  val synth_otyp : Proof.context -> Envir.env -> term -> term option * Proof.context
+  val refines_into_otyp : Proof.context -> Envir.env -> term -> term -> bool * Proof.context
   val is_top_otyp : Proof.context -> Envir.env -> term -> bool
 
   (* NB: has to be able to create judgements for typing unification variables into oPis *and* mPis *)
@@ -183,6 +186,8 @@ fun obj_unify ctxt (t1_0, t2_0) env =
       |> pairself (fn t_ => Data.synth_otyp ctxt env t_ |> the_otyp ctxt "obj_unify" t_)
     (* TODO(opt!): if t1_0 = t2_0 then we are done and do not need to unify their types *)
     val env2 = 
+      (* TODO(feature): handle unification errors here and reraise them, stating that
+        this refers to unification of types of (t1_0, t2_0) *)
       if Data.is_top_otyp ctxt env oT1 andalso Data.is_top_otyp ctxt env oT2 then
         Data.meta_unify ctxt (oT1, oT2) env
       else

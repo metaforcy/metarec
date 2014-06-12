@@ -41,6 +41,8 @@ struct
   (* minor FIXME: ignore and discharge inflvl constraints.
       uncritical because inflvl universe levels are always non-hidden *)
 
+  (* FIXME: universe levels that only occur in delayed unifications are wrongly considered hidden *)
+
   (* NB: assumes that all universe levels (used in u<, u<= inequations) have  i <: univlvl  constraints in Cs
     (which is the usual situation after standard elaboration) *)
   fun calc_hidden_terminal_univlvl_discharge Cs ctxt =
@@ -49,7 +51,10 @@ struct
       val (concl, vars_in_concl) = case MetaRec.get_normed_concl_stats ctxt of
           SOME (MetaRec.ConclStats (concl, _, vars)) => (concl, vars)
         | NONE => error ("calc_hidden_terminal_univlvl_discharge: no concl stats available "
-          ^"in linear ctxt in runstate")
+            ^"in linear ctxt in runstate")
+      val delayed_unifs = MetaRec.get_delayed_unifs_in_run_state ctxt
+      val nonhidden_vars_outside_Cs = vars_in_concl
+        |> fold (Term.add_vars o Logic.mk_equals o fst) delayed_unifs
 
       fun dest_univ_ieq C =
         case MetaRec.decompose_judgement gctxt C of
@@ -98,7 +103,7 @@ struct
 
       val hidden_uls = uls |> filter_out (fn i =>
         not (can Term.dest_Var i)
-        orelse member (op =) vars_in_concl (Term.dest_Var i)
+        orelse member (op =) nonhidden_vars_outside_Cs (Term.dest_Var i)
         orelse Cs |> exists (fn C =>
           not (is_some (dest_univlvl ctxt C)) andalso not (is_some (dest_univ_ieq C))
           andalso member (op =) (Term.add_vars C []) (Term.dest_Var i)))
@@ -173,9 +178,9 @@ struct
                      end)
                    iqs
             (* val _ = tracing ("i_ths for "^Syntax.string_of_term ctxt i^" are: "^
-              commas (i_ths |> map (Display.string_of_thm ctxt)))
-            val _ = tracing ("i_inst for "^Syntax.string_of_term ctxt i^" ist: "^
-              Syntax.string_of_term ctxt i_inst) *)
+              commas (i_ths |> map (Display.string_of_thm ctxt))) *)
+            val _ = tracing ("instantiated  "^Syntax.string_of_term ctxt i^" := "^
+              Syntax.string_of_term ctxt i_inst)
             val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state
               (curry Envir.update (Term.dest_Var i, i_inst)))
             val env_2 = MetaRec.get_the_env_in_run_state ctxt_2
@@ -234,12 +239,17 @@ struct
                not be generalized to the original ones *)
           Goal.prove ctxt2 [] constr_univlvl_ty_assms goal
             (fn {prems=constr_univlvl_ty_prems, ...} =>
-              print_tac "goal is"
+              print_tac "hidden univlvl discharge goal is"
               THEN REPEAT_DETERM_FIRST (
                 (* (fn _ => print_tac "current goal is")
                 THEN'*) match_tac ([Conjunction.conjunctionI] @ iq_ths_fxd @ univlvl_ty_rls
                   @ map (fn th => @{thm constraintD} OF [th]) constr_univlvl_ty_prems)))
           |> thaw_th |> SOME
+      val _ = case simpth_opt of
+          SOME simpth =>
+            tracing ("calc_hidden_terminal_univlvl: simpth is "^
+              Display.string_of_thm ctxt2 simpth)
+        | NONE => ()
     in
       ((simpth_opt, uninst_uls, ul_instantiation), ctxt2)
     end

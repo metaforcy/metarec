@@ -129,8 +129,47 @@
 
 
 (* TODO(features): 
-    * cycle detection (esp for switch rules; or just for any marked rules?)
-      (kann man vermutlich besser mit impliziten forward rules realisieren)
+    * debugging 
+      * approximative dynamic non-termination and (co-)cycle detection
+
+        Wenn eine Regel 20-50 Mal angewandt wurde, non-termination
+        vermuten, goal neu aufsetzen (fuer moeglichst kleines non-termination bsp)
+        und mit tabling und subgoal abstraction ausfuehren.
+        * "Tabling": loggen welche Regeln schon auf welche Inputs angewandt
+          wurden um Zyklen zu finden
+        * "Subgoal abstraction": subgoals die zu gross erscheinen werden
+          abstrahiert, d.h. ab einer gewissen Tiefe (vermutlich am besten an
+          Positionen wo Unifikationsvariablen einer Regel ansetzen wuerden) werden
+          statt den Subtermen die dort stehen einfach Unifikationsvariablen
+          eingesetzt. Wenn dieses abstrahierte Subgoal dann mit einem seiner
+          Subsubgoals (ich vermute das X wird waehrrenddessen als fixiert
+          angesehen) unifiziert (ohne occurs check!) hat man einen generativen
+          Co-Zyklus gefunden. Z.B. p(f(X)) -> p(f(f(X))), wobei p Praedikat und f
+          Funktionssymbol sei und p(f(X)) ist das bereits abstrahierte Subgoal,
+          das p(f(f(X)) als Subsubgoal erzeugt, was mit p(f(X)) unifiziert (ohne
+          occurs check).
+
+          Constraints wechselwirken natuerlich damit wenn
+        man welche absetzt und Constraint-Lookups in den relevanten Regeln
+        verwendet (weil dann haengt das Resultat der Regel nicht nur von den
+        Inputs, sondern auch von den mittlerweile ggf. veraenderten Constraints ab).
+          Gleiches gilt fuer so ein paar andere seiteneffektige Spezial-Subgoals
+        die , aber die sind bisher zu unwichtig als das ich mir Sorgen mache.
+          Mir ist noch nicht klar ob das die Pragmatik so einer Analyse
+        beeinflusst, weil wenn ein Subgoal wieder als Subsubgoal auftritt wirkt
+        das so oder so pathologisch auf mich, auch wenn veraenderte Constraints
+        beim Loesen des Subsubgoal dann ggf. veraendertes und potentiell
+        terminierendes Verhalten bedingen koennten.
+        Ist dann halt nicht mehr ganz konservativ die Analyse sondern erwartet
+        ein sinnvolles Regelsystem.
+
+
+      * Tracking des Ursprungs (d.h. des dort aktuellen rule traces)
+        von Unifikationsvariablen.
+        Anzeige der Urspruenge und die relevanten Constraints der
+        uninstantiieren Unifvars bei err_with_trace?
+
+
     * Meta-Applikationen nur auseinandernehmen wenn es keine Regel existiert
       bei dem der gleiche, rigide Head ueber ZF-Applikationen angewandt ist.
       Meta-Applikationen nur auseinandernehmen wenn der Head (bzgl Meta-Appl)
@@ -845,6 +884,12 @@
 
 
 
+  * constraint simp procs die eine constraint simp rule dynamisch (auf Basis
+     aller aktuell vorliegenden Constraints) generieren
+     (ggf. unter Modifikation des Kontext, insbes Instantiierungen),
+     die dann einmal ausgefuehrt wird
+     (und entstehende Constraints werden normal hinzugefuegt)
+
 
   * resolution modulo metarec
     * parametrisiert auf Mengensynthesejudgement (zumindest auf Universen-Granularitaet)
@@ -879,6 +924,13 @@
     * als Optimierung: Unifikation verschiedener Universenlevel zwischen denen
       (transitiv) keine Constraints bestehen. Vermutlich reicht auch schon die
       Unifikation von Universenlevel an die garkeine Constraints bestehen
+
+
+
+
+
+
+  
 *)
 
 
@@ -932,4 +984,146 @@
   * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten
     Typinferenz als Annahmen im Kontext zu interpretieren
 
+
+  * universe level performance/algebraism tradeoff
+       annotating PRODs with universe levels speeds up type synthesis
+       (which is important for zf unification):
+         * no introduction of new universe levels and constraints for products them necessary,
+         * type synthesis of universes generates constraint anyway, if we don't
+           adopt at least i+n algebraic universe levels (see below),
+           but type synthesis for universes is rare if we have a direct universe
+           synthesis rule for univlvl-annotated products etc., as universes are mostly under
+           type constructors such as sums, products.
+             Problem is: if we ever intend to use local type inference we will have
+           to make the user put in holes for the univlvl-annotations.
+         * we need a checking judgement
+         * we have to introduce much more universe levels during elaboration
+           (still seems practical, but needs advanced hidden universe level discharge
+           and u<=-increasing tree contraction)
+             An interesting simple performance improvement (which sacrifices some, hopefully
+           nonessential, generality of inferred universe levels) is the idea of sharing
+           universe levels along PRODu telescopes. Corresponds to contracting
+           some u<=-increasing trees if universe level for product is not used
+           
+           I.e. if we introduce a new PRODu over x:A, we check the body type B(x) and if it is
+           of the form (PRODu k y:A2(x). B'(x,y)) we reuse k and therefore produce
+           (PRODu k x:A. PRODu k y:A2(x). B'(x,y)) with the additional constraint
+              i u<= k,  where i is given by  A synthty (guniv i),
+           on k.
+
+
+       Note that annotating guniv with a target universe level does not work,
+       because because k in   guniv i j synthty guniv j k  is still unknown.
+       Annotating with the target universe (not the level) also would not work:
+         guniv i U synthty U
+       because U would have to be of the form guniv j U' again, so a finite
+       guniv term could not even be constructed.
+
+       The problem with algebraic universe levels on the other hand is
+       the complexity of their unification. And transforming a term with
+       algebraic universe levels to a "univ-generalized" term with non-algebraic
+       ones generates new coarser constraints for them, so employing such
+       a transformation during unification makes no sense, because the transformed
+       term is not equal to the original.
+       We could apply the transformation at the latest possible moment, i.e.
+       when the two guniv expressions that are to be supunified, but we are mostly interested
+       in unification, not supunification. Would work like this:
+
+            explode_univlvl i i' := (i u<= i')
+
+            [|  explode_univlvl i i'  ;  freshFOunifvar k  ;  constraint (i' u< k)  |] ==>
+            explode_univlvl (Suc i) k
+
+            [|  explode_univlvl i i' ; explode_univlvl j j'
+               freshFOunifvar k  ;  constraint (i' u<= k)  ;  constraint (j' u<= k)  |] ==>
+            explode_univlvl (i umax j) k
+
+
+            [|  explode_univlvl i i'  ; explode_univlvl j j'  ; primunify i' j'  |] ==>
+            supunify (guniv i) (guniv j) (guniv i')
+
+
+       Specialized unification of algebraic universes can work as constraint simplification
+       process instead. If we want to unify i, j, we first push i+n formation downward with 
+       the rewrite rule
+         (umax i1 i2) + n = umax (i1 + n) (i2 + n)
+       and then we start constraint simplification with the constraints
+         i u<= j,  j u<= i
+       that have to become completely simplified with the following simplification CHRs
+          [| constraints (i1 u<= j, i2 u<= j)  |] ==> umax i1 i2 u<= j
+          [| constraints (i u<= j1, i u<= j2)  |] ==> i u<= umax j1 j2
+          [| constraints (i1 u< j, i2 u< j)  |] ==> umax i1 i2 u< j
+          [| constraints (i u< j1, i u< j2)  |] ==> i u< umax j1 j2
+       and the CHRs below for i+n universe level simplification are needed as well.
+
+
+         Only allowing algebraic universe levels of the form i+n
+       (n>0 from guniv type synthesis) and treating max-formation (from products)
+       via constraints would work, because { i+n | i : univlvl, n : nat } is
+       closed under instantiation.
+       Unification can then stay free of the complexities of max universe levels,
+       and it only has to syntactically unify universe levels i+n, j+m with i,j variables,
+       leading to an instantiation i := j+(m-n) if m >= n, or j := i+(n-m) otherwise.
+       Constraint simplification employs new optional simplification CHRs:
+           constraint( i u<= j ) ==> (Suc i) u<= (Suc j)
+           constraint( i u< j ) ==> (Suc i) u< (Suc j)
+           constraint( i u< j ) ==> (Suc i) u<= j
+       and new essential simp CHR
+          [| synleq j i  ;  universe_inconsistency |]  ==>  i u< j
+          [| synless j i  ;  universe_inconsistency |]  ==>  i u<= j
+          universe_inconsistency  ==>  i u< j &&& j u< (Suc i)
+          primunify i j  ==>  i u<= j &&& j u< (Suc i)
+          primunify j (Suc i)  ==>  i u< j &&& j u<= (Suc i)
+       and new essential propagation CHRs
+           [| synleq j j'  ;  i u<= j &&& j' u<= k |] ==> i u<= k
+           [| synleq j j'  ;  i u<= j &&& j' u< k |] ==> i u< k
+           [| synleq j j'  ;  i u< j &&& j' u<= k |] ==> i u< k
+           [| synleq j j'  ;  i u< j &&& j' u< k |] ==> i u< k
+       under clauses
+           synleq i i
+           synleq i j ==> synleq i (Suc j)
+           synleq i j ==> synleq (Suc i) (Suc j)
+
+           synleq i j ==> synless i (Suc j)
+
+       example universe inconsistency derivations:
+             k < i,  i+3 < k   -->   i+3 < i  --> univ_inconsis
+             k < i,  i+3 < j+1,  j+2 < k    -->   k < j+1, i+3 < k  --> k < k  --> univ_inconsis
+             i+2 < k, k < i+3  --> univ_inconsis
+             i+2 < k, k < i+4  --> ok
+      
+       
+       alternatively enumerate all possibly useful i < i+1 facts
+       (that are propagated to i u<= i+1 and combined with j u<= i, i u<= k
+       facts of course to form full chain)
+       with propagation rules (hackish and seems slow, but faster exact
+       constraint indexing and first-head-prematching could make this actually
+       faster than the approach with explicit syntactic leq, especially since
+       large n in universe levels i+n are rare ;
+       don't display downwardchain constraints to user for debugging purposes):
+            i u<= j ==> downwardchain i &&& downwardchain j
+            i u< j ==> downwardchain i &&& downwardchain j
+            downwardchain (Suc i) ==> downwardchain i &&& i u< (Suc i)
+       also needs new simp CHRs
+          universe_inconsistency  ==>  i u< j &&& j u< (Suc i)
+          primunify i j  ==>  i u<= j &&& j u< (Suc i)
+          primunify j (Suc i)  ==>  i u< j &&& j u<= (Suc i)
+           
+       example universe inconsistency derivations:
+             k < i,  i+3 < k   -->   i+2 < i+3  -->  i+1 < i+2 --> i < i+1, i+1 < i+3, 
+               -->  i < i+3, i < i+2  -->  k < k
+             k < i,  i+3 < j+1,  j+2 < k    -->  i+2 < i+3, j+1 < j+2, j < j+1
+             -->  i+1 < i+2, j < j+2 --> i < i+1, i+2 < i+3, --> i < i+3 ... -->
+             k < j+1, j+1 < k  --> k < k 
+             i+2 < k, k < i+3  --> univ_inconsis
+             i+2 < k, k < i+4  --> ok
+
+
+
+       Also we have to use a hack such as
+         (PRODu k x:A. B(x)) := (PROD x:A. B(x)) Int (guniv (k-1))
+         i <: univlvl := i : nat /\ i > 0
+       to enable an easy rule (provable via closure of guniv k under subsets
+         k synthty univlvl ==> (PRODu k x:A. B(x)) synthty guniv k,
+       otherwise we have to synthesize the universes of the components anyway. 
 *)

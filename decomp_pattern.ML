@@ -9,6 +9,8 @@ structure DecompPattern: DECOMP_PATTERN =
 struct
 
 
+exception NotBetaNormal
+
 fun string_of_term thy env binders t =
   Syntax.string_of_term_global thy
     (Envir.norm_term env (subst_bounds (map Free binders, t)));
@@ -90,13 +92,17 @@ fun typ_match thy TU tyenv = Sign.typ_match thy TU tyenv
 
 fun match_bind(itms,binders,ixn,T,is,t) =
   let val js = loose_bnos t
-  in if null is
-     then if null js then Vartab.update_new (ixn, (T, t)) itms else raise Pattern.MATCH
-     else if subset (op =) (js, is)
-          then let val t' = if downto0(is,length binders - 1) then t
-                            else mapbnd (idx is) t
-               in Vartab.update_new (ixn, (T, mkabs (binders, is, t'))) itms end
-          else raise Pattern.MATCH
+  in
+    if null is then
+      if null js then Vartab.update_new (ixn, (T, t)) itms
+      else raise Pattern.MATCH
+    else
+      if subset (op =) (js, is) then
+        let val t' =
+          if downto0(is,length binders - 1) then t
+          else mapbnd (idx is) t
+        in Vartab.update_new (ixn, (T, mkabs (binders, is, t'))) itms end
+      else raise Pattern.MATCH
   end;
 
 
@@ -142,6 +148,8 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
     (* Pre: pat and obj have same type *)
     fun mtch binders (pat, obj0) (env as (iTs,itms)) =
       let 
+        (* NB: we normalize in order to regard common variables in object and pattern as shared.
+           Only object is normalized to avoid deep matching, which would correspond to unification. *)
         val obj = obj0 |> Envir.head_norm (toenv env)
       in
         case pat of
@@ -162,12 +170,12 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
     and cases(binders,env as (iTs,itms),pat,obj) =
       let
         val (ph,pargs) = strip_comb pat
-        val (oh,_) = strip_comb obj
-        fun rigrig1(iTs,oargs) = fold (mtch binders) (pargs~~oargs) (iTs,itms)
+        val (oh,oargs) = strip_comb obj
+        fun rigrig1 (iTs_,itms_) = fold (mtch binders) (pargs~~oargs) (iTs_,itms_)
           handle ListPair.UnequalLengths => raise Pattern.MATCH
-        fun rigrig2((a:string,Ta),(b,Tb),oargs) =
+        fun rigrig2 ((a,Ta), (b,Tb)) =
           if a <> b then raise Pattern.MATCH
-          else rigrig1(typ_match thy (Ta,Tb) iTs, oargs)
+          else rigrig1 (typ_match thy (Ta,Tb) iTs, itms)
       in
         case ph of
           Var(ixn,T) =>
@@ -179,43 +187,46 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
                       (ocheck_fail_matching thy (ixn,obj,binders,toenv env);
                       raise Pattern.MATCH)
                     else ()
-                  val is = ints_of pargs
                 in 
-                  case Envir.lookup' (itms, (ixn, T)) of
-                    NONE => (iTs,match_bind(itms,binders,ixn,T,is,obj))
-                  | SOME u => if Pattern.aeconv (obj, red u is []) then env
-                              else raise Pattern.MATCH
+                  case (SOME (ints_of pargs)
+                    handle Pattern.Pattern => NONE)
+                  of
+                    SOME is => (case Envir.lookup' (itms, (ixn, T)) of
+                        NONE => (iTs,match_bind(itms,binders,ixn,T,is,obj))
+                      | SOME u =>
+                          if Pattern.aeconv (obj, red u is []) then env
+                          else raise Pattern.MATCH)
+                  | NONE => (case pat of
+                        (* pat is non-pattern, so we degrade to local first-order matching *)
+                        pat1 $ pat2 => (case obj of
+                          obj1 $ obj2 =>
+                            let val typ_of = curry fastype_of1 (map snd binders)
+                            in
+                              (iTs, itms)
+                              |>> typ_match thy (typ_of pat1, typ_of obj1)
+                              |> fold (mtch binders) ([pat1, pat2] ~~ [obj1, obj2])
+                            end
+                        | _ => raise Pattern.MATCH)
+                      | _ => error "gen_match_w_shared_vars: internal error: expected pattern application")
                  end
             in
               case oh of
                 Var(ixn2,_) =>
-                  if ixn = ixn2 then env
+                  if ixn = ixn2 then rigrig1 env
                   else varmatch ()
               | _ => varmatch ()
             end
-             (* TODO(feature):
-                   wenn aus  ints_of pargs  Pattern geraised wird,
-                   hier strukturell weitermachen statt direkt
-                   zu first-order-matching zu degraden, dh
-
-                 handle Pattern =>
-                   let val (oh,oargs) = strip_comb obj
-                   in
-                     fold mtch binders ((ph :: pargs) ~~ (oh :: oargs))
-                   end
-             *)
-        | _ =>
-            let val (oh,oargs) = strip_comb obj
-            in
-              case (ph,oh) of
-                (Const c,Const d) => rigrig2(c,d,oargs)
-              | (Free f,Free g)   => rigrig2(f,g,oargs)
-              | (Bound i,Bound j) => if i<>j then raise Pattern.MATCH
-                                     else rigrig1(iTs,oargs)
-              | (Abs _, _)        => raise Pattern.Pattern
-              | (_, Abs _)        => raise Pattern.Pattern
-              | _                 => raise Pattern.MATCH
-            end
+        | _ => (case (ph,oh) of
+            (Const c,Const d) => rigrig2 (c,d)
+          | (Free f,Free g)   => rigrig2 (f,g)
+          | (Bound i,Bound j) =>
+              if i<>j then raise Pattern.MATCH
+              else rigrig1 env
+          (* NB: if the term were beta-normal here, i.e. just an abstraction without arguments,
+             we would have already descended into the abstraction in mtch *)
+          | (Abs _, _)        => raise NotBetaNormal
+          | (_, Abs _)        => raise NotBetaNormal
+          | _                 => raise Pattern.MATCH)
       end;
 
     val pT = fastype_of pat
@@ -223,7 +234,6 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
     val envir' = apfst (typ_match thy (pT, oT)) envir;
   in
     mtch [] po envir'
-    handle Pattern.Pattern => first_order_match_w_shared_vars thy po envir'
   end;
 
 

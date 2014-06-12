@@ -500,6 +500,12 @@ fun solve_flexflex thy (binders, (((F,Fty), ss), ((G,Gty), ts))) env =
     val (ss', ts') = pairself (map (Envir.norm_term env)) (ss, ts)
     val (Fty', Gty') = (Fty, Gty) |> pairself (Envir.norm_type (Envir.type_env env))
 
+    (* NB: we intersect dependencies (i.e. generalizing
+       the treatment in pattern unification), so that e.g.
+       f # x == g # x results in f, g : (PROD x:A. B(x))
+         (due to constraint ?B(x) == ?C(x)) 
+       and f # x == g # y results in f : ?X -> ?D, g : ?Y -> ?D
+         (due to constraint ?B(x) == ?C(y)) *)
     fun dep_restr_sol (v1, args1) (v2, args2) env =
       let
         val ctxt = Name.context |> fold Term.declare_term_names
@@ -529,13 +535,53 @@ fun solve_flexflex thy (binders, (((F,Fty), ss), ((G,Gty), ts))) env =
       in
         env4
       end
+
+    (* this seems to be the most general solution, but it is so general that it needs postprocessing:
+       in constraints changed by this unification solution perform dependency restriction, i.e.
+         deprestr t A ==> t <: A
+       which happens in constraint regeneration case for metarec constraint simp. *)
+    (* f # x == g # x  results in f, g : (PROD x:A. B(x))
+          due to constraints ?B0(x) == ?C0(x)
+       f # x == g # y  results in f : A -> C',  g : B -> C'
+          due to constraint ?C0(x) == ?C1(y) that leads to solution
+            ?C0 := (% x. ?C(x,y)), ?C1 := (% y. ?C(x,y))
+          which is deprestr to ?C := (% x y. C') during subsequent simplification of
+          constraints f : PROD x:A. ?C(x,y), g : PROD y:B. ?C(x,y) *)
+    fun dep_accum_sol (v1, args1) (v2, args2) env =
+      let
+        val ctxt = Name.context |> fold Term.declare_term_names
+          ([Var v1, Var v2] @ args1 @ args2 @ map (snd #> Logic.mk_type) binders)
+        val (bnd_ns, _) = ctxt |> fold_map (Name.variant o fst) binders
+        val bnd_frees = bnd_ns ~~ (map snd binders) |> map Free
+        val subst = curry subst_bounds bnd_frees
+
+        val (args1', args2') = pairself (map subst) (args1, args2)
+        val common_args = inter (op aconv) args1' args2'
+        val common_bnds = inter (op =) common_args bnd_frees
+        fun avail t = subset (op =) (
+          inter (op =) (Term.add_frees t [] |> map Free) bnd_frees,
+          common_bnds)
+        val accum_args = union (op aconv) (filter avail args1') (filter avail args2')
+
+        val (v1_binderTs, v1_bodyT) = Term.strip_type (snd v1)
+        val (env2, newvar) = Envir.genvar (fst (fst v1)) (env,
+          map fastype_of accum_args ---> drop (length args1') v1_binderTs ---> v1_bodyT)
+
+        val unified_body = list_comb(newvar, accum_args)
+        val t1 = unified_body |> fold_rev Term.lambda args1'
+        val t2 = unified_body |> fold_rev Term.lambda args2'
+
+        val env3 = Envir.update ((v1, t1), env2)
+        val env4 = Envir.update ((v2, t2), env3)
+        val _ = tracing ("flexflex2 dependency accumulation solution for "
+          ^Syntax.string_of_term_global thy
+            (Logic.mk_equals (list_comb ((Var v1), args1'), list_comb ((Var v2), args2')))
+          ^":\n  "^Syntax.string_of_term_global thy (Var v1)^" := " ^Syntax.string_of_term_global thy t1
+          ^"\n  "^Syntax.string_of_term_global thy (Var v2)^" := " ^Syntax.string_of_term_global thy t2)
+      in
+        env4
+      end
   in
-    (* NB: we intersect dependencies (i.e. generalizing
-       the treatment in pattern unification), so that e.g.
-       f # x == g # x results in f, g : (PROD x:A. B(x))
-         (due to constraint ?B(x) == ?C(x)) 
-       and f # x == g # y results in f : ?X -> ?D, g : ?Y -> ?D
-         (due to constraint ?B(x) == ?C(y)) *)
     dep_restr_sol ((F,Fty'), ss') ((G,Gty'), ts') env
   end
 
