@@ -21,6 +21,7 @@
 (* FIXME: we have to be able to represent universe level annotations on olam, opi binders.
   Make information on olam, opi binders polymorphic instead of term-valued and allow
   coercion of this information to mlam, mpi binder information. *)
+(* FIXME: adapt to synth_otyp's new type: context is potentially enriched with constraints *)
 signature ObjLangUnifyData =
 sig
 

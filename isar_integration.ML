@@ -33,8 +33,8 @@ fun assume_constraints ts ctxt =
       end)
     val ctxt3 = ctxt2 |> fold (MetaRec.add_assm true) assms
     (* val _ = tracing ("assume_constaints: assumed  "
-      ^commas (map (Syntax.string_of_term ctxt3) constraints)) *)
-    (* val _ = tracing ("Assumption.all_prems_of: "
+      ^commas (map (Syntax.string_of_term ctxt3) constraints))
+    val _ = tracing ("Assumption.all_prems_of: "
       ^commas (map (Display.string_of_thm ctxt3) (Assumption.all_prems_of ctxt3))) *)
   in
     (unconstrained_ts, ctxt3)

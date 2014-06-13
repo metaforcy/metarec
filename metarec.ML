@@ -4875,13 +4875,16 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
       (* TODO(feature): try to un-normalize to original judgement? *)
     val th = replay_prf true ctxt5 prf3 |> Thm.close_derivation
 
-    val {delayed_unifs=delayed_unifs', constraints=constraints', ...} =
-      get_the_run_state (Context.Proof ctxt5)
 
+    val norm5 = norm_with_env_in_run_state ctxt5
     (* NB: oobjs can be instantiated further now, due to further unifications *)
-    val oobjs' = oobjs |> map (norm_with_env_in_run_state ctxt5) 
+    val oobjs' = oobjs |> map norm5
+
+    val delayed_unifs' = get_delayed_unifs_in_run_state ctxt5
+      |> filter_out snd |> map (fst #> pairself norm5)
+    val constraints' = get_constraints_in_run_state ctxt5 |> map (#1 #> norm5)
   in
-    ((th, oobjs'), (delayed_unifs' |> filter_out snd |> map fst, constraints' |> map #1))
+    ((th, oobjs'), (delayed_unifs', constraints'))
   end
 
 

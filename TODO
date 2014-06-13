@@ -1020,7 +1020,8 @@
        guniv term could not even be constructed.
 
        The problem with algebraic universe levels on the other hand is
-       the complexity of their unification. And transforming a term with
+       the complexity of their unification and the overspecification by using
+       umax instead of the actually necessary constraints. And transforming a term with
        algebraic universe levels to a "univ-generalized" term with non-algebraic
        ones generates new coarser constraints for them, so employing such
        a transformation during unification makes no sense, because the transformed
@@ -1044,17 +1045,25 @@
 
 
        Specialized unification of algebraic universes can work as constraint simplification
-       process instead. If we want to unify i, j, we first push i+n formation downward with 
+       process instead if we allow disjunctive constraints, which leads to a disjunctive
+       set of constraint graphs.
+       Note that solution is not unique anyway. (Sozeau accumulates constraints with umax?)
+       If we want to unify i, j, we first push i+n formation downward with 
        the rewrite rule
          (umax i1 i2) + n = umax (i1 + n) (i2 + n)
        and then we start constraint simplification with the constraints
          i u<= j,  j u<= i
        that have to become completely simplified with the following simplification CHRs
-          [| constraints (i1 u<= j, i2 u<= j)  |] ==> umax i1 i2 u<= j
-          [| constraints (i u<= j1, i u<= j2)  |] ==> i u<= umax j1 j2
-          [| constraints (i1 u< j, i2 u< j)  |] ==> umax i1 i2 u< j
-          [| constraints (i u< j1, i u< j2)  |] ==> i u< umax j1 j2
+          [| constraint_conj (i1 u<= j, i2 u<= j)  |] ==> umax i1 i2 u<= j
+          [| constraint_disj (i u<= j1, i u<= j2)  |] ==> i u<= umax j1 j2
+          [| constraint_conj (i1 u< j, i2 u< j)  |] ==> umax i1 i2 u< j
+          [| constraint_disj (i u< j1, i u< j2)  |] ==> i u< umax j1 j2
        and the CHRs below for i+n universe level simplification are needed as well.
+
+         Examples
+              umax { i, j+2 } = k  --> i u<= k,  j+2 u<= k,  ( k u<= i  OR  k u<= j+2 )
+                 == (i u<= k, j+2 u<= k, k u<= i) OR (i u<= k, j+2 u<= k, k u<= j+2)
+                 -->  unify k i   OR  unify k (j+2)
 
 
          Only allowing algebraic universe levels of the form i+n

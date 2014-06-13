@@ -165,6 +165,7 @@ struct
 
 
 
+  (* not necessary with current architecture *)
   (* fun binder_descent ctxt env t0 =
     let val t = onorm ctxt env t0
     in

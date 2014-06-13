@@ -41,7 +41,37 @@ struct
   (* minor FIXME: ignore and discharge inflvl constraints.
       uncritical because inflvl universe levels are always non-hidden *)
 
-  (* FIXME: universe levels that only occur in delayed unifications are wrongly considered hidden *)
+
+  (* TODO(feature): more general discharge of nonterminal universe levels:
+       instantiation as for terminal ones, i.e.
+           ?j := umax ({ ?i | exconstraint (?i u<= ?j) } Un { succ ?i | exconstaint (?i u< ?j)}),
+       combined with short-cutting
+       simplification of larger constraints:
+         i1 u<= j &&& i2 u<= j ==> i1 umax i2 u<= j
+         i1 u< j &&& i2 u< j ==> i1 umax i2 u< j
+         i u< j ==> succ i u<= j 
+         i u< j ==> succ i u< j     ???
+       
+       And better include the following simplification rules as well, to
+       get rid of software complexity related to simpthm proof:
+
+         i <: univlvl  ==> succ i <: univlvl
+         [|  i1 <: univlvl  ;  i2 <: univlvl  |] ==> umax i1 i2 <: univlvl
+
+         i u< succ i
+         synleq i1 (umax j1 j2) ==> i u<= umax j1 j2
+         synless i1 (umax j1 j2) ==> i u< umax j1 j2
+         
+         where synleq, synless are defined by clauses
+            synleq i (umax i j)
+            synleq j (umax i j)
+            synleq i j2 ==> synleq i (umax j1 j2)
+            try (synleq i j1) ==> synleq i (umax j1 j2)
+
+            synless i (umax (succ i) j)
+            synless j (umax i (succ j))
+            synless i j2 ==> synless i (umax j1 j2)
+            try (synless i j1) ==> synless i (umax j1 j2)  *)
 
   (* NB: assumes that all universe levels (used in u<, u<= inequations) have  i <: univlvl  constraints in Cs
     (which is the usual situation after standard elaboration) *)
@@ -135,14 +165,14 @@ struct
             (* val _ = tracing ("iqs for "^Syntax.string_of_term ctxt_ i
               ^" are "^commas (iqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt_))) *)
             (* TODO(minor opt): avoid deepest (.. umax 0) subtree in i_inst, if  length iqs > 0 *)
-            val (i_inst, i_ths) = (@{term "0"}, [])
+            val (i_inst, i_ths) = (@{term first_univlvl}, [])
               |> fold_rev (fn (compty, (j, _)) => fn (inst_t0, ths0) =>
                      let
                        val j' = MetaRec.norm_with_env_in_run_state ctxt_ j
 
                        val j''  = case compty of
                            UnivLeq => j'
-                         | UnivLess => @{term "succ"} $ j'
+                         | UnivLess => @{term "usucc"} $ j'
                        val [j'_ct, j''_ct, inst_t0_ct] = map cert [j', j'', inst_t0]
                        val th0_j = (case compty of
                            UnivLeq => @{thm uleq_base}
@@ -223,7 +253,7 @@ struct
 
       (* NB: after applying iq_ths, we have to discharge their premises that
          became instantiated to   (.. umax ..) <: univlvl *)
-      val univlvl_ty_rls = [@{thm umax_univlvl_ty}, @{thm zero_univlvl_ty}, @{thm succ_univlvl_ty}]
+      val univlvl_ty_rls = [@{thm umax_univlvl_Cty}, @{thm first_univlvl_Cty}, @{thm usucc_univlvl_Cty}]
 
       val constr_univlvl_ty_assms = uninst_uls_fxd
         |> filter (fn i => inst_ul_iqs_fxd |> exists (fn iq =>

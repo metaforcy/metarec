@@ -68,6 +68,8 @@ where
   primreplace_in_guniv: "[|  i : nat  ;  A : guniv i  |] ==> PrimReplace(A, P) : guniv i"
 
 
+lemma trans_guniv2 : "[| i: nat  ;  A : guniv i |] ==> A <= guniv i"
+  by (auto intro: trans_guniv)
 
 lemma guniv_cumul: "[|  i : nat  ;  j : nat  ;  i le j ;  x : guniv i |] ==> x : guniv j"
   apply (cases "i = j") apply simp
@@ -78,6 +80,15 @@ lemma guniv_cumul: "[|  i : nat  ;  j : nat  ;  i le j ;  x : guniv i |] ==> x :
 
 lemma guniv_sub: "[|  i : nat  ;  j : nat  ;  i le j  |] ==> guniv i <= guniv j"
   by (auto intro: guniv_cumul)
+
+lemma guniv_subD: "[|  guniv i <= guniv j  ;  i : nat  ;  j : nat  |] ==> i le j"
+  apply (rule Ord_linear_lt[of i j], simp+)
+  apply (auto intro: Ordinal.leI)
+  apply (drule guniv_in_guniv[of j i], assumption+)
+  apply (subgoal_tac "guniv j : guniv j")
+  apply (rule mem_irrefl, assumption)
+  by auto
+  
 
 
 lemma empty_in_guniv: "i : nat ==> 0 : guniv i"
@@ -122,10 +133,10 @@ lemma inter_in_guniv: "[|  i : nat  ;  A : guniv i  |] ==>
   apply (rule collect_in_guniv, assumption)
   by (rule union_in_guniv)
 
-lemma in_in_guniv: "[|  i : nat  ;  A : guniv i  ;  B : guniv i |] ==>
-   A Un B : guniv i"
-  unfolding Un_def
-  apply (rule union_in_guniv, assumption)
+lemma int_in_guniv: "[|  i : nat  ;  A : guniv i  ;  B : guniv i |] ==>
+   A Int B : guniv i"
+  unfolding Int_def
+  apply (rule inter_in_guniv, assumption)
   by (rule upair_in_guniv)
   
 
@@ -240,9 +251,151 @@ definition
   "typed_pair(t1, t2, A) == <t1, t2>"
 
 
+
+
+
+definition
+  inf_lvl_const ("inflvl _") where
+  [MRjud 1 0]: "inf_lvl_const(i) == True"
+
+(* TODO(refactor): use univlvlE in proofs instead of 
+     apply (simp add: univlvl_def, elim conjE).
+   And avoid reintroduction of univlvls from its definition. *)
+definition
+  univlvl where "univlvl == { i : nat . 0 < i }"
+
+lemma univlvlE: "i : univlvl ==> (i : nat ==> 0 < i ==> P) ==> P"
+  by (simp add: univlvl_def)
+lemma univlvlDnat: "i : univlvl ==> i : nat"
+  by (simp add: univlvl_def)
+
+lemma univlvl_in_guniv: "i : nat ==> univlvl : guniv i"
+  apply (subst univlvl_def)
+  apply (rule collect_in_guniv, assumption)
+  by (rule nat_in_guniv)
+  
+
+definition
+  univ_less (infixl "u<" 50) where
+  [MRjud 2 0]: "univ_less(x,y) == x < y"
+
+(* NB: Ordinal.le(x,y) is just an abbreviation for x < succ(y), so we cannot reuse this *)
+definition
+  univ_leq (infixl "u<=" 50) where
+  [MRjud 2 0]: "univ_leq(x,y) == x le y"
+
+definition
+  univ_max (infixl "umax" 80) where
+  "i umax j == max(i,j)"
+
+lemma univlvl_to_natD: "i : univlvl ==> i : nat"
+  by (simp add: univlvl_def)
+
+
+definition
+  "first_univlvl == 1"
+definition
+  "usucc == succ"
+
+lemma univ_leq_is_less_usucc: "(i u<= j) == (i u< usucc(j))"
+  by (simp add: univ_leq_def univ_less_def usucc_def)
+
+lemma umax_nat_ty: "i : nat ==> j : nat ==> (i umax j) : nat"
+  by (simp add: univ_max_def max_def)
+lemma umax_univlvl_ty: "i : univlvl ==> j : univlvl ==> (i umax j) : univlvl"
+  by (simp add: univ_max_def max_def)
+lemma first_univlvl_ty: "first_univlvl : univlvl"
+  by (simp add: first_univlvl_def univlvl_def)
+lemma usucc_univlvl_ty: "i : univlvl ==> usucc(i) : univlvl"
+  by (simp add: usucc_def univlvl_def)
+
+lemma umax_larger1: "i : univlvl ==> i u<= (i umax j)"
+  by (simp add: max_def univ_max_def univ_leq_def univlvl_def)
+lemma umax_larger2: "i : univlvl ==> j : univlvl ==> j u<= (i umax j)"
+   apply (simp add: max_def univ_max_def univ_leq_def univlvl_def)
+   apply (rule impI) apply (simp add: not_le_iff_lt) by (rule leI)
+lemma umax_sup: "i u<= k ==> j u<= k ==> (i umax j) u<= k"
+  by (simp add: max_def univ_max_def univ_leq_def)
+lemma umax_less_sup: "i u< k ==> j u< k ==> (i umax j) u< k"
+  by (simp add: max_def univ_max_def univ_leq_def)
+  
+
+lemma univ_leq_from_less: "i u< j ==> i u<= j"
+  apply (simp add: univ_leq_def univ_less_def)
+  by (rule Ordinal.leI)
+
+lemma guniv_subD2: "[|  guniv i <= guniv j  ;  i : univlvl  ;  j : univlvl  |] ==> i u<= j"
+  apply (simp add: univlvl_def univ_leq_def)
+  apply (elim conjE)
+  by (rule guniv_subD)
+
+
+definition
+  "univpred(i) == nat_case(0, (% j. j), i)"
+
+lemma univpred_ty: "i : univlvl ==> univpred(i) : nat"
+  apply (simp add: univpred_def univlvl_def)
+  apply (erule conjE)
+  by typecheck
+
+lemma univpred_smaller: "i : univlvl ==> univpred(i) < i"
+  unfolding univpred_def univlvl_def
+  by (simp split: split_nat_case) auto
+
+lemma univpred_guniv_in_guniv: "i : univlvl ==> guniv (univpred(i)) : guniv i"
+  apply (erule univlvlE)
+  apply (rule guniv_in_guniv)
+  apply (simp add: univpred_ty univlvl_def)
+  apply assumption
+  by (simp add: univpred_smaller univlvl_def)
+
+
+lemma univpred_leq: "[| i : univlvl  ;  j : univlvl  ;  i u<= j |] ==>
+    univpred(i) u<= univpred(j)"
+  apply (simp add: univpred_def univlvl_def univ_leq_def)
+  apply (elim conjE)
+  apply (erule natE)
+  apply (erule natE)
+  apply simp
+  apply (erule natE)
+  apply auto
+  apply (erule natE)
+  by auto
+
+lemma univ_le_to_sub_univpred: "[| i : nat  ;  j : nat  ;  i < j  |] ==> guniv i <= guniv (univpred(j))"
+  unfolding univpred_def
+  apply (simp split: split_nat_case)
+  apply auto
+  apply (rule guniv_cumul, assumption+)
+  by (auto intro: nat_imp_quasinat)
+
+(* NB: we now use inflationary i u< k, j u< k constraints instead of the necessary i u<= k, j u<= k
+   in elaboration rules that introduce (PRODu k x:A. B(x)) where A : guniv i, (!! x. B(x) : guniv j). *)
+(* drawback: we have to increate univlvls outward along nested PRODus  and cannot reuse them as in
+     PRODu k x:A. PRODU k y:B. C(x,y) *)
+(* TODO(refactor): We could now even drop u<= constraints completely, only using u< because universe level 
+   inflation never hurts. This avoids CHRs about the interaction between u<, u<=. *)
+lemma sub_pred_guniv: "[|  i : univlvl  ;  j : univlvl  ;  A : guniv i  ;  i < j  |] ==> A <= guniv (univpred(j))"
+  apply (subgoal_tac "guniv i <= guniv (univpred(j))")
+  apply (drule subsetD, assumption)
+  apply (rule trans_guniv2, rule univpred_ty, assumption+)
+  apply (rule univ_le_to_sub_univpred)
+  by (simp add: univlvl_def)+
+
+(* counterexample A := { guniv(univpred(i)) } *)
+lemma wrong_sub_pred_guniv: "[|  i : univlvl  ;  A : guniv i  |] ==> A <= guniv (univpred(i))"
+ oops
+
+
+
+
+
+
+
 definition
   univannot_prod :: "i => i => (i => i) => i" where
-  "univannot_prod(k, A, B) = Pi(A, B)"
+  "univannot_prod(k, A, B) = Pi(A, B) Int (guniv (univpred (k)))"
+
 
 definition
   annot_metalam :: "i => (i => 'a::{}) => (i => 'a)" where
@@ -277,7 +430,66 @@ term "lamu k x:A. t(x)"
 
 
 
+lemma produ_in_guniv: "
+    k : univlvl ==>
+  (PRODu k x:A. B(x)) : guniv k"
+  unfolding univannot_prod_def univlvl_def
+  apply (simp, erule conjE)
+  apply (subgoal_tac "guniv univpred(k) : guniv k")
+  apply (rule guniv_subclosed[of k "Pi(A,B) Int guniv(univpred(k))" "guniv(univpred(k))"], assumption)
+  apply auto
+  apply (rule guniv_in_guniv)
+  apply (rule univpred_ty)
+  apply (simp add: univlvl_def)
+  apply assumption
+  by (rule univpred_smaller, simp add: univlvl_def)
+
+
+lemma weaken_produ: "[|  k1 : univlvl  ;  k2 : univlvl  ;
+    k1 u<= k2  ;  !! x. x:A ==> B(x) <= B2(x)  |] ==>
+  (PRODu k1 x:A. B(x)) <= (PRODu k2 x:A. B2(x))"
+  unfolding univannot_prod_def univ_leq_def
+  apply (auto intro: Pi_weaken_type)
+  apply (rule guniv_cumul[of "univpred(k1)" "univpred(k2)"])
+  apply (auto intro: univpred_ty)
+  by (rule univpred_leq[simplified univ_leq_def], assumption+)
+  
+
  
+lemma produ_pi_simp: "[|
+   i : univlvl  ;  j : univlvl  ;  k : univlvl  ;
+   A : guniv i  ;  !! x. x:A ==> B(x) : guniv j  ;
+   i u< k  ;  j u< k   |] ==>
+  (PRODu k x:A. B(x)) == (PROD x:A. B(x))"
+  unfolding univannot_prod_def
+  apply (rule eq_reflection)
+  apply (rule Int_absorb2)
+  apply (rule sub_pred_guniv[of "i umax j" k])
+  apply (auto intro: umax_univlvl_ty)
+  apply (rule prod_in_guniv)
+  apply (blast intro: umax_nat_ty univlvl_to_natD)
+  apply (auto intro: guniv_cumul[of i "i umax j"] umax_nat_ty umax_larger1[simplified univ_leq_def] dest: univlvl_to_natD)
+  apply (auto intro: guniv_cumul[of j "i umax j"] umax_nat_ty umax_larger2[simplified univ_leq_def] dest: univlvl_to_natD)
+  apply (rule umax_less_sup[simplified univ_less_def])
+  by (simp add: univ_less_def)+
+
+
+lemma produI: "[|
+    i : univlvl  ;  j : univlvl  ;  k : univlvl  ;
+    A : guniv i  ;
+    !! x. x : A ==> B(x) : guniv j  ;
+    i u< k  ;  j u< k  ;
+    f : (PROD x:A. B(x)) |] ==>
+  f : (PRODu k x:A. B(x))"
+  by (subst produ_pi_simp[of i j k A B])
+
+
+lemma produ_piE: "[|
+  f : (PRODu k x:A. B(x))  ;
+  f : (PROD x:A. B(x)) ==> P  |]
+  ==> P"
+  by (simp add: univannot_prod_def)
+
 
 
 
@@ -574,28 +786,6 @@ definition
 
 
 
-definition
-  inf_lvl_const ("inflvl _") where
-  [MRjud 1 0]: "inf_lvl_const(i) == True"
-
-lemma [MRjud 2 0]: "i < j == i < j" by simp
-
-definition
-  univlvl where "univlvl == nat"
-
-definition
-  univ_less (infixl "u<" 50) where
-  [MRjud 2 0]: "univ_less(x,y) == x < y"
-
-(* NB: Ordinal.le(x,y) is just an abbreviation for x < succ(y), so we cannot reuse this *)
-definition
-  univ_leq (infixl "u<=" 50) where
-  [MRjud 2 0]: "univ_leq(x,y) == x le y"
-
-definition
-  univ_max (infixl "umax" 80) where
-  "i umax j == max(i,j)"
-
 
 
 
@@ -644,10 +834,17 @@ lemma [MR]: "
 lemma [MR]: "[|
     primunify A1 A2 ;
     supunify (guniv k1) (guniv k2) (guniv k')  ;
+    constraint (k1 <: univlvl)  ;   constraint (k2 <: univlvl)  ;   constraint (k' <: univlvl)  ;
     !! x. supunify B1(x) B2(x) B(x)  |]  ==>
   supunify (PRODu k1 x:A1. B1(x)) (PRODu k2 x:A2. B2(x)) (PRODu k' x:A1. B(x))"
-  apply (simp add: primunify_const_def supunify_const_def univannot_prod_def)
-  by (auto intro: Pi_weaken_type)
+  apply (simp add: primunify_const_def supunify_const_def constraint_const_def constraint_typing_def) 
+  apply (elim conjE)
+  apply (drule guniv_subD2, assumption+)
+  apply (drule guniv_subD2, assumption+)
+  apply (rule conjI)
+  apply (rule weaken_produ, assumption+, simp)
+  by (rule weaken_produ, assumption+, simp)
+
 
 lemma [MR]: "[|
     try (noexconstraint (i u<= j))  ;
@@ -659,6 +856,7 @@ lemma [MR]: "[|
   supunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: supunify_const_def constraint_const_def constraint_typing_def
     univ_leq_def univlvl_def)
+  apply (elim conjE)
   apply (rule conjI)
   by (rule guniv_sub, assumption+)+
 
@@ -671,7 +869,7 @@ lemma [MR]: "[|
   supunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: supunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (erule conjE)
+  apply (elim conjE)
   apply (subgoal_tac "guniv i <= guniv i'")
   defer 1
   apply(rule guniv_sub, assumption+)
@@ -686,7 +884,7 @@ lemma [MR]: "[|
   supunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: supunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (erule conjE)
+  apply (elim conjE)
   apply (subgoal_tac "guniv j <= guniv j'")
   defer 1
   apply(rule guniv_sub, assumption+)
@@ -707,10 +905,14 @@ lemma [MR]: "
 lemma [MR]: "[|
     primunify A1 A2 ;
     infunify (guniv k1) (guniv k2) (guniv k')  ;
+    constraint (k1 <: univlvl)  ;  constraint (k2 <: univlvl)  ;  constraint (k' <: univlvl)  ;
     !! x. infunify B1(x) B2(x) B(x)  |]  ==>
   infunify (PRODu k1 x:A1. B1(x)) (PRODu k2 x:A2. B2(x)) (PRODu k' x:A1. B(x))"
-  apply (simp add: primunify_const_def infunify_const_def univannot_prod_def)
-  by (auto intro: Pi_weaken_type)
+  apply (simp add: primunify_const_def infunify_const_def constraint_const_def constraint_typing_def)
+  apply (elim conjE)
+  apply (drule guniv_subD2, assumption+)+
+  apply (rule conjI)
+  by (rule weaken_produ, assumption+, simp)+
 
 (* NB: special treatment of the i <= j, j <= i cases is necessary to avoid infinite
    generation of guniv k constraints via typing constraint merge rule *)
@@ -722,6 +924,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univ_leq_def univlvl_def)
+  apply (elim conjE)
   apply (rule conjI)
   by (rule guniv_sub, assumption+)+
 
@@ -735,7 +938,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (erule conjE)
+  apply (elim conjE)
   apply (subgoal_tac "guniv i' <= guniv i")
   defer 1
   apply(rule guniv_sub, assumption+)
@@ -751,7 +954,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (erule conjE)
+  apply (elim conjE)
   apply (subgoal_tac "guniv j' <= guniv j")
   defer 1
   apply(rule guniv_sub, assumption+)
@@ -792,6 +995,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv i)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "[|
@@ -801,6 +1005,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv j)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "[|
@@ -817,6 +1022,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv i)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "[|
@@ -825,6 +1031,7 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv j)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
+  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "
@@ -880,15 +1087,19 @@ lemma [MR]: "[|
     constraint (i u<= j)  |]  ==>
   subunify (guniv i) (guniv j)"
   apply (simp add: subunify_const_def constraint_const_def constraint_typing_def univ_leq_def univlvl_def)
+  apply (elim conjE)
   by (rule guniv_sub)
 
 lemma [MR]: "[|
     primunify A1 A2  ;
     subunify (guniv k1) (guniv k2)  ;
+    constraint (k1 <: univlvl)  ;  constraint (k2 <: univlvl)  ;
     !! x. subunify B1(x) B2(x)  |] ==>
   subunify (PRODu k1 x:A1. B1(x)) (PRODu k2 x:A2. B2(x))"
-  apply (simp add: subunify_const_def primunify_const_def univannot_prod_def)
-  by (auto intro: Pi_weaken_type)
+  apply (simp add: subunify_const_def primunify_const_def constraint_const_def constraint_typing_def)
+  apply (drule guniv_subD2, assumption+)
+  by (rule weaken_produ, assumption+)
+
 
 lemma [MR]: "
   subunify A A"
@@ -1047,8 +1258,6 @@ lemma [MR_unchecked]: "
  unfolding elabjud_def constraint_typing_def unknown_typing_constraint_for_def .
 
 
-definition "app_elab_before == 0"
-definition "app_elab_after == 0"
 
 (* NB: subunify premises left as is in synthesis rule. (can lead to u<= constraint generation) *)
 (* NB: It is important to create same context for B(x) universe constraint generation as it
@@ -1060,9 +1269,7 @@ lemma [elabMR_unchecked]: "[|
     freshFOunifvar k  ;  freshunifvar A  ;  freshunifvar B  ;
     primunify T (PRODu k x:A. B(x))  ;
     unknown_univ_constraint_for (A, i)  ;
-    tracing (app_elab_before)  ;
     !! x. x elabto x : A  ==>  unknown_univ_constraint_for (B(x), j)  ;
-    tracing (app_elab_after)  ;
     constraint (k <: univlvl)  ;  constraint (i u<= k)  ;  constraint (j u<= k)  ;
     t2 elabto t2' : A2  ;
     subunify A2 A  |] ==>
@@ -1090,9 +1297,10 @@ lemma [elabMR_unchecked]: "[|
     A <: guniv i  ;  constraint (i <: univlvl)  ;
     !! x.  x elabto x : A  ==>  t(x) elabto t'(x) : B(x)  ;
     !! x.  x elabto x : A  ==>  B(x) synthty (guniv j)  ;
-    constraint (i u<= k)  ;  constraint (j u<= k)  |] ==>
+    constraint (j <: univlvl)  ;   constraint (i u< k)  ;  constraint (j u< k)  |] ==>
   (fun x. t(x)) elabto (lamu k x:A. t'(x)) : (PRODu k x:A. B(x))"
-  unfolding elabjud_def fresh_unifvar_const_def univannot_prod_def univannot_lam_def
+  unfolding elabjud_def univannot_lam_def constraint_const_def constraint_typing_def synthty_const_def
+  apply (subst produ_pi_simp[of i j k A B], assumption+)
   by (rule lam_type)
 
 
@@ -1106,9 +1314,11 @@ lemma [MR_unchecked]: "[|
     constraint (i <: univlvl)  ;  constraint (k <: univlvl)  ;
     !! x.  x elabto x : A'  ==>  t(x) elabto t'(x) : B(x)  ;
     !! x.  x elabto x : A'  ==>  B(x) synthty (guniv j)  ;
-    constraint (i u<= k)  ;  constraint (j u<= k)  |] ==>
+    constraint (j <: univlvl)  ;  constraint (i u< k)  ;  constraint (j u< k)  |] ==>
   (lam x:A. t(x)) elabto (lamu k x:A'. t'(x)) : (PRODu k x:A'. B(x))"
-  unfolding elabjud_def fresh_unifvar_const_def univannot_prod_def univannot_lam_def
+  apply (simp add: elabjud_def univannot_lam_def constraint_const_def constraint_typing_def
+    synthty_const_def primunify_const_def)
+  apply (subst produ_pi_simp[of i j k A' B], assumption+)
   by (rule lam_type) 
 
 
@@ -1124,13 +1334,15 @@ lemma PI_elab[MR_unchecked]: "[|
     freshFOunifvar k  ;  constraint (k <: univlvl)  ;
     constraint (i u<= k)  ;  constraint (j u<= k)  |] ==>
   (PI x:A. B(x)) elabto (PRODu k x:A'. B'(x)) : guniv k"
-  unfolding elabjud_def constraint_const_def constraint_typing_def
-    fresh_unifvar_const_def univ_leq_def univlvl_def univannot_prod_def
-  apply (simp add: primunify_const_def)
-  apply (rule prod_in_guniv)
-  apply assumption
+  apply (simp add: elabjud_def constraint_const_def constraint_typing_def
+    fresh_unifvar_const_def univ_leq_def univlvl_def univannot_prod_def primunify_const_def)
+  apply (elim conjE)
+  apply (rule int_in_guniv, assumption)
+  apply (rule prod_in_guniv, assumption)
   apply (rule guniv_cumul[of i k], assumption+)
-  by (rule guniv_cumul[of j k], assumption+)
+  apply (rule guniv_cumul[of j k], assumption+)
+  by (simp add: univpred_guniv_in_guniv univlvl_def)
+
 
 lemma [MR] : "[|
    A' printsas A  ;
@@ -1149,11 +1361,8 @@ lemma [MR]: "[|
     !! x.  x elabto x : A ==> B(x) synthty (guniv j)  ;
     j synthty univlvl  ;  constraint (i u<= k)  ;  constraint (j u<= k)  |] ==>
   (PRODu k x:A. B(x)) synthty (guniv k)"
-  apply (simp add: synthty_const_def univannot_prod_def univlvl_def constraint_const_def
-     univ_leq_def elabjud_def)
-  apply (rule prod_in_guniv, assumption+)
-  apply (rule guniv_cumul[of i k], assumption+)
-  by (rule guniv_cumul[of j k], assumption+)
+  unfolding synthty_const_def
+  by (rule produ_in_guniv)
 
 
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
@@ -1161,7 +1370,8 @@ lemma [elabMR_unchecked]: "[|
     freshFOunifvar i  ;  freshFOunifvar j  ;
     constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;   constraint (i u< j)  |] ==>
   univ elabto (guniv i) : (guniv j)"
-  unfolding elabjud_def constraint_const_def constraint_typing_def univ_less_def univlvl_def
+  apply (simp add: elabjud_def constraint_const_def constraint_typing_def univ_less_def univlvl_def)
+  apply (elim conjE)
   by (rule guniv_in_guniv)
 
 (* NB: avoid overlap with printsas rule with univ elaboration rule above *)
@@ -1171,20 +1381,23 @@ lemma [MR_unchecked]: "[|
     i elabto i' : A  ;  primunify A univlvl  ;
     constraint (i' <: univlvl)  ;  constraint (j <: univlvl)  ;   constraint (i' u< j)  |] ==>
   (guniv i) elabto (guniv i') : (guniv j)"
-  unfolding elabjud_def constraint_const_def constraint_typing_def primunify_const_def
-    univ_less_def univlvl_def
+  apply (simp add: elabjud_def constraint_const_def constraint_typing_def univ_less_def univlvl_def)
+  apply (elim conjE)
   by (rule guniv_in_guniv)
 
 lemma natelab[elabMR]: "[|
     freshFOunifvar i  ;  constraint (i <: univlvl)  |] ==>
   nat elabto nat : (guniv i)"
-  unfolding elabjud_def constraint_const_def constraint_typing_def univlvl_def
+  unfolding elabjud_def constraint_const_def constraint_typing_def
+  apply (erule univlvlE)
   by (rule nat_in_guniv)
 
 lemma [elabMR]: "[|
     freshFOunifvar i  ;  constraint (i <: univlvl)  |] ==>
   univlvl elabto univlvl : (guniv i)"
-  apply (subst univlvl_def, subst univlvl_def) by (rule natelab)
+  unfolding elabjud_def constraint_const_def constraint_typing_def
+  apply (erule univlvlE)
+  by (rule univlvl_in_guniv)
 
 
 lemma [elabMR]: "[|
@@ -1447,7 +1660,8 @@ lemma typ_constraint_pseudoctxt_zfdischarge[MR_unchecked]: "[|
      f <: PRODu k x:A. B(x) |] ==>
    f ` x <: B(x)"
   unfolding try_const_def elabjud_def unknown_typing_foconstraint_for_def constraint_const_def
-    constraint_typing_def syn_constraint_typing_def univannot_prod_def
+    constraint_typing_def syn_constraint_typing_def 
+  apply (erule produ_piE)
   by simp
 
 
@@ -1480,7 +1694,8 @@ lemma typ_constraint_ctxt_zfdischarge[MR_unchecked]: "[|
      f <: PRODu k x:A. B(x) |] ==>
    f ` x <: B(x)"
   unfolding try_const_def elabjud_def
-    constraint_typing_def syn_constraint_typing_def univannot_prod_def
+    constraint_typing_def syn_constraint_typing_def
+  apply (erule produ_piE)
   by simp
 
 
@@ -1509,11 +1724,16 @@ lemma [MR]: "
   unfolding mPi_def constraint_typing_def constraint_meta_typ_def syn_constraint_typing_def
   proof - assume H: "t : B" fix x assume "x : A" show "t : B" by (rule H) qed
 
-(* delayed unifications can introduce lamus into constraints *)
-lemma [MR]:"[|
+
+(* delayed unifications can introduce lamus into constraints, but should be rare *)
+lemma [MR]: "[|
+    A synthty (guniv i)  ;  !! x. x synthty A ==> B(x) synthty (guniv j)  ;
+    constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;  constraint (k <: univlvl)  ;
+    constraint (i u< k)  ;  constraint (j u< k)  ;
     !! x. x :> A ==> t(x) <: B(x)  |] ==>
   (lamu k x:A. t(x)) <: (PRODu k x:A. B(x))"
-  unfolding univannot_prod_def univannot_lam_def constraint_typing_def syn_constraint_typing_def
+  unfolding univannot_lam_def constraint_typing_def syn_constraint_typing_def constraint_const_def synthty_const_def
+  apply (subst produ_pi_simp[of i j k A B], assumption+)
   by (rule lam_type)
 
 
@@ -1532,32 +1752,35 @@ lemma [MR]:"[|
 lemma [MR]: "
     constraint (i <: univlvl) ==>
   nat <: guniv i"
-  unfolding constraint_const_def constraint_typing_def univlvl_def
+  unfolding constraint_const_def constraint_typing_def
+  apply (erule univlvlE)
   by (rule nat_in_guniv)
 lemma [MR]: "
     constraint (i <: univlvl) ==>
   univlvl <: guniv i"
-  unfolding constraint_const_def constraint_typing_def univlvl_def
-  by (rule nat_in_guniv)
+  unfolding constraint_const_def constraint_typing_def
+  apply (erule univlvlE)
+  by (rule univlvl_in_guniv)
+
 
 (* FIXME: why unknown_univ_constraint_for instead of synthesis of univ of A?! *)
 lemma [MR]: "[|
     constraint (i <: univlvl)  ;   constraint (k <: univlvl)  ;
-    constraint (k u<= i)  ;  unknown_univ_constraint_for(A, j)  ;
-    constraint (j u<= k)  ;
-    !! x. x :> A ==> B(x) <: guniv k  |] ==>
+    constraint (k u<= i)  |] ==>
   (PRODu k x:A. B(x)) <: guniv i"
-  unfolding constraint_const_def constraint_typing_def syn_constraint_typing_def univlvl_def
-     univannot_prod_def univ_leq_def unknown_univ_constraint_for_def
-  apply (rule prod_in_guniv, assumption)
-  by (auto intro: guniv_cumul)
+  unfolding constraint_const_def constraint_typing_def syn_constraint_typing_def
+     univ_leq_def unknown_univ_constraint_for_def
+  apply (rule guniv_cumul[of k i])
+  apply (blast dest: univlvlDnat)+
+  by (rule produ_in_guniv[of k A B])
 
 (* NB: i,j are always universe level variables, so the constraint (i u< j) cannot really
    be solved right now and can at best be refuted if i = j *)
 lemma [MR]: "[|
     constraint (i <: univlvl) ;  constraint (j <: univlvl)  ;  constraint (i u< j) |] ==>
   guniv i <: guniv j"
-  unfolding constraint_const_def constraint_typing_def univ_less_def univlvl_def
+  unfolding constraint_const_def constraint_typing_def univ_less_def
+  apply (elim univlvlE)
   by (rule guniv_in_guniv)
 
 
@@ -1573,7 +1796,8 @@ schematic_lemma "(PRODu k1 x:A. PRODu k2 y:B(x). C(x, y)) <: guniv i"
 
 lemma constraint_typ_apply: "
   [|  x elabto x' : A  ;  g <: (PRODu k x:A. B(x))  |] ==> g ` x' <: B(x')"
-  unfolding constraint_typing_def elabjud_def univannot_prod_def
+  unfolding constraint_typing_def elabjud_def
+  apply (erule produ_piE)
   by (rule apply_type)
 
 (* could be useful for more general type constraint context discharge *)
@@ -1828,8 +2052,7 @@ definition
 
 (* relevant for constraint subsumption of  i u<= j *)
 lemma [constraint_propag_rule]: "i u< j ==> i u<= j"
-  unfolding univ_less_def univ_leq_def
-  by (rule Ordinal.leI)
+  by (rule univ_leq_from_less)
   
 
 lemma [constraint_propag_rule]: "i u< j &&& j u< k ==> i u< k"
@@ -1901,8 +2124,8 @@ lemma [constraint_simp_rule all_matches no_re_eval_on_head_reconsideration symme
     by auto
 
 
-lemma uless_base: "i <: univlvl ==> i u< succ(i)"
-  by (simp add: univ_less_def univlvl_def constraint_typing_def)
+lemma uless_base: "i <: univlvl ==> i u< usucc(i)"
+  by (simp add: univ_less_def univlvl_def constraint_typing_def usucc_def)
   (* NB: univlvl typing premises only necessary for uniformity *)
 lemma uless_umax1: "i u< i' ==> i' <: univlvl ==> j <: univlvl ==> i u< i' umax j"
   apply (simp add: univ_max_def univ_less_def max_def)
@@ -1921,13 +2144,13 @@ lemma uleq_umax2: "j u<= j' ==> i <: univlvl ==> j' <: univlvl ==> j u<= i umax 
   apply (simp add: univ_max_def univ_leq_def max_def univlvl_def constraint_typing_def)
   apply (rule impI) apply (simp add: not_le_iff_lt) by (rule leI, rule Ordinal.lt_trans1)
 
-lemma umax_univlvl_ty: "i <: univlvl ==> j <: univlvl ==> (i umax j) <: univlvl"
-  by (simp add: univ_max_def max_def)
-lemma zero_univlvl_ty: "0 <: univlvl"
-  by (simp add: univlvl_def constraint_typing_def)
-lemma succ_univlvl_ty: "i <: univlvl ==> succ(i) <: univlvl"
-  by (simp add: univlvl_def constraint_typing_def)
 
+lemma umax_univlvl_Cty: "i <: univlvl ==> j <: univlvl ==> (i umax j) <: univlvl"
+  by (simp add: constraint_typing_def umax_univlvl_ty)
+lemma first_univlvl_Cty: "first_univlvl <: univlvl"
+  by (simp add: constraint_typing_def first_univlvl_ty)
+lemma usucc_univlvl_Cty: "i <: univlvl ==> usucc(i) <: univlvl"
+  by (simp add: constraint_typing_def usucc_univlvl_ty)
 
 
 ML_file "hidden_univlvl_discharge.ML"
@@ -2021,7 +2244,8 @@ definition
 lemma [MR]: "constraint (i <: univlvl) ==>
   witnessuniv (guniv i) 0"
   apply (simp add: witnessuniv_const_def constraint_const_def
-    constraint_typing_def univlvl_def)
+    constraint_typing_def)
+  apply (erule univlvlE)
   by (rule empty_in_guniv)
 
 (* NB: we are not using lamu because the synthesized term will only be used in the
@@ -2530,13 +2754,18 @@ definition
    (in analogy to contextual discharge of typing constraint constraints)
    (this would implement dictionaries that can make use of bound variables, cf. Agda, Scala). *)
 
+(* NB: we universe levels have to be increasing towards outside along nested PRODus *)
 lemma [elabMR_unchecked]: "[|
     freshFOunifvar i  ;  freshFOunifvar A  ;  freshFOunifvar d ; 
     constraint (i <: univlvl)  ;  A <: guniv i  ;
+    constraint (j <: univlvl)  ;  constraint (k <: univlvl)  ;
+    constraint (i u< j) ;  constraint (j u< k)  ;
     constraint (d dictof groups(A)) |] ==>
-  gmult elabto (group_mult(d)) : A ->[i] A ->[i] A"
-  apply (simp add: elabjud_def constraint_const_def univannot_prod_def)
-  by (rule groups_lawsD)
+  gmult elabto (group_mult(d)) : A ->[k] A ->[j] A"
+  sorry (* FIXME: prove this *)
+  (* apply (simp add: elabjud_def constraint_const_def)
+  thm groups_lawsD
+  by (rule groups_lawsD) *)
 
 lemma [elabMR_unchecked]: "[|
     freshFOunifvar i  ;  freshFOunifvar A  ;  freshFOunifvar d  ;
@@ -2549,9 +2778,11 @@ lemma [elabMR_unchecked]: "[|
 lemma [elabMR_unchecked]: "[|
     freshFOunifvar i  ;  freshFOunifvar A  ;  freshFOunifvar d  ;
     constraint (i <: univlvl)  ;  A <: guniv i  ;
+    constraint (j <: univlvl)  ;  constraint (i u< j)   ;
     constraint (d dictof groups(A)) |] ==>
-  ginv elabto (group_inv(d)) : A ->[i] A"
-  apply (simp add: elabjud_def constraint_const_def univannot_prod_def)
+  ginv elabto (group_inv(d)) : A ->[j] A"
+  apply (simp add: elabjud_def constraint_const_def constraint_typing_def)
+  apply (rule produI[of i i j A "(% _. A)"], assumption+)
   by (rule groups_lawsD)
 
 lemma [constraint_simp_rule no_re_eval_on_head_reconsideration]: "[|
@@ -2606,8 +2837,9 @@ definition
   "list' == (lam i:univlvl. lam A:guniv i. List_ZF.list(A))"
 
 lemma list'_ty: "list' : (PROD i:univlvl. guniv i -> guniv i)"
-  unfolding list'_def univlvl_def
+  unfolding list'_def
   apply typecheck
+  apply (erule univlvlE)
   by (rule list_in_guniv)
 
 lemma [MR]: "[|
@@ -2615,8 +2847,9 @@ lemma [MR]: "[|
     constraint (i u<= j)  ;
     A <: guniv i  |] ==>
   (list' ` i ` A) <: guniv j"
-  unfolding constraint_const_def constraint_typing_def  list'_def univlvl_def univ_leq_def
+  unfolding constraint_const_def constraint_typing_def  list'_def univ_leq_def
   apply simp
+  apply (elim univlvlE)
   apply (rule list_in_guniv, assumption)
   by (rule guniv_cumul)
 
@@ -2650,10 +2883,15 @@ definition
 
 
 lemma [elabMR_unchecked]: "[|
-    freshFOunifvar i  ;  constraint (i <: univlvl)  ;
-    freshFOunifvar j  ;  constraint (j <: univlvl)  ;  constraint (i u< j)  |] ==>
-  list elabto (list' ` i) : guniv i ->[j] guniv i"
-  unfolding elabjud_def constraint_const_def constraint_typing_def univannot_prod_def
+    freshFOunifvar i  ;   freshFOunifvar j  ;  freshFOunifvar k  ;  
+    constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;  constraint (k <: univlvl)  ;
+    constraint (i u< j)  ;  constraint (j u< k)  |] ==>
+  list elabto (list' ` i) : guniv i ->[k] guniv i"
+  unfolding elabjud_def constraint_const_def constraint_typing_def univ_less_def
+  apply (rule produI[of j j k "guniv i" "% _. guniv i"], assumption+)
+  apply (rule guniv_in_guniv) apply (blast dest: univlvlDnat)+
+  apply (rule guniv_in_guniv) apply (blast dest: univlvlDnat)+
+  apply (simp add: univ_less_def)+
   by (typecheck add: list'_ty)
 
 lemma [elabMR_unchecked]: "[|
@@ -2678,11 +2916,17 @@ lemma [elabMR_unchecked]: "[|
 
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
 lemma [elabMR_unchecked]: "[|
-    freshFOunifvar i  ;  freshunifvar A  ;  freshunifvar B  ;
-    constraint (i <: univlvl)  ;  A <: guniv i  ;  B <: guniv i  |] ==>
-  map elabto (map' ` i ` A ` B) : (A ->[i] B) ->[i] list' ` i ` A ->[i] list' ` i ` B"
+    freshFOunifvar i1  ;  freshFOunifvar i2  ;  freshFOunifvar i3  ;  freshFOunifvar i4  ;
+    constraint (i1 <: univlvl)  ;  constraint (i2 <: univlvl)  ;  constraint (i3 <: univlvl)  ;
+      constraint (i4 <: univlvl)  ;  
+    constraint (i1 u< i2)  ;    constraint (i2 u< i3)  ;    constraint (i3 u< i4)  ;
+    freshunifvar A  ;  freshunifvar B  ;
+    A <: guniv i1  ;  B <: guniv i1  |] ==>
+  map elabto (map' ` i ` A ` B) : (A ->[i2] B) ->[i3] list' ` i ` A ->[i2] list' ` i1 ` B"
   unfolding elabjud_def constraint_const_def constraint_typing_def univannot_prod_def
-  by (simp add: map'_def list'_def)
+  sorry (* FIXME: prove this *)
+  (* by (simp add: map'_def list'_def) *)
+
 
 
 
@@ -2857,6 +3101,8 @@ proof -
   thm this
 
 
+  (* FIXME: elaboration creates two non-terminal hidden universe level variables (with analogous
+     inequality constraints), so the qed fails *)
   show "f # x === f # y"
     ML_prf {*  Assumption.all_assms_of @{context} *}
     sorry
