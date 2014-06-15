@@ -305,7 +305,8 @@ struct
            | _ => ()
 
          val add_rule = if checked then MetaRec.add_rule else MetaRec.add_rule_unchecked
-         val gctxt2 = gctxt |> fold (add_rule prio) [elab_rl, printsas_rl, synth_rl]
+         val gctxt2 = gctxt |> fold (add_rule MetaRec.AllowRuleConstraintPropag prio)
+           [elab_rl, printsas_rl, synth_rl]
        in (SOME gctxt2, SOME elab_rl) end))
 
   fun moding_rewr_decl_attr x = x |> Scan.lift (Scan.succeed (fn (gctxt, th) =>

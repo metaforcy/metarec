@@ -599,7 +599,7 @@ fun exact_rule_lookup_idx jid pobj iobjs =
    instantiated later on, the rule matching will only be less precise.
    Local rules can get coinciding conclusions when unification variables in them are further
    instantiated. In that case they were always in the same Net-Leaf anyway and are always retrieved together *)
-fun rule_net_index (judgements : judgements_type) term_to_jud ((rule, matching_ty), _) =
+fun rule_net_index (judgements : judgements_type) term_to_jud ((rule, (matching_ty, _)), _) =
   (case rule of DirectRule th => prop_of th | LocalRule prf => prop_of_proofp prf)
   |> Logic.strip_imp_concl
   |> gen_decompose_judgement term_to_jud judgements (fn _ => "<term (no term printer)>")
@@ -692,6 +692,7 @@ datatype lin_ctxt_boundary = MetaRecCtxtDischargedBoundary of string list | Meta
   | MetaRecConstraintSimpBoundary of term | ChrConstraintSimpBoundary
   | DelayedUnificationsBoundary | SolvedChrPremisesBoundary | SolvedFrulePremisesBoundary
 datatype rule_matching_ty = NormalRuleMatching | ExactRuleMatching
+datatype rule_constraint_propag_ty = AllowRuleConstraintPropag | DisallowRuleConstraintPropag
 datatype trace_depth_ty = TraceDepth of { rule_trace_level_depth : int, rule_trace_max_levels : int,
   msg_trace_depth : int }
 
@@ -702,7 +703,7 @@ type ruledata_type = {
        then by reverse order of their addition (i.e. latest additions get priority).
        Exact-matching rules are also stored in this net, indexed by fixed inputs
        (without taking care about Var/Free-Name collisions, i.e. approximatively). *)
-    rules: ((rule_ty * rule_matching_ty) * int) Item_Net2.T,
+    rules: ((rule_ty * (rule_matching_ty * rule_constraint_propag_ty)) * int) Item_Net2.T,
     judgements: judgements_type,
     term_to_jud: string Net.net,
       
@@ -1800,7 +1801,7 @@ fun gen_msg_with_facts ctxt msg =
       ^"\n\n========================================================"
       ^"\ncurrent rules are:\n"
       ^cat_lines (Item_Net2.content rules
-         |> map (fn ((th, matching_ty), prior) =>
+         |> map (fn ((th, (matching_ty, _)), prior) =>
               Syntax.string_of_term ctxt (prop_of_rule ctxt th)
               ^(case matching_ty of
                  NormalRuleMatching => ""
@@ -2889,7 +2890,7 @@ and add_assm_terms_internal assms ctxt =
       (* NB: we rely on the fact that the item net content is managed like a stack *)
     val new_local_rules = Item_Net2.content rules2 
       |> take (Item_Net2.size rules2 - Item_Net2.size rules)
-      |> map (fn ((ruleref, matching_ty), prior) => case ruleref of
+      |> map (fn ((ruleref, (matching_ty, _)), prior) => case ruleref of
              DirectRule th => ((th, matching_ty), prior)
            | LocalRule prfp => err_with_trace ctxt6
               ("add_assm_terms_internal: internal error: locally generated rule is not direct: "
@@ -2902,10 +2903,10 @@ and add_assm_terms_internal assms ctxt =
     |> fold (fn ((new_local_rule, _), prior) => fn ctxt_ =>
         let
           val ((rule'_prf, matching_ty'), ctxt_2) = construct_local_rule new_local_rule ctxt_
-          val _  = case matching_ty' of
+          (* val _  = case matching_ty' of
               ExactRuleMatching => tracing ("add_assm_terms_internal: adding local exact rule "^
                 str_of_normed_term ctxt_2 (prop_of_proofp rule'_prf))
-            | _ => ()
+            | _ => () *)
         in
           (* minor FIXME: we don't update the depgraph. this is already in anticipation of removal of
                the automatic dependency tracking feature *)
@@ -2913,7 +2914,7 @@ and add_assm_terms_internal assms ctxt =
              this is ok because the net matching will then just be more approximative than necessary *)
           ctxt_2 |> Context.proof_map (map_rule_stuff
             (* NB: the local rule rule' is normed wrt current run state, since assms are normed *)
-            (Item_Net2.cons ((LocalRule rule'_prf, matching_ty'), prior)
+            (Item_Net2.cons ((LocalRule rule'_prf, (matching_ty', AllowRuleConstraintPropag)), prior)
                (rule_net_index judgements term_to_jud))
             I)
         end)
@@ -2960,7 +2961,7 @@ and add_assm checked th ctxt =
       |> (if is_fact then (* Fakten werden automatisch brules *)
             add_local_fact rule
           else if is_rule then
-            Context.proof_map (gen_add_rule true checked ctxt 0 rule)
+            Context.proof_map (gen_add_rule true checked ctxt AllowRuleConstraintPropag 0 rule)
           else case frule_opt of
             SOME frule => 
               Context.proof_map (gen_add_frule checked true false false frule)
@@ -3244,8 +3245,9 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
            ^"\nand further inputs\n"^cat_lines (map (Syntax.string_of_term ctxt) iobjs)
            ^(if null failed_rules then ""
              else
-               "\nfailed rules:\n"^cat_lines (map (apfst prop_of_proofp #> ruleprop_to_str) failed_rules))
-           ^"\npotential rules:\n"^cat_lines (map (apfst (prop_of_rule ctxt) #> ruleprop_to_str) pot_rules)
+               "\nfailed rules:\n"^cat_lines (failed_rules |> map (apfst prop_of_proofp #> ruleprop_to_str)))
+           ^"\npotential rules:\n"^cat_lines (pot_rules
+             |> map (fn (th, (matching_ty, _)) => ruleprop_to_str (prop_of_rule ctxt th, matching_ty)))
       in
         raise GlobalFail (ctxt, no_match_msg)
       end
@@ -3328,7 +3330,7 @@ and metarec_worker topcall ctxt global_fail_cont_opt jid (pobj, iobjs) =
                  Aktivieren ueber DECOMPOSE marker vor den Patterns gegen die man
                  nur decompose-matchen will *)
         fun first_succ [] failed_rules = no_match failed_rules
-          | first_succ ((rule, matching_ty) :: rem_rules) failed_rules = 
+          | first_succ ((rule, (matching_ty, _)) :: rem_rules) failed_rules = 
               let
                 (* beta normal wg add_rule *)
                 val (proofp, ctxt2) = case matching_ty of
@@ -3701,10 +3703,12 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         in
           Item_Net2.retrieve rules (pack_jid_pobj_iobjs jid dummy_var (replicate niobjs dummy_var))
         end)
-      |> map_filter (fn ((rl, matching_ty), _) =>
+      |> map_filter (fn ((rl, (matching_ty, allow_rule_constraint_propag)), _) =>
         let val prop = prop_of_rule ctxt00 rl
         in
-          if Logic.count_prems prop = 0 andalso null (Logic.strip_params prop) then
+          if allow_rule_constraint_propag = AllowRuleConstraintPropag
+            andalso Logic.count_prems prop = 0 andalso null (Logic.strip_params prop)
+          then
             (case rl of
               DirectRule th =>
                 (* NB: non-ground DirectRule facts stand for all facts derivable by instantiating their
@@ -3812,65 +3816,68 @@ and chr_constraint_simplification allow_propagation ctxt00 =
     *)
 
 
+    (* exception CyclicDependencies *)
 
     (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
        if a constraint is not simplified according to the constraint graph, it has a self-dependency;
        when discovering cycles we locally give up and share dependency results *)
-    fun calc_dependencies ctxt constraint_graph C0 (walked, calced) =
+    (* NB: since we only insert normed constraint entries into walked, calced, deps
+       and since there are no instantiations while calc_dependencies runs,
+       we can use aconv instead of aconv_norm for their comparison. *)
+    fun calc_dependencies_aux ctxt constraint_graph walked C0 calced =
       let
-        val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
-        val C = norm_with_env_in_run_state ctxt C0
+        val norm = norm_with_env_in_run_state ctxt 
+        val eq_C = aconv_norm norm
+        val C = norm C0
         val C_eta = C |> Envir.eta_contract
         fun triv_dep C2 = ([C2], assumption_prf C2)
       in
-        case 
-          Net.match_term walked C_eta
-          |> filter (fn C' => eq_C (C', C))
-        of
-          _ :: _ => (triv_dep C0, (walked, calced)) (* encountered cycle *)
-        | [] => 
-            case
-              Net.match_term calced C_eta
-              |> filter (fn (C', _) => eq_C (C', C))
-            of
-              (_, res) :: _ => (res, (walked, calced))
-            | [] =>
-                let
-                 (* TODO(correctness): Constraints koennen durch unification waehrend der Propagierung
-                      zusammenfallen.
-                        Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
-                      sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
-                      Eintrag mit Vereinfachungsbeweis zum Constraint finden.
-                      Durch forced_reconsideration Registrierung nach Instantiierung von Constraints 
-                      sollte das aber jetzt nicht mehr noetig sein, aber auch nicht schaden. *)
-                  val implied_by_opt =
-                    case Net.match_term constraint_graph C_eta
-                      |> filter (fn (C', _) => eq_C (C', C))
-                    of
-                      [] => err_with_trace ctxt ("internal error when calculating dependencies: constraint "
-                        ^str_of_normed_term ctxt C^" was not found in constraint graph")
-                    | C'_and_implied_by_opts => C'_and_implied_by_opts |> map_filter snd |> try hd
+        if exists (fn C' => aconv (C', C)) walked then
+          let val _ = tracing ("calc_dependencies: discovered cycle among constraints "
+            ^commas (cons C walked |> map (str_of_normed_term ctxt)))
+          in (*raise CyclicDependencies*) (triv_dep C, calced) end
+        else
+          case filter (fn (C', _) => aconv (C', C)) calced of
+            (_, res) :: _ => (res, calced)
+          | [] =>
+              let
+               (* TODO(correctness): Constraints koennen durch unification waehrend der Propagierung
+                    zusammenfallen.
+                      Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
+                    sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
+                    Eintrag mit Vereinfachungsbeweis zum Constraint finden.
+                    Durch forced_reconsideration Registrierung nach Instantiierung von Constraints 
+                    sollte das aber jetzt nicht mehr noetig sein, aber auch nicht schaden. *)
+                val implied_by_opt =
+                  case Net.match_term constraint_graph C_eta
+                    |> filter (fn (C', _) => eq_C (C', C))
+                  of
+                    [] => err_with_trace ctxt ("internal error when calculating dependencies: constraint "
+                      ^str_of_normed_term ctxt C^" was not found in constraint graph")
+                  | C'_and_implied_by_opts => C'_and_implied_by_opts |> map_filter snd |> try hd
 
-                  val (res, (walked3, calced2)) =
-                    case implied_by_opt of
-                      NONE => (triv_dep C0, (walked, calced))
-                    | SOME implied_by_prf =>
-                       let
-                         val walked2 = walked |> Net.insert_term eq_C (C_eta, C)
-                         val Cs = Logic.strip_imp_prems (prop_of_proofp implied_by_prf)
-                         val (Cs_ress, (walked3, calced2)) = (walked2, calced)
-                           |> fold_map (calc_dependencies ctxt constraint_graph) Cs
-                         val deps = [] |> fold (union eq_C) (map fst Cs_ress)
-                         val prf = implied_by_prf |> fold (mp_rev_prf ctxt o snd) Cs_ress
-                       in
-                         ((deps, prf), (walked3, calced2))
-                       end
+                val (res, calced2) =
+                  case implied_by_opt of
+                    NONE => (triv_dep C, calced)
+                  | SOME implied_by_prf =>
+                     let
+                       val walked2 = cons C walked
+                       val Cs = Logic.strip_imp_prems (prop_of_proofp implied_by_prf)
+                       val (Cs_ress, calced2) = calced
+                         |> fold_map (calc_dependencies_aux ctxt constraint_graph walked2) Cs
+                       val deps = [] |> fold (union (op aconv)) (map fst Cs_ress)
+                       val prf = implied_by_prf |> fold (mp_rev_prf ctxt o snd) Cs_ress
+                     in
+                       ((deps, prf), calced2)
+                     end
 
-                   val calced3 = calced2 |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, res))
-                in
-                  (res, (walked3, calced3))
-                end
+                 val calced3 = cons (C, res) calced2
+              in
+                (res, calced3)
+              end
       end
+    fun calc_dependencies ctxt constraint_graph C0 =
+      calc_dependencies_aux ctxt constraint_graph [] C0 []
 
 
     fun reconsider_instantiated_constraints reason_trace (constraint_graph, ctxt) =
@@ -3908,7 +3915,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
         (* val _ = if null inst_old_Cs then ()
           else
-            tracing ("the following existing constraints have been instantiated:\n"
+            tracing ("the following existing constraints have been instantiated and will be reconsidered:\n"
               ^commas (inst_old_Cs |> map (fst #> Syntax.string_of_term ctxt))) *)
       in
         (constraint_graph, ctxt2)
@@ -4011,7 +4018,9 @@ and chr_constraint_simplification allow_propagation ctxt00 =
             fun lookup head =
               let
                 (* NB: not Net.match_term, because the matching direction is reversed *)
-                (* TODO(opt): if exact_match_chr we could use Net.match_term *)
+                (* TODO(minor opt): if exact_match_chr we could use Net.match_term. But this alone
+                    does not help much in the case of univlvl constraint lookup since variables
+                    are also just wildcards in non-unifying net matching. *)
                 val res = 
                   Net.unify_term constraint_graph (Envir.eta_contract head)
                   |> filter (fn (C', _) => configurated_matches ctxt2 ([head], [C']) |> is_some)
@@ -4066,8 +4075,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                         val orig_term_pretty = norm_with_env_in_run_state ctxt00 #> Syntax.pretty_term ctxt00
                         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt_)
                         fun add_deps_for Cs deps0 = deps0 |> fold (fn C =>
-                            let val ((deps_, _), _) = calc_dependencies ctxt_ constraint_graph
-                               C (Net.empty, Net.empty)
+                            let val ((deps_, _), _) = calc_dependencies ctxt_ constraint_graph C
                             in union eq_C deps_ end)
                           Cs
                         val (deps, orig_deps, insts) = (add_deps_for cs_for_heads [], [], [])
@@ -4339,7 +4347,8 @@ and chr_constraint_simplification allow_propagation ctxt00 =
               SOME _ =>
                 (* FIXME: if implied_by_opt' = SOME, register it as an *alternative*
                    implied-by-proof, so that calc_dependencies has the choice of backtracking in
-                   case non-trivial cycles are encountered. This enables more constraint simplifications. *)
+                   case non-trivial cycles are encountered. This enables more constraint simplifications.
+                   Greedy pruning of choices if all current combinations lead to cycles seems like a bad idea? *)
                 constraint_graph
             | NONE => overwrite_C_entry_with implied_by_opt'
           else
@@ -4370,11 +4379,13 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         val pot_propag_rls = pot_propag_and_simp_rls |> filter is_propag_chr
         val pot_simp_rls = pot_propag_and_simp_rls |> filter_out is_propag_chr
 
-        (* val _ = tracing ("reg_constraint: considering \"new\" fact\n    "^Display.string_of_thm ctxt2 fact) *)
-
-        (* val _ = tracing ("pot_propag_rls for new constraint "
+        val _ = tracing ("pot_simp_rls for "
+          ^(if force_reconsideration then "reconsidered" else "new")^" constraint "
+          ^str_of_normed_term ctxt C0^" are (NoReEval ones filtered out)\n"
+          ^cat_lines (pot_simp_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt)))
+        (*val _ = tracing ("pot_propag_rls for new or reconsidered constraint "
           ^ Syntax.string_of_term ctxt C ^" are\n"
-          ^cat_lines (pot_propag_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt))) *)
+          ^cat_lines (pot_propag_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt)))*)
 
         val res1_opt = (constraint_graph, ctxt)
           |> gen_with_pot_rules SimpCHR pot_simp_rls
@@ -4451,18 +4462,24 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
     val constraints0_deps = constraints0_nodups |> map (fn C =>
       let
-        val ((deps, prf), (walked, calced)) = calc_dependencies ctxt' constraint_graph'
-          C (Net.empty, Net.empty)
+        val ((deps, prf), calced) = calc_dependencies ctxt' constraint_graph' C
         (* val _ = tracing ("constraint "^str_of_normed_term ctxt' C^" has dependencies "
           ^commas (deps |> map (str_of_normed_term ctxt'))) *)
-        (* TODO(refactor): used = Net.content calced |> map fst ? *)
-        val used = union eq_C deps (Net.content walked)
+        val used = calced |> map fst
       in (C, (deps, prf, used)) end)
 
     val implied_constraints = constraints0_deps |> map_filter (fn (C, (deps, prf, used)) =>
       if member eq_C deps C
       then (* C is not implied by other constraints *)
-        NONE
+        let
+          val _ =
+            if length used > 1 then
+              tracing ("constraint "^str_of_normed_term ctxt' C
+                ^" has self-cyclic dependencies: "
+                ^commas (used |> map (str_of_normed_term ctxt')))
+            else 
+              ()
+        in NONE end
       else if constraints0_deps |> exists (fn (C', (_, _, used')) =>
           not (eq_C (C, C')) andalso member eq_C used' C andalso member eq_C used C')
       then
@@ -5255,7 +5272,7 @@ and check_rule calc_juddeps check_groundness ctxt prop =
      an Prioritaetsgraph der dann fuer Performance in numerische
      Prioris kompiliert wird
 *)
-and gen_add_rule local_rule check_groundness ctxt0 prior rule00 gctxt =
+and gen_add_rule local_rule check_groundness ctxt0 allow_constraint_rule_propag prior rule00 gctxt =
   let
      val {rules, depgraph, judgements, term_to_jud, ...} = get_current_ruledata gctxt
 
@@ -5284,22 +5301,10 @@ and gen_add_rule local_rule check_groundness ctxt0 prior rule00 gctxt =
   in
     gctxt
     |> map_rule_stuff
-      (Item_Net2.cons ((DirectRule rule, matching_ty), prior) (rule_net_index judgements term_to_jud))
+      (Item_Net2.cons ((DirectRule rule, (matching_ty, allow_constraint_rule_propag)), prior)
+        (rule_net_index judgements term_to_jud))
       (K depgraph')
   end
-
-and add_rule prior rule gctxt =
-  gen_add_rule false true (Context.proof_of gctxt) prior rule gctxt
-
-and add_rule_unchecked_grnd prior rule gctxt =
-  gen_add_rule false false (Context.proof_of gctxt) prior rule gctxt
-
-and add_rule_unchecked prior rule gctxt =
-  let val ctxt = Context.proof_of gctxt
-  in
-    gen_add_rule true false ctxt prior (normalize_lesseta_withvars ctxt rule) gctxt
-  end
-
 
 
 
@@ -5490,7 +5495,8 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                                     which change the theory *)
                                (* TODO(opt!!): proof_of teuer *)
                                (* NB: we want generated brules to be available in subsequent metarec calls *)
-                             #> (fn gctxt => gctxt |> gen_add_rule true false (Context.proof_of gctxt) 0 brule')
+                             #> (fn gctxt => gctxt
+                               |> gen_add_rule true false (Context.proof_of gctxt) AllowRuleConstraintPropag 0 brule')
                            end
 
                        (* fun str_of_thm_with_constTs th =
@@ -5592,7 +5598,8 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
         #> map_gen_brule_concls (Net.insert_term Thm.eq_thm_prop (Thm.concl_of fact', fact_w_exactrule_marker'))
             (* nicht nochmal nen wf-Check machen *)
             (* TODO(opt!!): proof_of teuer auf Theorien *)
-        #> (fn gctxt => gctxt |> gen_add_rule true false (Context.proof_of gctxt) 0 fact_w_exactrule_marker')
+        #> (fn gctxt => gctxt
+          |> gen_add_rule true false (Context.proof_of gctxt) AllowRuleConstraintPropag 0 fact_w_exactrule_marker')
       end
   in
     ctxt
@@ -6362,24 +6369,48 @@ val _ = Outer_Syntax.local_theory "declare_frule" "declare forward rule" Keyword
 val _ = Outer_Syntax.local_theory "declare_ffact" "declare forward fact" Keyword.thy_decl ...
 *)
 
+fun add_rule allow_constraint_rule_propag prior rule gctxt =
+  gen_add_rule false true (Context.proof_of gctxt) allow_constraint_rule_propag prior rule gctxt
 
-(* TODO: should we give back a result with  snd res = NONE  instead of  SOME rule  ?? *)
-val MR_decl_attr = Scan.lift (Scan.option Parse.int
-  >> (fn prio_opt => fn (gctxt, rule) =>
-       let val prio = the_default 0 prio_opt
-       in (SOME (add_rule prio rule gctxt), SOME rule) end))
-val MR_unchecked_grnd_decl_attr = Scan.lift (Scan.option Parse.int
-  >> (fn prio_opt => fn (gctxt, rule) =>
-       let val prio = the_default 0 prio_opt
-       in (SOME (add_rule_unchecked_grnd prio rule gctxt), SOME rule) end))
-val MR_unchecked_decl_attr = Scan.lift (Scan.option Parse.int
-  >> (fn prio_opt => fn (gctxt, rule) =>
-       let val prio = the_default 0 prio_opt
-       in (SOME (add_rule_unchecked prio rule gctxt), SOME rule) end))
+fun add_rule_unchecked_grnd allow_constraint_rule_propag prior rule gctxt =
+  gen_add_rule false false (Context.proof_of gctxt) allow_constraint_rule_propag prior rule gctxt
+
+fun add_rule_unchecked allow_constraint_rule_propag prior rule gctxt =
+  let val ctxt = Context.proof_of gctxt
+  in
+    gen_add_rule true false ctxt allow_constraint_rule_propag prior (normalize_lesseta_withvars ctxt rule) gctxt
+  end
+
+
+
+
+local
+
+fun gen_MR_decl_attr add_rule = Scan.lift (Scan.option (Args.$$$ "no_rule_constraint_propag")
+    -- Scan.option Parse.int
+  >> (fn (no_rl_C_propag_opt, prio_opt) => fn (gctxt, rule) =>
+       let
+         val prio = the_default 0 prio_opt
+         val rl_C_propag = case no_rl_C_propag_opt of
+             SOME _ => DisallowRuleConstraintPropag
+           | NONE => AllowRuleConstraintPropag
+         val gctxt2 = gctxt |> add_rule rl_C_propag prio rule
+       in (SOME gctxt2, SOME rule) end))
+
+in
+
+val MR_decl_attr = gen_MR_decl_attr add_rule 
+val MR_unchecked_grnd_decl_attr = gen_MR_decl_attr add_rule_unchecked_grnd 
+val MR_unchecked_decl_attr = gen_MR_decl_attr add_rule_unchecked
+
+end
+
 val MRassm_decl_attr = Scan.lift (Scan.succeed (fn (gctxt, th) =>
   case gctxt of
     Context.Proof _ => (SOME (Context.map_proof (add_assm true th) gctxt), SOME th)
   | _ => error "MRassm attribute: not in a proof context"))
+
+
 
 (* TODO(correctness): actually implement deletion declarations or at least throw
     not-implemented-exception to avoid confusion *)

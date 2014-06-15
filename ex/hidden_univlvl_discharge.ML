@@ -42,22 +42,37 @@ struct
       uncritical because inflvl universe levels are always non-hidden *)
 
 
-  (* TODO(feature): more general discharge of nonterminal universe levels:
+  (* TODO(feature): more general discharge of all non-essential hidden universe levels:
        instantiation as for terminal ones, i.e.
            ?j := umax ({ ?i | exconstraint (?i u<= ?j) } Un { succ ?i | exconstaint (?i u< ?j)}),
        combined with short-cutting
        simplification of larger constraints:
-         i1 u<= j &&& i2 u<= j ==> i1 umax i2 u<= j
-         i1 u< j &&& i2 u< j ==> i1 umax i2 u< j
-         i u< j ==> succ i u<= j 
-         i u< j ==> succ i u< j     ???
+         constraints( i1 u<= j,  i2 u<= j ) ==> i1 umax i2 u<= j
+         constraints( i1 u< j,  i2 u< j ) ==> i1 umax i2 u< j
+         constraint( i u< j ) ==> succ i u<= j 
+         [| freshFOvar i'  ;  constraints( i u< i', i' u< j) |]  ==> succ i u< j 
+       Note that the last constraint simp rule reintroduce essential hidden universe levels
+       to avoid i+n algebraic universe level expressions.
        
-       And better include the following simplification rules as well, to
-       get rid of software complexity related to simpthm proof:
+       If we introduce an exconstraints primitive that searches for the set of
+       all matching constraints we might even state the instantiation process of
+       a hidden univlvl as a simp CHR:
+          [| hidden i  ;
+             exconstraints (?? j. i u<= j) (ALL j:J. i u<= j)  ;
+             exconstraints (?? j. i u< j) (ALL j:J'. i u< j)  ;
+             primunify i (constr_umax (J Un {succ j . j : J'}))  |] ==>
+          i <: univlvl 
+       But this is less efficient of course and what about u<=-SCCs?
+
+       We could include the following simplification rules as well, to
+       get rid of software complexity related to simpthm proof.
+       But such an implementation would be less efficient due to search for univlvl occurence
+       in umax term and metarec overhead:
 
          i <: univlvl  ==> succ i <: univlvl
          [|  i1 <: univlvl  ;  i2 <: univlvl  |] ==> umax i1 i2 <: univlvl
 
+         i u<= i  (useful due to instantiation of hiddens in non-trivial u<=-sccs)
          i u< succ i
          synleq i1 (umax j1 j2) ==> i u<= umax j1 j2
          synless i1 (umax j1 j2) ==> i u< umax j1 j2
@@ -72,15 +87,14 @@ struct
             synless j (umax i (succ j))
             synless i j2 ==> synless i (umax j1 j2)
             try (synless i j1) ==> synless i (umax j1 j2)  *)
-
   (* NB: assumes that all universe levels (used in u<, u<= inequations) have  i <: univlvl  constraints in Cs
     (which is the usual situation after standard elaboration) *)
-  fun calc_hidden_terminal_univlvl_discharge Cs ctxt =
+  fun calc_hidden_univlvl_discharge Cs ctxt =
     let
       val gctxt = Context.Proof ctxt
       val (concl, vars_in_concl) = case MetaRec.get_normed_concl_stats ctxt of
           SOME (MetaRec.ConclStats (concl, _, vars)) => (concl, vars)
-        | NONE => error ("calc_hidden_terminal_univlvl_discharge: no concl stats available "
+        | NONE => error ("calc_hidden_univlvl_discharge: no concl stats available "
             ^"in linear ctxt in runstate")
       val delayed_unifs = MetaRec.get_delayed_unifs_in_run_state ctxt
       val nonhidden_vars_outside_Cs = vars_in_concl
@@ -107,7 +121,7 @@ struct
         if can Term.dest_Var i orelse can Term.dest_Free i then
           ()
         else
-          error ("calc_hidden_terminal_univlvl_discharge: non-atomic universe level "
+          error ("calc_hidden_univlvl_discharge: non-atomic universe level "
             ^Syntax.string_of_term ctxt i))
       val _ = tracing ("univlvls are "^commas (uls |> map (Syntax.string_of_term ctxt)))
       val _ = tracing ("univlvl inequations are "^commas (ul_iqs
@@ -119,7 +133,7 @@ struct
                ul_graph |> Term_Graph.add_edge (i, j)
                |> Term_Graph.map_node j (cons ul_iq)
                handle Term_Graph.UNDEF k =>
-                 error ("calc_hidden_terminal_univlvl_discharge: missing universe level constraint for "
+                 error ("calc_hidden_univlvl_discharge: missing universe level constraint for "
                    ^Syntax.string_of_term ctxt k^" used in inequality "
                    ^Syntax.string_of_term ctxt (mk_univ_ieq ul_iq)))
              ul_iqs
@@ -138,88 +152,120 @@ struct
           not (is_some (dest_univlvl ctxt C)) andalso not (is_some (dest_univ_ieq C))
           andalso member (op =) (Term.add_vars C []) (Term.dest_Var i)))
 
-      val _ = tracing ("hidden univlvls are "^
-        commas (hidden_uls |> map (Syntax.string_of_term ctxt)))
 
-      (* NB: univlvls that are only smaller than hidden terminals are also
-          considered as terminals (which makes instantiation an iterative effort)
-          True terminals come last and terminals smaller than them come before. *) 
-      val hidden_terminals = Term_Graph.maximals ul_graph |> inter (op =) hidden_uls
-        |> MetaRec.list_fixpoint (fn hidden_terminals =>
-             hidden_terminals |> fold (fn i => 
-                 fold (fn j =>
-                     if Term_Graph.immediate_succs ul_graph j = [i]
-                       andalso member (op =) hidden_uls j 
-                     then insert (op =) j
-                     else I)
-                   (Term_Graph.immediate_preds ul_graph i))
-               hidden_terminals)
-
-      val _ = tracing ("hidden terminal univlvls are "^
-        commas (hidden_terminals |> map (Syntax.string_of_term ctxt))) 
-        
-      val cert = cterm_of (Proof_Context.theory_of ctxt)
-      val (ctxt2, iq_ths) = (ctxt, []) |> fold (fn i => fn (ctxt_, ths) =>
+      val ul_sccs_w_hidden = Term_Graph.strong_conn ul_graph |> map (fn ul_scc =>
           let
-            val iqs = Term_Graph.get_node ul_graph i
-            (* val _ = tracing ("iqs for "^Syntax.string_of_term ctxt_ i
-              ^" are "^commas (iqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt_))) *)
-            (* TODO(minor opt): avoid deepest (.. umax 0) subtree in i_inst, if  length iqs > 0 *)
-            val (i_inst, i_ths) = (@{term first_univlvl}, [])
-              |> fold_rev (fn (compty, (j, _)) => fn (inst_t0, ths0) =>
-                     let
-                       val j' = MetaRec.norm_with_env_in_run_state ctxt_ j
-
-                       val j''  = case compty of
-                           UnivLeq => j'
-                         | UnivLess => @{term "usucc"} $ j'
-                       val [j'_ct, j''_ct, inst_t0_ct] = map cert [j', j'', inst_t0]
-                       val th0_j = (case compty of
-                           UnivLeq => @{thm uleq_base}
-                         | UnivLess => @{thm uless_base})
-                         |> Drule.instantiate' [] [SOME j'_ct]
-                       val umax1_th = case compty of
-                           UnivLeq => @{thm uleq_umax1}
-                         | UnivLess => @{thm uless_umax1}
-
-                       (* TODO(refactor?): instead of manual instantiation, match
-                           conclusions of th_j, ths against inst_t? Easy with Thm.match? *)
-                       val th_j = (umax1_th |> Drule.instantiate' [] [SOME j'_ct, SOME j''_ct, SOME inst_t0_ct])
-                         OF [th0_j]
-                       (* val _ = tracing ("th_j for "^Syntax.string_of_term ctxt_ (@{term Pair} $ j $ i)
-                         ^": "^Display.string_of_thm ctxt_ th_j) *)
-                       val ths = ths0 |> map (fn th =>
-                         let
-                           val (umax2_th, (i0, j0)) = case dest_univ_ieq (Thm.concl_of th) of
-                               SOME (UnivLeq, (i0, j0)) => (@{thm uleq_umax2}, (i0, j0))
-                             | SOME (UnivLess, (i0, j0)) => (@{thm uless_umax2}, (i0, j0))
-                             | NONE => error ("calc_hidden_terminal_univlvl_discharge: "
-                                ^"expected univlvl inequality thm instead of "
-                                ^Display.string_of_thm ctxt_ th)
-                           val (i0_ct, j0_ct) = (i0, j0) |> pairself cert
-                           val th' = (umax2_th |> Drule.instantiate' [] [SOME i0_ct, SOME j0_ct, SOME j''_ct])
-                             OF [th]
-                           (* val _ = tracing ("lifting:\n  "^Display.string_of_thm ctxt_ th
-                            ^"\nto  "^Display.string_of_thm ctxt_ th') *)
-                         in th' end)
-                       val inst_t = @{term univ_max} $ j'' $ inst_t0
-                     in
-                       (inst_t, th_j :: ths)
-                     end)
-                   iqs
-            (* val _ = tracing ("i_ths for "^Syntax.string_of_term ctxt i^" are: "^
-              commas (i_ths |> map (Display.string_of_thm ctxt))) *)
-            val _ = tracing ("instantiated  "^Syntax.string_of_term ctxt i^" := "^
-              Syntax.string_of_term ctxt i_inst)
-            val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state
-              (curry Envir.update (Term.dest_Var i, i_inst)))
-            val env_2 = MetaRec.get_the_env_in_run_state ctxt_2
-            val ths' = map (MetaRec.instnorm_thm_with_env ctxt_2 env_2) ths 
-              |> fold (insert Thm.eq_thm_prop) i_ths
+            val in_scc = member (op =) ul_scc
+            val inbound_ieqs = ul_iqs |> filter (fn (_, (i', j')) => not (in_scc i') andalso in_scc j')
+            val inner_ieqs = ul_iqs |> filter (fn (_, (i', j')) => in_scc i' andalso in_scc j')
+            val _ = 
+              if ul_scc |> exists (fn i =>
+                   Term_Graph.get_node ul_graph i
+                   |> exists (fn (compty, (j, _)) => compty = UnivLess andalso in_scc j))
+              then
+                error ("calc_hidden_univlvl_discharge: universe inconsistency in universe level scc\n"
+                  ^cat_lines (inner_ieqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt)))
+              else ()
+            val hiddens = inter (op =) hidden_uls ul_scc
+            val non_hiddens = ul_scc |> filter_out (member (op =) hiddens) 
           in
-            (ctxt_2, ths')
+            ((non_hiddens, hiddens), (inbound_ieqs, inner_ieqs))
           end)
-        hidden_terminals
+        |> filter_out (fn ((_, hiddens), _) => null hiddens)
+
+      val _ = tracing ("univlvl sccs with hidden univlvls are\n"^
+        cat_lines (ul_sccs_w_hidden |> map (fn ((non_hiddens, hiddens), (inbound_ieqs, inner_ieqs)) =>
+            "  "
+            ^commas (non_hiddens @ hiddens |> map (Syntax.string_of_term ctxt))
+            ^"  with inner inequations  "
+            ^commas (inner_ieqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))
+            ^"  with inbound inequations  "
+            ^commas (inbound_ieqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))
+            (*^"  fst-distinctified to  "
+            ^commas (inbound_ieqs |> distinct (eq_snd (eq_fst (op aconv))) |> map (mk_univ_ieq #> Syntax.string_of_term ctxt))*))))
+
+      val cert = cterm_of (Proof_Context.theory_of ctxt)
+
+      val (ctxt2, iq_ths) = (ctxt, []) |> fold (fn ((non_hiddens, hiddens), (inbound_ieqs, _)) => fn (ctxt_, ths) =>
+          case non_hiddens of
+            non_hidden :: _ =>
+              let val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state (
+                 fold (fn hidden => curry Envir.update (Term.dest_Var hidden, non_hidden)) hiddens))
+              in (ctxt_2, ths) end
+          | [] =>
+              let
+                val norm = MetaRec.norm_with_env_in_run_state ctxt_
+                (* NB: normalization necessary due to instantiations that happened already *)
+                val inbound_ieqs' = inbound_ieqs |> map (fn (compty, (i, j)) => (compty, (norm i, norm j)))
+                  |> distinct (eq_snd (eq_fst (op aconv)))
+
+                (* val _ = tracing ("inbound_ieqs for "^Syntax.string_of_term ctxt_ i
+                  ^" are "^commas (inbound_ieqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt_))) *)
+                (* TODO(opt): keep track of uninstantiated univlvls that inst_t0 already bounds and if
+                     the uninstantiated univlvls occurring in j' are covered by that, there is no need to
+                     add j'' subterm to inst_t. *)
+                fun inst_step_for (compty, (j', _)) =
+                  let
+                    val j''  = case compty of
+                        UnivLeq => j'
+                      | UnivLess => @{term "usucc"} $ j'
+                    val th0_j = (case compty of
+                        UnivLeq => @{thm uleq_base}
+                      | UnivLess => @{thm uless_base})
+                      |> Drule.instantiate' [] [SOME (cert j')]
+                  in (j'', th0_j) end
+
+                val (hidden_inst, iq_ths) =
+                  case inbound_ieqs' of
+                    [] => (@{term first_univlvl}, [])
+                  | hd_inbound_ieq' :: tl_inbound_ieqs' => inst_step_for hd_inbound_ieq' ||> single
+                      |> fold_rev (fn ieq as (compty, (j', _)) => fn (inst_t0, ths0) =>
+                             let
+                               val (j'', th0_j) = inst_step_for ieq
+                               val [j'_ct, j''_ct, inst_t0_ct] = map cert [j', j'', inst_t0]
+                               val umax1_th = case compty of
+                                   UnivLeq => @{thm uleq_umax1}
+                                 | UnivLess => @{thm uless_umax1}
+
+                               (* TODO(refactor?): instead of manual instantiation, match
+                                   conclusions of th_j, ths against inst_t? Easy with Thm.match? *)
+                               val th_j = (umax1_th |> Drule.instantiate' [] [SOME j'_ct, SOME j''_ct, SOME inst_t0_ct])
+                                 OF [th0_j]
+                               (* val _ = tracing ("th_j for "^Syntax.string_of_term ctxt_ (@{term Pair} $ j $ i)
+                                 ^": "^Display.string_of_thm ctxt_ th_j) *)
+                               val ths = ths0 |> map (fn th =>
+                                 let
+                                   val (umax2_th, (i0, j0)) = case dest_univ_ieq (Thm.concl_of th) of
+                                       SOME (UnivLeq, (i0, j0)) => (@{thm uleq_umax2}, (i0, j0))
+                                     | SOME (UnivLess, (i0, j0)) => (@{thm uless_umax2}, (i0, j0))
+                                     | NONE => error ("calc_hidden_univlvl_discharge: "
+                                         ^"expected univlvl inequality thm instead of "
+                                         ^Display.string_of_thm ctxt_ th)
+                                   val (i0_ct, j0_ct) = (i0, j0) |> pairself cert
+                                   val th' = (umax2_th |> Drule.instantiate' [] [SOME i0_ct, SOME j0_ct, SOME j''_ct])
+                                     OF [th]
+                                   (* val _ = tracing ("lifting:\n  "^Display.string_of_thm ctxt_ th
+                                    ^"\nto  "^Display.string_of_thm ctxt_ th') *)
+                                 in th' end)
+                               val inst_t = @{term univ_max} $ j'' $ inst_t0
+                             in
+                               (inst_t, th_j :: ths)
+                             end)
+                           tl_inbound_ieqs'
+
+                (* val _ = tracing ("iq_ths for "^Syntax.string_of_term ctxt_ i^" are: "^
+                  commas (iq_ths |> map (Display.string_of_thm ctxt_))) *)
+                val _ = tracing ("instantiating hidden universe levels "^commas (hiddens |> map (Syntax.string_of_term ctxt_))^" := "^
+                  Syntax.string_of_term ctxt_ hidden_inst)
+                val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state (
+                  fold (fn hidden => curry Envir.update (Term.dest_Var hidden, hidden_inst)) hiddens))
+                val env_2 = MetaRec.get_the_env_in_run_state ctxt_2
+                val ths' = map (MetaRec.instnorm_thm_with_env ctxt_2 env_2) ths 
+                  |> fold (insert Thm.eq_thm_prop) iq_ths 
+              in
+                (ctxt_2, ths')
+              end)
+        ul_sccs_w_hidden
 
       (* val _ = tracing ("inequality thms: "^cat_lines (iq_ths |> map (Display.string_of_thm ctxt2))) *)
    
@@ -229,22 +275,26 @@ struct
       val ul_instantiation = uls |> filter_out uninst_ul_check |> map (fn i =>
         (i, MetaRec.norm_with_env_in_run_state ctxt2 i))
       val inst_uls = map snd ul_instantiation |> distinct (op aconv)
-      val inst_ul_iqs = ul_iqs |> filter_out (fn (_, (i, j)) =>
-          uninst_ul_check i andalso uninst_ul_check j) 
+      (* NB: only the inequations inbound to a scc with a hidden univlvl, which are of the form
+           i  {u<, u<=}  umax (.. i ..),
+         will be proven here. Absorption of instantiated ul_iqs inside a scc whose hidden univlvls
+         became instantiated to a non-hidden univlvl in the scc require transitivity reasoning
+         in general, so are left to CHRs. *)
+      val inbnd_inst_ul_iqs = ul_sccs_w_hidden |> maps (fn (_, (inbound_ieqs, _)) => inbound_ieqs)
         |> map (mk_univ_ieq #> MetaRec.norm_with_env_in_run_state ctxt2)
-        |> distinct (op aconv) (* NB: hidden univlvls can get instantiated to same term *)
+        |> distinct (op aconv) (* NB: different hidden univlvls can get instantiated to same term *)
           (* NB: we don't use Variable.import/export because they are not exact inverses:
                export changes maxidx of unification vars, which makes exact matching
                of generated SimpCHR impossible *)
-      val ([uninst_uls_fxd, inst_ul_iqs_fxd, inst_uls_fxd, _], (((_, freeze_th), (_, thaw_th)), ctxt3)) = ctxt2
+      val ([uninst_uls_fxd, inbnd_inst_ul_iqs_fxd, inst_uls_fxd, _], (((_, freeze_th), (_, thaw_th)), ctxt3)) = ctxt2
         |> fold_burrow
              (fn ts => MetaRec.exact_freeze_thaw ts #-> (fn (ts', fs) => fn ctxt_ => (ts', (fs, ctxt_))))
-             ([uninst_uls, inst_ul_iqs, inst_uls] @ [map Thm.prop_of iq_ths])
+             ([uninst_uls, inbnd_inst_ul_iqs, inst_uls] @ [map Thm.prop_of iq_ths])
       val iq_ths_fxd = iq_ths |> map freeze_th
 
       (* val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
         |> map (Syntax.string_of_term ctxt2)))
-      val _ = tracing ("instantiated univlvls ineqs: "^commas (inst_ul_iqs
+      val _ = tracing ("right-instantiated univlvls ineqs: "^commas (inbnd_inst_ul_iqs
         |> map (Syntax.string_of_term ctxt2)))
       val _ = tracing ("uninstantiated univlvls fixed: "^commas (uninst_uls_fxd
         |> map (Syntax.string_of_term ctxt2)))
@@ -256,11 +306,11 @@ struct
       val univlvl_ty_rls = [@{thm umax_univlvl_Cty}, @{thm first_univlvl_Cty}, @{thm usucc_univlvl_Cty}]
 
       val constr_univlvl_ty_assms = uninst_uls_fxd
-        |> filter (fn i => inst_ul_iqs_fxd |> exists (fn iq =>
+        |> filter (fn i => inbnd_inst_ul_iqs_fxd |> exists (fn iq =>
              member (op =) (Term.add_frees iq []) (Term.dest_Free i)))
         |> map (fn i => @{term constraint_const} $ mk_univlvl i)
       val goal = 
-        inst_ul_iqs_fxd @ map mk_univlvl inst_uls_fxd
+        inbnd_inst_ul_iqs_fxd @ map mk_univlvl inst_uls_fxd
         |> Logic.mk_conjunction_balanced
       val simpth_opt =
         if null inst_uls then NONE
@@ -277,17 +327,17 @@ struct
           |> thaw_th |> SOME
       val _ = case simpth_opt of
           SOME simpth =>
-            tracing ("calc_hidden_terminal_univlvl: simpth is "^
+            tracing ("calc_hidden_univlvl: simpth is "^
               Display.string_of_thm ctxt2 simpth)
         | NONE => ()
     in
       ((simpth_opt, uninst_uls, ul_instantiation), ctxt2)
     end
 
-  fun hidden_terminal_univlvl_discharge_simproc Cs = MetaRec.cumul_timing "hidden_univlvl_discharge_proc"
-    (fn ctxt => calc_hidden_terminal_univlvl_discharge Cs ctxt |> apfst #1)
+  fun hidden_univlvl_discharge_simproc Cs = MetaRec.cumul_timing "hidden_univlvl_discharge_proc"
+    (fn ctxt => calc_hidden_univlvl_discharge Cs ctxt |> apfst #1)
 
   val setup = Context.theory_map (MetaRec.add_constraint_simproc true
-    hidden_terminal_univlvl_discharge_simproc)
+    hidden_univlvl_discharge_simproc)
 
 end

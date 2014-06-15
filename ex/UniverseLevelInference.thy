@@ -221,6 +221,16 @@ definition
   ptmquant :: "(i => prop) => prop" (binder "!!st " 1) where
   "ptmquant(P) == Trueprop(True)"
 
+(* TODO: is it possible to engineer the coexistence of normal and old-style application syntax ?
+   using a transformation function with priority over the normal application syntax transformation function?
+   Why does parsing not terminate with both application syntaxes active? *)
+(*
+abbreviation
+  ptapp2 :: "i => i => i" ("_/ _" [1000, 1000] 1000) where
+  "ptapp2 == ptapp"
+
+term "f  (x  y)"
+*)
 
 
 syntax
@@ -261,17 +271,17 @@ definition
 (* TODO(refactor): use univlvlE in proofs instead of 
      apply (simp add: univlvl_def, elim conjE).
    And avoid reintroduction of univlvls from its definition. *)
+(* TODO(refactor!): univlvls can start from 0 again, now that univpred is not needed anymore *)
 definition
-  univlvl where "univlvl == { i : nat . 0 < i }"
+  univlvl where "univlvl == nat"
 
-lemma univlvlE: "i : univlvl ==> (i : nat ==> 0 < i ==> P) ==> P"
+lemma univlvlE: "i : univlvl ==> (i : nat ==> P) ==> P"
   by (simp add: univlvl_def)
 lemma univlvlDnat: "i : univlvl ==> i : nat"
   by (simp add: univlvl_def)
 
 lemma univlvl_in_guniv: "i : nat ==> univlvl : guniv i"
   apply (subst univlvl_def)
-  apply (rule collect_in_guniv, assumption)
   by (rule nat_in_guniv)
   
 
@@ -301,6 +311,16 @@ lemma uleq_refl: "i : nat ==> i u<= i"
   by (simp add: univ_leq_def)
 lemma univ_leq_is_less_usucc: "(i u<= j) == (i u< usucc(j))"
   by (simp add: univ_leq_def univ_less_def usucc_def)
+lemma univ_less_is_usucc_leq: "(i u< j) ==> usucc(i) u<= j"
+  by (simp add: univ_leq_def univ_less_def usucc_def)
+lemma usucc_less_from_interm: "i u< j ==> j u< k ==> usucc(i) u< k"
+  apply (simp add: univ_less_def usucc_def succ_lt_iff)
+  apply (auto intro: Ordinal.lt_trans)
+  apply (subgoal_tac "i < i")
+    prefer 2 apply (blast intro: Ordinal.lt_trans2)
+  by (rule lt_irrefl)
+  
+
 
 lemma umax_nat_ty: "i : nat ==> j : nat ==> (i umax j) : nat"
   by (simp add: univ_max_def max_def)
@@ -328,7 +348,6 @@ lemma univ_leq_from_less: "i u< j ==> i u<= j"
 
 lemma guniv_subD2: "[|  guniv i <= guniv j  ;  i : univlvl  ;  j : univlvl  |] ==> i u<= j"
   apply (simp add: univlvl_def univ_leq_def)
-  apply (elim conjE)
   by (rule guniv_subD)
 
 
@@ -668,7 +687,7 @@ lemma [moding_rewrite]: "Trueprop(t <: A) == Trueprop(t synthty A)"
 
 
 
-
+(* TODO(opt!): check with ML if there is no ZF-beta redex, then abort early without change *)
 lemma [MR]: "
   zfnorm t t"
   by (simp add: zfnorm_const_def)
@@ -697,6 +716,7 @@ lemma [MR]: "[|
  by (simp add: zfnorm_const_def)
 
 (* Pure's beta-reduction happens implicitly *)
+(* FIXME?: subunify synthesized type of a into A or join them with zfnorm? *)
 lemma [MR]: "[|
     a synthty A  ;
     zfnorm a a'  ;
@@ -836,7 +856,8 @@ lemma [MR]: "
 
 
 
-
+(* FIXME?: actually use unification modulo beta,ZF-beta instead of primunify, only use primunify
+   for performance if no ZF-applications occur in terms *)
 
 
 lemma [MR]: "
@@ -887,7 +908,6 @@ lemma [MR]: "[|
   supunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: supunify_const_def constraint_const_def constraint_typing_def
     univ_leq_def univlvl_def)
-  apply (elim conjE)
   apply (rule conjI)
   by (rule guniv_sub, assumption+)+
 
@@ -961,7 +981,6 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv k)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univ_leq_def univlvl_def)
-  apply (elim conjE)
   apply (rule conjI)
   by (rule guniv_sub, assumption+)+
 
@@ -1032,7 +1051,6 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv i)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "[|
@@ -1042,7 +1060,6 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv j)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "[|
@@ -1059,7 +1076,6 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv i)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "[|
@@ -1068,7 +1084,6 @@ lemma [MR]: "[|
   infunify (guniv i) (guniv j) (guniv j)"
   apply (simp add: infunify_const_def constraint_const_def constraint_typing_def
     univlvl_def univ_leq_def ex_constraint_const_def try_const_def)
-  apply (elim conjE)
   by (rule guniv_sub, assumption+)
 
 lemma [MR]: "
@@ -1124,7 +1139,6 @@ lemma [MR]: "[|
     constraint (i u<= j)  |]  ==>
   subunify (guniv i) (guniv j)"
   apply (simp add: subunify_const_def constraint_const_def constraint_typing_def univ_leq_def univlvl_def)
-  apply (elim conjE)
   by (rule guniv_sub)
 
 lemma [MR]: "[|
@@ -1405,7 +1419,6 @@ lemma [elabMR_unchecked]: "[|
     constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;   constraint (i u< j)  |] ==>
   univ elabto (guniv i) : (guniv j)"
   apply (simp add: elabjud_def constraint_const_def constraint_typing_def univ_less_def univlvl_def)
-  apply (elim conjE)
   by (rule guniv_in_guniv)
 
 (* NB: avoid overlap with printsas rule with univ elaboration rule above *)
@@ -1416,7 +1429,6 @@ lemma [MR_unchecked]: "[|
     constraint (i' <: univlvl)  ;  constraint (j <: univlvl)  ;   constraint (i' u< j)  |] ==>
   (guniv i) elabto (guniv i') : (guniv j)"
   apply (simp add: elabjud_def constraint_const_def constraint_typing_def univ_less_def univlvl_def)
-  apply (elim conjE)
   by (rule guniv_in_guniv)
 
 lemma natelab[elabMR]: "[|
@@ -2014,6 +2026,7 @@ ML {*  elab @{context} @{term "(fun f. fun g. fun x. f # (g # x))"}  *}
 
 (* minor FIXME: "non-trivial" composite unification variable dependencies don't seem useful.
   Prune in unification right away? *)
+(* FIXME: pseudo-contextual discharge does not handle application to abstraction *)
 ML {*  elab @{context} @{term "f # (fun g. g # x) # y"}  *}
 
 ML {*  elab @{context} @{term "(fun f. f # (fun y. (fun x. (fun g. g # x)) # y))"}  *}
@@ -2179,16 +2192,74 @@ lemma uleq_umax2: "j u<= j' ==> i <: univlvl ==> j' <: univlvl ==> j u<= i umax 
   apply (simp add: univ_max_def univ_leq_def max_def univlvl_def constraint_typing_def)
   apply (rule impI) apply (simp add: not_le_iff_lt) by (rule leI, rule Ordinal.lt_trans1)
 
-
-lemma umax_univlvl_Cty: "i <: univlvl ==> j <: univlvl ==> (i umax j) <: univlvl"
+(* NB: CHRs reduce problem to MR clauses for judgement <: which emits constraints for base cases *)
+lemma umax_univlvl_Cty[MR no_rule_constraint_propag, constraint_simp_rule]:
+    "i <: univlvl ==> j <: univlvl ==>
+  (i umax j) <: univlvl"
   by (simp add: constraint_typing_def umax_univlvl_ty)
-lemma first_univlvl_Cty: "first_univlvl <: univlvl"
+lemma first_univlvl_Cty[MR no_rule_constraint_propag, constraint_simp_rule]:
+  "first_univlvl <: univlvl"
   by (simp add: constraint_typing_def first_univlvl_ty)
-lemma usucc_univlvl_Cty: "i <: univlvl ==> usucc(i) <: univlvl"
+lemma usucc_univlvl_Cty[MR no_rule_constraint_propag, constraint_simp_rule]:
+    "i <: univlvl ==>
+  usucc(i) <: univlvl"
   by (simp add: constraint_typing_def usucc_univlvl_ty)
 
 
 ML_file "hidden_univlvl_discharge.ML"
+
+
+
+definition
+  findinterm where
+  [MRjud 2 1]: "findinterm(i,j,i') == (i u< i' & i' u< j)"
+
+lemma [MR]: "[|
+    freshFOunifvar i'  ;  constraint (i u< i')  ;  constraint (i' u< j)  |] ==>
+  findinterm(i, j, i')"
+  by (simp add: constraint_const_def findinterm_def)
+
+(* NB: we rely here on the transitivy propagation of constraints that happened before this findinterm
+   call from hidden universe level discharge *)
+lemma [MR]: "
+    try (exconstraint (?? i'. i u< i' &&& i' u< j) (i u< i' &&& i' u< j)) ==>
+  findinterm(i, j, i')"
+  apply (simp add: try_const_def ex_constraint_const_def findinterm_def)
+  apply (erule conjunctionE)
+  by (rule conjI)
+
+definition
+  "trace_outbound_univlvl_simp == 0"
+
+lemma [constraint_simp_rule]: "
+    [|  tracing (trace_outbound_univlvl_simp)  ;
+        constraint (i1 u<= j)  ;  constraint (i2 u<= j)  |] ==>
+  i1 umax i2 u<= j"
+  unfolding constraint_const_def
+  by (rule umax_sup)
+  
+lemma [constraint_simp_rule]: "
+    [|  tracing (trace_outbound_univlvl_simp)  ;
+        constraint(i1 u< j)  ;  constraint (i2 u< j)  |] ==>
+  i1 umax i2 u< j"
+  unfolding constraint_const_def
+  by (rule umax_less_sup)
+
+lemma [constraint_simp_rule]: "
+    [| tracing (trace_outbound_univlvl_simp)  ;
+       constraint (i u< j) |] ==>
+  usucc(i) u<= j"
+  unfolding constraint_const_def
+  by (rule univ_less_is_usucc_leq)
+
+(* NB: reintroduces essential hidden universe level to avoid i+n algebraic universe level expressions *)
+lemma [constraint_simp_rule]: "
+    findinterm(i, j, i') ==>
+  usucc(i) u< j"
+  unfolding constraint_const_def findinterm_def
+  apply (erule conjE)
+  by (rule usucc_less_from_interm)
+
 
 
 ML {*
@@ -2216,7 +2287,7 @@ ML {*
              (Cs |> map (fn C => (C, MetaRec.ConstraintTrace [], MetaRec.ActiveConstraint)))))
         |> MetaRec.put_concl_in_lin_ctxt @{prop "True"}
       val ((simpth, uninst_uls, inst_uls), _) =
-        HiddenUnivlvlDischarge.calc_hidden_terminal_univlvl_discharge Cs ctxt
+        HiddenUnivlvlDischarge.calc_hidden_univlvl_discharge Cs ctxt
 
       val _ =
         if eq_set (op aconv) (uninst_uls, expected_uninst_uls) then ()
@@ -2237,6 +2308,30 @@ ML {*
     @{cpat "?i u< ?j"}, @{cpat "?i u< ?k"},
     @{cpat "?A <: guniv ?i"}]
    [@{cpat "?i <: univlvl"}]
+*}
+
+ML {*
+  test_univlvl_discharge @{context}
+   [@{cpat "?i <: univlvl"}, @{cpat "?j <: univlvl"}, @{cpat "?k <: univlvl"},
+    @{cpat "?i u<= ?j"}, @{cpat "?i u<= ?k"},
+    @{cpat "?A <: guniv ?i"}]
+   [@{cpat "?i <: univlvl"}]
+*}
+
+ML {*
+  test_univlvl_discharge @{context}
+   [@{cpat "?i1 <: univlvl"}, @{cpat "?i2 <: univlvl"}, @{cpat "?j <: univlvl"}, @{cpat "?k <: univlvl"},
+    @{cpat "?i1 u<= ?j"}, @{cpat "?i2 u<= ?j"}, @{cpat "?j u<= ?k"},
+    @{cpat "?A <: guniv ?i1"}, @{cpat "?B <: guniv ?i2"}, @{cpat "?C <: guniv ?k"}]
+   [@{cpat "?i1 <: univlvl"}, @{cpat "?i2 <: univlvl"}, @{cpat "?k <: univlvl"}]
+*}
+
+ML {*
+  test_univlvl_discharge @{context}
+   [@{cpat "?i <: univlvl"}, @{cpat "?j1 <: univlvl"}, @{cpat "?j2 <: univlvl"}, @{cpat "?k <: univlvl"},
+    @{cpat "?i u<= ?j1"}, @{cpat "?i u<= ?j2"}, @{cpat "?j1 u<= ?j2"}, @{cpat "?j2 u<= ?j1"}, @{cpat "?j2 u<= ?k"},
+    @{cpat "?A <: guniv ?i"}, @{cpat "?C <: guniv ?k"}]
+   [@{cpat "?i <: univlvl"}, @{cpat "?k <: univlvl"}]
 *}
 
 ML {*
@@ -2369,7 +2464,6 @@ ML {* elab @{context} @{term "f # x === g # y"} *}
 
 (* tests of dependency restriction solution of flexflex unifications *)
 ML {* elab @{context} @{term "f # x === g # x"} *}
-(* FIXME: one constraint not fully simpd, probably after last delayed unif solving phase *)
 ML {* elab @{context} @{term "f # x === g # x # x"} *}
 ML {* elab @{context} @{term "f # x === g # x # y"} *}
 ML {* elab @{context} @{term "f # x === g # y # x"} *}

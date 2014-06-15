@@ -62,6 +62,7 @@ lemma ex_constraintI: "PROP Q ==> exconstraint (PROP P) (PROP Q)"
   by (simp add: ex_constraint_const_def)
 
 
+(* NB: if we use this shorthand-form, meta-existentials before P make no sense *)
 abbreviation
   ex_constraint_abbrev ("exconstraint _") where
   "ex_constraint_abbrev(P) == ex_constraint_const(P, P)"
@@ -106,6 +107,28 @@ ML {*
           metaexs_to_freshvars lift_fixes body' ctxt2
         end
     | _ => (t, ctxt)
+
+
+  fun dest_conj_list_with_recomb P =
+    case try Logic.dest_conjunction P of
+      SOME (P1, P2) =>
+        let
+          val (Ps1, recomb1) = dest_conj_list_with_recomb P1
+          val (Ps2, recomb2) = dest_conj_list_with_recomb P2
+          val Ps1_len = length Ps1
+          fun recomb f xs st =
+            let 
+              val (y, st2) = recomb1 f (take Ps1_len xs) st
+              val (y2, st3) = recomb2 f (drop Ps1_len xs) st2
+            in f (y, y2) st3 end
+        in
+          (Ps1 @ Ps2, recomb)
+        end
+    | NONE =>
+        let
+          fun recomb f [x] st = (x, st)
+            | recomb _ _ _ = error ("dest_conj_list_with_recomb: recomb called on list with different length")
+        in ([P], recomb) end
 *}
 
 ML {*
@@ -121,7 +144,7 @@ ML {*
          constraint_to_pats maps an active constraint to the patterns that have
            been matched against it (as (C, pat) entries in net that differ in pat).
          fix_necessary_tab says which memoized pattern results depend on a metarec fix. *)
-      type T = { memo_net: (term * (term * term)) Net.net,
+      type T = { memo_net: (term * term) Net.net,
         constraint_to_pats: (term * term) Net.net,
         fix_necessary_tab: term list Symtab.table }
       fun init _ = { memo_net = Net.empty, constraint_to_pats = Net.empty,
@@ -157,7 +180,7 @@ ML {*
               val stale_pats = disch_params |> maps (Symtab.lookup fix_necessary_tab #> these)
               val stale_Cs = stale_pats |> maps (fn stale_pat =>
                 Net.lookup memo_net (Net.key_of_term (calc_pat_indexing stale_pat))
-                |> filter (fn (pat, _) => stale_pat aconv pat) |> map (snd #> snd))
+                |> filter (fn (pat, _) => stale_pat aconv pat) |> map snd)
             in
               { memo_net = memo_net |> fold (fn stale_pat => fn net =>
                     del_pat stale_pat net
@@ -165,7 +188,7 @@ ML {*
                       ^" pattern "^Syntax.string_of_term linctxt stale_pat
                       ^" became stale now due to discharge of params "^commas disch_params
                       ^", but not found in memoization net\n"
-                      ^(cat_lines (Net.content memo_net |> map (fn (_, (pat, C)) =>
+                      ^(cat_lines (Net.content memo_net |> map (fn (pat, C) =>
                           Syntax.string_of_term linctxt pat ^" -> "^Syntax.string_of_term linctxt C)))))
                   stale_pats,
                 constraint_to_pats = constraint_to_pats |> fold (del_C false) stale_Cs
@@ -208,8 +231,15 @@ ML {*
        * further filtering of matching constraints via metarec judgement
        * multiple simultaneous left-to-right matchings by use of meta-conjunctions under meta-exists
          (akin to matching the heads of a CHR or frule) *)
-  fun ex_constraint_proc ctxt fail_cont (pat0, _, _) =
+  fun ex_constraint_proc ctxt fail_cont (pat0, _, [outpat0]) =
     let
+      val _ =
+        if can dest_metaex outpat0 then
+          MetaRec.err_with_trace ctxt ("ex_constraint_proc: meta existential in output pattern "
+            ^MetaRec.str_of_normed_term ctxt outpat0)
+        else
+          ()
+
       val ctxt = MetaRec.metarec_simp_instantiated_constraints ctxt
 
       val thy = Proof_Context.theory_of ctxt
@@ -217,7 +247,7 @@ ML {*
       val { memo_net, ... } = ExConstraintMemoization.get linctxt
 
       (* NB: norming necessary in particular, because pattern_match_envctxt only norms object *)
-      val pat = MetaRec.norm_with_env_in_run_state ctxt pat0
+      val pat = pat0 |> MetaRec.norm_with_env_in_run_state ctxt
       val assms = MetaRec.get_assms (Context.Proof ctxt) |> rev |> map (MetaRec.norm_with_env_in_run_state ctxt)
       val (local_frees, rel_assms) = MetaRec.rel_frees_and_assms_of (K ()) ctxt pat
 
@@ -229,120 +259,43 @@ ML {*
         ^"\n\n") *)
 
       val pat_indexing = pat |> calc_pat_indexing
+      val lift_pat_inst = curry Logic.list_implies rel_assms #> fold_rev Logic.all local_frees
 
 
-      fun result pat_inst0 C ctxt_ = 
+      fun result pat_inst0 ctxt_ = 
         let
-          (* val _ = tracing ("ex_constraint_proc: in result proof construction for "
-            ^MetaRec.str_of_normed_term ctxt_ pat_inst0
-            ^"\nfrom constraint "^MetaRec.str_of_normed_term ctxt_ C) *)
+          (*val _ =
+            if can Logic.dest_conjunction pat_inst0 then
+              tracing ("ex_constraint_proc: in result proof construction for "
+                ^MetaRec.str_of_normed_term ctxt_ (lift_pat_inst pat_inst0))
+            else () *)
 
-          val (pat_inst, C_normed) = (pat_inst0, C)
-            |> pairself (MetaRec.norm_with_env_in_run_state ctxt_)
-          val C_prf = MetaRec.assumption_prf C_normed
+          val pat_inst = pat_inst0 |> MetaRec.norm_with_env_in_run_state ctxt_
+          val (pat_inst_conjs, recomb) = dest_conj_list_with_recomb pat_inst
 
-          val pat_inst_prf = 
-            if C_normed aconv (pat_inst |> curry Logic.list_implies rel_assms |> fold_rev Logic.all local_frees) then
-              (* TODO(refactor): this proof construction is shared exactly with MetaRec.constraint_gen_proc *)
-              C_prf
-              |> fold (MetaRec.allE_rev_prf ctxt_) local_frees
-              |> fold (MetaRec.mp_rev_prf ctxt_ o MetaRec.assumption_prf) rel_assms
-            else (* find rotation of parameters of constraint and assumption matching *)
-              let
-                (* NB: we use matching modulo eta and eta-contract because instantiations
-                     of unification variables often lead to eta-redexes in constraint conclusions *)
-                (* TODO(correctness): seems unnecessary with on-the-fly simplification of instantiated constraints
-                   (which are then removed from memo_net) *)
-                val C_norm_cv = Thm.eta_conversion
+          val pat_inst_conj_prfs = pat_inst_conjs |> map (fn pat_inst_conj =>
+            (* TODO(refactor): this proof construction is shared exactly with MetaRec.constraint_gen_proc *)
+            MetaRec.assumption_prf (lift_pat_inst pat_inst_conj)
+            |> fold (MetaRec.allE_rev_prf ctxt_) local_frees
+            |> fold (MetaRec.mp_rev_prf ctxt_ o MetaRec.assumption_prf) rel_assms)
 
-                val (C_normed_eta, pat_inst_eta) = (C_normed, pat_inst)
-                  |> pairself (MetaRec.term_cv ctxt C_norm_cv)
-                (* fixing unifvars in C that are not shared with pat *)
-                (* NB: freezing wrt. pat is not enough for assumption matching,
-                       because the constraint can further contain unification variables *)
-                val (([C', pat_inst_eta_frozen], ((freeze, _), (thaw, _))), ctxt_2) = ctxt_
-                  |> MetaRec.exact_freeze_thaw [C_normed_eta, pat_inst_eta]
+          val (pat_inst_prf, ctxt_2) = ctxt_ |> recomb (fn (prf1, prf2) => 
+              MetaRec.mps_match_on_freshthm_prf @{thm Pure.conjunctionI} [prf1, prf2])
+            pat_inst_conj_prfs
 
-                (* fixing and then varifying parameters of fixed constraint *)
-                val ((fixing, C'_body), ctxt_3) = ctxt_2 |> Variable.focus C'
-                val (C'_assms, C'_concl) = Logic.strip_horn C'_body
-                val fix_frees = map (Free o snd) fixing
-                val [[C'_concl_fixvard], C'_assms_fixvard, fix_vars] = [[C'_concl], C'_assms, fix_frees]
-                  |> burrow (Variable.export_terms ctxt_3 ctxt_2)
-
-                (* val _ = tracing ("ex_constraint_proc: after fixvaring."
-                  ^"\n  fix_vars are "^commas (fix_vars |> map (Syntax.string_of_term ctxt_))
-                  ^"\n  fixvard concl is "^Syntax.string_of_term ctxt_ C'_concl_fixvard
-                  ^"\n  fixvard assms are "^commas (C'_assms_fixvard |> map (Syntax.string_of_term ctxt_))) *)
-
-                val thy = Proof_Context.theory_of ctxt_
-
-                (* matching local_frees against generalized focus frees. other unifvars are frozen *)
-                val env = (Vartab.empty, Vartab.empty)
-                  |> Pattern.match thy (C'_concl_fixvard, pat_inst_eta_frozen)
-                  |> mk_env
-                  handle Pattern.MATCH =>
-                      MetaRec.err_with_trace ctxt_3 ("ex_constraint_proc: frozen pat_inst "
-                        ^Syntax.string_of_term ctxt_3 pat_inst_eta_frozen
-                        ^" does not match completely frozen constraint with varified parameters "
-                        ^Syntax.string_of_term ctxt_3 C'_concl_fixvard)
-                    | Pattern.Pattern =>
-                      MetaRec.err_with_trace ctxt_3 "ex_constraint_proc: internal error: non-pattern in conclusion match"
-
-                (* val _ = tracing ("ex_constraint_proc: after matching. env is\n  "
-                  ^commas (env |> Envir.term_env |> Vartab.dest |> map (fn (ixn, (T, t)) =>
-                    Syntax.string_of_term ctxt_ (Var (ixn, T)) ^" := "^Syntax.string_of_term ctxt_ t))) *)
-
-                (* FIXME: use factual consequences as well. Seems necessary so that deep synthty derivations
-                    have corresponding x elabto x : A facts available.
-                    Problematic because non-ground facts are only availabe as rules, cf. fact constraint completion
-                    in constraint simplification, so this kills performance. *)
-                val frozen_assms = assms |> map freeze
-                val open_C'_assms = C'_assms_fixvard |> map (Envir.norm_term env)
-                  |> subtract (op aconv) frozen_assms
-
-                (* val _ = tracing ("ex_constraint_proc: after calculation of open assumptions") *)
-
-                (* minor FIXME: backtracking over previous match-choices *)
-                val env2 = env |> fold (fn open_C'_assm => fn env_ =>
-                    case get_first (fn rel_assm =>
-                        try (map_env (Pattern.match thy (open_C'_assm, rel_assm))) env_)
-                      frozen_assms
-                    of
-                      SOME env_2 => env_2
-                    | NONE =>
-                        MetaRec.err_with_trace ctxt_ ("ex_constraint_proc: found constraint "^Syntax.string_of_term ctxt_ C'
-                        ^" matching "^Syntax.string_of_term ctxt_ pat
-                        ^"\nbut the constraint assumptions "^Syntax.string_of_term ctxt_ open_C'_assm
-                        ^"\nare has no match in assms "^commas (assms |> map (Syntax.string_of_term ctxt_))))
-                  open_C'_assms
-
-                (* val _ = tracing ("ex_constraint_proc: after assumption matching. env2 is "
-                  ^commas (env2 |> Envir.term_env |> Vartab.dest |> map (fn (ixn, (T, t)) =>
-                    Syntax.string_of_term ctxt_ (Var (ixn, T)) ^" := "^Syntax.string_of_term ctxt_ t))) *)
-
-              in
-                C_prf
-                |> MetaRec.conv_prf ctxt_ C_norm_cv
-                |> fold (MetaRec.allE_rev_prf ctxt_ o thaw o Envir.norm_term env2) fix_vars
-                |> fold (MetaRec.mp_rev_prf ctxt_ o MetaRec.assumption_prf o thaw o Envir.norm_term env2)
-                     C'_assms_fixvard
-                |> MetaRec.unconvd_from_prf ctxt_ C_norm_cv pat_inst
-              end
-
-          val (inst_intro, ctxt_2) = MetaRec.inst_match_on_freshthm_prf
-            @{thm ex_constraintI} [NONE, SOME pat] ctxt_
-          val (res_prf, ctxt_3) = MetaRec.mps_match_prf inst_intro [pat_inst_prf] ctxt_2
+          val (inst_intro, ctxt_3) = MetaRec.inst_match_on_freshthm_prf
+            @{thm ex_constraintI} [NONE, SOME pat] ctxt_2
+          val (res_prf, ctxt_4) = MetaRec.mps_match_prf inst_intro [pat_inst_prf] ctxt_3
 
           (* val _ = tracing ("ex_constraint_proc: result proof construction done for "
-            ^MetaRec.str_of_normed_term ctxt_3 (MetaRec.prop_of_proofp res_prf)) *)
+            ^MetaRec.str_of_normed_term ctxt_4 (MetaRec.prop_of_proofp res_prf)) *)
         in
-          ((res_prf, [pat_inst]), ctxt_3 |> Context.Proof |> MetaRec.get_the_run_state |> SOME)
+          ((res_prf, [pat_inst]), ctxt_4 |> Context.Proof |> MetaRec.get_the_run_state |> SOME)
         end
     in
       case Net.match_term memo_net pat_indexing |> filter (fn (pat2, _) => aconv_norm ctxt (pat2, pat)) of
-        (_, (pat_inst, C)) :: _ =>
-          result pat_inst C ctxt
+        (_, pat_inst) :: _ =>
+          result pat_inst ctxt
       | [] =>
           let
             val constraints = MetaRec.get_active_constraints_in_run_state ctxt
@@ -350,21 +303,16 @@ ML {*
 
             (* NB: we don't use Variable.import/export because they are not proper inverses due to
                  re-maxidx-ification of unification variable names *)
-            val ((pat_fxd_liftvard, pat_fxd_vard), ctxt3) = ctxt2
-              |> metaexs_to_freshvars local_frees pat_fxd
-              ||>> metaexs_to_freshvars [] pat_fxd
+            val (pat_fxd_liftvard, ctxt3) = ctxt2 |> metaexs_to_freshvars local_frees pat_fxd
 
            (* NB: since assumptions are constant in one context extension level,
                we only match lifted constraint conclusion.
                We don't have to care about the case of further instantiation of unification variables
                in particular, because their dependencies already have to be present. *)
-            val pat_fxd_vard_lifted = pat_fxd_liftvard |> fold_rev Logic.all local_frees
-            val [[pat_fxd_vard_fixvard], fixvars] = [[pat_fxd_vard], local_frees]
-              |> burrow (map (Term_Subst.generalize ([], map (Term.dest_Free #> fst) local_frees)
-                   (Term.maxidx_of_term pat_fxd_vard)))
-            val fixvar_to_local_free = fixvars ~~ local_frees
+            val pat_fxd_vard_lifted_conjs = pat_fxd_liftvard |> Logic.dest_conjunction_list 
+              |> map (fold_rev Logic.all local_frees)
 
-            fun prep_match mod_param_rot C =
+            fun prep_match C =
               let
                 (* NB: object is normed by pattern_match_envctxt, but freezing interferes *)
                 val C' = C |> MetaRec.norm_with_env_in_run_state ctxt3 |> freeze
@@ -373,87 +321,69 @@ ML {*
                 val concl = Logic.strip_assums_concl C''
                 val rel_fixes = fix_frees |> inter (op =) (Term.add_frees concl [])
               in
-                if mod_param_rot then concl
-                else fold_rev (Logic.all o Free) rel_fixes concl
+                fold_rev (Logic.all o Free) rel_fixes concl
               end
+
+            val match_result_opt = SOME ctxt3 |> fold (fn pat_fxd_vard_lifted_conj => fn ctxt_opt =>
+                case ctxt_opt of
+                  NONE => NONE
+                | SOME ctxt_ =>
+                    get_first (fn (C, _) =>
+                        case MetaRec.pattern_match_envctxt ctxt_ (pat_fxd_vard_lifted_conj, prep_match C) of
+                          NONE => NONE
+                        | SOME ctxt_2 =>
+                            let
+                              val _ = () 
+                            in
+                              SOME ctxt_2
+                            end)
+                      constraints)
+              pat_fxd_vard_lifted_conjs
 
             (* val _ = tracing ("ex_constraint_proc: searching a constraint matching lifted fixed pattern "
               ^Syntax.string_of_term ctxt3 pat_fxd_vard_lifted
               ^"\nin frozen constraints\n"
               ^commas (constraints |> map (fst #> MetaRec.norm_with_env_in_run_state ctxt3 #> freeze
                  #> Syntax.string_of_term ctxt3))
-              ^"\nthat are prepared for non-rotative matching as follows\n"
-              ^commas (constraints |> map (fst #> prep_match false #> Syntax.string_of_term ctxt3))
-              ^"\nand for rotative matching as follows\n"
-              ^commas (constraints |> map (fst #> prep_match true #> Syntax.string_of_term ctxt3))) *)
+              ^"\nthat are prepared for matching as follows\n"
+              ^commas (constraints |> map (fst #> prep_match false #> Syntax.string_of_term ctxt3))) *)
           in
-            (* FIXME: if pattern conclusion head is a parameter itself, matching modulo parameter rotation
-              makes no sense. We remove matching modulo parameter rotation for now, as there is no use
-              case anymore with on-the-fly contextual discharge of constraints. *)
-            case
-              (* TODO(opt): matching without local_free rotation first might not be performance gain after all,
-                 because the real processing only starts in result function *)
-              (* NB: in the mod_param_rot case, the metaex-quantified variables became unlifted unifvars
-                 and the unifvars for the fixes are unlifted as well, so pat_fxd_vard_fixvard is a pattern *)
-              get_first (fn ((C, _), mod_param_rot) =>
-                  let
-                    val pat' = if mod_param_rot then pat_fxd_vard_fixvard else pat_fxd_vard_lifted
-                    val C' = prep_match mod_param_rot C
-                  in
-                    case MetaRec.pattern_match_envctxt ctxt3 (pat', C') of
-                      NONE => NONE
-                    | SOME ctxt4 =>
-                        (*if fix_vars |> exists (fn x1 => fix_vars |> exists (fn x2 =>
-                             x1 <> x2 andalso
-                             ((x1, x2) |> pairself (MetaRec.norm_with_env_in_run_state ctxt4)
-                             |> (op aconv))))
-                        then (* discovered local_free "permutation" is not injective *)
-                          NONE
-                        else *)
-                         let
-                           (* NB: in mod_param_rot case we only want to ensure existence of match against
-                             pattern modulo fixes permutation.
-                             Actual permutation is calculated in result function.
-                             This is why we norm pat_fxd_vard instead of pat_fxd_vard_fixvard. *)
-                           val pat_inst = (if mod_param_rot then pat_fxd_vard else pat_fxd_liftvard)
-                             |> MetaRec.norm_with_env_in_run_state ctxt4 |> thaw
-                           val C_normed = C |> MetaRec.norm_with_env_in_run_state ctxt4
-
-                           (*val _ = 
-                             let 
-                               val envdiff = MetaRec.get_the_env_in_run_state ctxt4 |> Envir.term_env |> Vartab.dest
-                                 |> subtract (pairself fst #> (op =))
-                                      (MetaRec.get_the_env_in_run_state ctxt3 |> Envir.term_env  |> Vartab.dest)
-                             in 
-                               tracing ("ex_constraint_proc: found constraint "
-                                 ^Syntax.string_of_term ctxt4 pat_inst
-                                 (*^"\n  (= "^Syntax.string_of_term ctxt4 C_normed^")" *)
-                                 ^"\nmatching pattern "^Syntax.string_of_term ctxt4 pat
-                                 (*^"\n  (pat_fxd_liftvard = "^Syntax.string_of_term ctxt4 pat_fxd_liftvard
-                                 ^"\n  ,instantiated pat_fxd_liftvard = "^MetaRec.str_of_normed_term ctxt4 pat_fxd_liftvard
-                                 ^"\n  ,instantiated and thawed pat_fxd_liftvard = "
-                                   ^Syntax.string_of_term ctxt4
-                                     (MetaRec.norm_with_env_in_run_state ctxt4 pat_fxd_liftvard |> thaw)^")"
-                                 ^"\nactual preparation: "^commas ([pat', C'] |> map (Syntax.string_of_term ctxt4))
-                                 ^"\nterm instantiation from match:\n  "
-                                 ^commas (envdiff |> map (fn (ixn, (T, t)) =>
-                                    Syntax.string_of_term ctxt4 (Var(ixn,T)) ^ " := "
-                                      ^MetaRec.str_of_normed_term ctxt4 t)) *))
-                             end *)
-                         in
-                           SOME ((pat_inst, C_normed), ctxt4)
-                         end
-                  end)
-                (map (rpair false) constraints (* @ map (rpair true) constraints *))
-            of
-              SOME ((pat_inst, C), ctxt4) =>
+            case match_result_opt of
+              SOME ctxt4 =>
                 let
+                  val pat_inst = pat_fxd_liftvard |> MetaRec.norm_with_env_in_run_state ctxt4 |> thaw
+                  val C = lift_pat_inst pat_inst
+
+                  (*val _ =
+                    if not (can Logic.dest_conjunction pat_inst) then
+                      ()
+                    else
+                    let 
+                      val envdiff = MetaRec.get_the_env_in_run_state ctxt4 |> Envir.term_env |> Vartab.dest
+                        |> subtract (pairself fst #> (op =))
+                             (MetaRec.get_the_env_in_run_state ctxt3 |> Envir.term_env  |> Vartab.dest)
+                    in 
+                      tracing ("ex_constraint_proc: found constraint(s) "
+                        ^Syntax.string_of_term ctxt4 pat_inst
+                        ^"\nmatching pattern(s) "^Syntax.string_of_term ctxt4 pat
+                        (*^"\n  (pat_fxd_liftvard = "^Syntax.string_of_term ctxt4 pat_fxd_liftvard
+                        ^"\n  ,instantiated pat_fxd_liftvard = "^MetaRec.str_of_normed_term ctxt4 pat_fxd_liftvard
+                        ^"\n  ,instantiated and thawed pat_fxd_liftvard = "
+                          ^Syntax.string_of_term ctxt4
+                            (MetaRec.norm_with_env_in_run_state ctxt4 pat_fxd_liftvard |> thaw)^")"
+                        ^"\nactual preparation: "^commas ([pat_fxd_vard_lifted, prep_match C] |> map (Syntax.string_of_term ctxt4)) *)
+                        ^"\nterm instantiation from match:\n  "
+                        ^commas (envdiff |> map (fn (ixn, (T, t)) =>
+                           Syntax.string_of_term ctxt4 (Var(ixn,T)) ^ " := "
+                             ^MetaRec.str_of_normed_term ctxt4 t)))
+                    end *)
+
                   val { fix_necessary_tab, constraint_to_pats, ...} = ExConstraintMemoization.get linctxt
                   val memo_net2 = memo_net |> Net.insert_term (eq_fst (aconv_norm ctxt4))
-                    (pat_indexing, (pat, (pat_inst, C)))
+                    (pat_indexing, (pat, pat_inst))
                   val constraint_to_pats2 = constraint_to_pats
                     |> Net.insert_term_safe (eq_pair (aconv_norm ctxt4) (aconv_norm ctxt4))
-                      (Envir.eta_contract C, (C, pat)) 
+                         (Envir.eta_contract C, (C, pat)) 
                   val fix_necessary_tab2 = fix_necessary_tab |> fold (fn fix =>
                       Symtab.cons_list (fst (Term.dest_Free fix), pat)) 
                     local_frees
@@ -462,7 +392,7 @@ ML {*
                       {memo_net=memo_net2, constraint_to_pats=constraint_to_pats2,
                         fix_necessary_tab=fix_necessary_tab2})))
                 in
-                  result pat_inst C ctxt5
+                  result pat_inst ctxt5
                 end
             | NONE =>
                 let
