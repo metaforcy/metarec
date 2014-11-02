@@ -224,7 +224,7 @@ structure HOLMetaRec = struct
       val prfx = Binding.qualify true tyco_name;
       val lthy3 = lthy2
         |> MetaRec.add_non_pervasive_declaration (fn morph =>
-             MetaRec.add_rule 0 (Morphism.thm morph quant_unroll_th))
+             MetaRec.add_rule MetaRec.AllowRuleToConstraintPropag 0 (Morphism.thm morph quant_unroll_th))
         |> MetaRec.add_facts_decl (univ_rewr :: constreq_rews)
         |> MetaRec.map_lthy_transforms_log (cons msg)
           (* rudimentary localization, Induct.induct_simp_add, Code.add_default_eqn_attribute nicht gemacht *)
@@ -419,7 +419,7 @@ structure HOLMetaRec = struct
           (MetaRec.pack_jid_pobj_iobjs "HOLMetaRecSyntax.rewto_const_jud"
             (Var(("x", 0), Term.dummyT)) [])
       val simprules = inet_content
-        |> map_filter (fn ((ruleref, matching_ty), _) =>
+        |> map_filter (fn ((ruleref, (matching_ty, _)), _) =>
              (* NB: we use here that synprocs are executed in a context with the *ground*
                   assumptions as direct rules *)
              case ruleref of

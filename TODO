@@ -984,6 +984,12 @@
   * Isabelle Kontextprimitiven ueberladen um die Constraints der metarec-basierten
     Typinferenz als Annahmen im Kontext zu interpretieren
 
+  * Elaboration von patterns fuer metarec Klauseln
+    (somewhat related to elaboration of antiquotations in
+    Christiansen - type directed elaboration of quasiquotations?)
+  * Error-Message rewriting nuetzlich? Muesste eigentlich conditional rewriting
+    mit metarec Premissen sein. Schwierig mit CHRs?
+    (cf. Christiansen - type directed elaboration of quasiquotations)
 
   * universe level performance/algebraism tradeoff
        annotating PRODs with universe levels speeds up type synthesis

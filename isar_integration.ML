@@ -826,6 +826,9 @@ val _ = gen_theorem @{command_spec "schematic_corollary"} true Thm.corollaryK;
 
 
 
+(* TODO(porting): in newer versions of Isabelle the redefinition of Isar commands
+  is not usually possible, only if Outer_Syntax.batch_mode = Unsynchronized.ref true
+  during the redefinition. Worst case in the future: use variants of the command names *)
 
 val _ =
   Outer_Syntax.command @{command_spec "have"} "state local goal"

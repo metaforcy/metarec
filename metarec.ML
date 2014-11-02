@@ -210,6 +210,7 @@ fun term_cv ctxt cv t =
   t |> cterm_of (Proof_Context.theory_of ctxt) |> cv |> Thm.rhs_of |> Thm.term_of
 
 
+
 fun ground t = null (Term.add_vars t []) andalso null (Term.add_tvars t [])
 
 (* NB: Variable.export is not exact w.r.t. indices of re-generalized Vars, they rather get maxidx+1 *)
@@ -692,7 +693,7 @@ datatype lin_ctxt_boundary = MetaRecCtxtDischargedBoundary of string list | Meta
   | MetaRecConstraintSimpBoundary of term | ChrConstraintSimpBoundary
   | DelayedUnificationsBoundary | SolvedChrPremisesBoundary | SolvedFrulePremisesBoundary
 datatype rule_matching_ty = NormalRuleMatching | ExactRuleMatching
-datatype rule_constraint_propag_ty = AllowRuleConstraintPropag | DisallowRuleConstraintPropag
+datatype rule_constraint_propag_ty = AllowRuleToConstraintPropag | DisallowRuleToConstraintPropag
 datatype trace_depth_ty = TraceDepth of { rule_trace_level_depth : int, rule_trace_max_levels : int,
   msg_trace_depth : int }
 
@@ -2457,7 +2458,7 @@ fun add_coll_jud basejud colljudI triggerjud_opt =
 
 fun add_general_syn_proc jud proc_id proc = map_syn_procs (Symtab.update (jud, (proc_id, proc)))
 (* TODO(feature)?: allow unification variables in input but provide fixing/unfixing logic? *)
-fun add_syn_proc jud proc_id proc = add_general_syn_proc jud proc_id 
+fun add_failable_syn_proc jud proc_id proc = add_general_syn_proc jud proc_id 
     (fn ctxt => fn fail_cont => fn input_terms =>
       let
         val (pobj, iobjs, oobjs) = input_terms
@@ -2476,7 +2477,8 @@ fun add_syn_proc jud proc_id proc = add_general_syn_proc jud proc_id
               ^commas (map (Syntax.string_of_term ctxt o Var) vars)
               ^" and type unification variables "
               ^commas (map (Syntax.string_of_typ ctxt o TVar) tvars))
-        val (th, out_cts) = proc ctxt (c_pobj, c_iobjs, c_oobjs)
+        fun fail_cont2 ctxt msg = (fail_cont ctxt msg; error "not reachable, just for cast after exception")
+        val (th, out_cts) = proc ctxt fail_cont2 (c_pobj, c_iobjs, c_oobjs)
         (* val _ =
           if null (Thm.hyps_of th) then ()
           else
@@ -2498,6 +2500,7 @@ fun add_syn_proc jud proc_id proc = add_general_syn_proc jud proc_id
       in
         ((grnd_exact_thm_prf th, map Thm.term_of out_cts), NONE)
       end)
+fun add_syn_proc jud proc_id proc = add_failable_syn_proc jud proc_id (fn ctxt => fn fail_cont => proc ctxt)
 
 fun add_tactic_proc jid tac =
   let
@@ -2587,12 +2590,6 @@ fun abstr_inst (avail_vars, avail_tvars) =
 (* NB: we assume that allowed_deps don't need unlifting themselves (only used with frees actually) *)
 fun unlift_unifvar_occs allowed_deps t0 ctxt =
   let
-    (* from Pure/term.ML *)
-    fun term_name (Const (x, _)) = Long_Name.base_name x
-      | term_name (Free (x, _)) = x
-      | term_name (Var ((x, _), _)) = x
-      | term_name _ = Name.uu;
-
     fun unlift boundsTs t0 ctxt =
       let val t = norm_with_env_in_run_state ctxt t0
       in
@@ -2635,7 +2632,7 @@ fun unlift_unifvar_occs allowed_deps t0 ctxt =
                               SOME free => free
                             | NONE => t
                           in
-                            Abs(term_name t', typeof t', Term.abstract_over (t', body))
+                            Abs(StructUnify.term_name t', typeof t', Term.abstract_over (t', body))
                           end)
                         ts
                      val _ = tracing ("unlift_unifvar_occs: unlifting "^Syntax.string_of_term ctxt t
@@ -2914,7 +2911,7 @@ and add_assm_terms_internal assms ctxt =
              this is ok because the net matching will then just be more approximative than necessary *)
           ctxt_2 |> Context.proof_map (map_rule_stuff
             (* NB: the local rule rule' is normed wrt current run state, since assms are normed *)
-            (Item_Net2.cons ((LocalRule rule'_prf, (matching_ty', AllowRuleConstraintPropag)), prior)
+            (Item_Net2.cons ((LocalRule rule'_prf, (matching_ty', AllowRuleToConstraintPropag)), prior)
                (rule_net_index judgements term_to_jud))
             I)
         end)
@@ -2961,7 +2958,7 @@ and add_assm checked th ctxt =
       |> (if is_fact then (* Fakten werden automatisch brules *)
             add_local_fact rule
           else if is_rule then
-            Context.proof_map (gen_add_rule true checked ctxt AllowRuleConstraintPropag 0 rule)
+            Context.proof_map (gen_add_rule true checked ctxt AllowRuleToConstraintPropag 0 rule)
           else case frule_opt of
             SOME frule => 
               Context.proof_map (gen_add_frule checked true false false frule)
@@ -3706,7 +3703,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
       |> map_filter (fn ((rl, (matching_ty, allow_rule_constraint_propag)), _) =>
         let val prop = prop_of_rule ctxt00 rl
         in
-          if allow_rule_constraint_propag = AllowRuleConstraintPropag
+          if allow_rule_constraint_propag = AllowRuleToConstraintPropag
             andalso Logic.count_prems prop = 0 andalso null (Logic.strip_params prop)
           then
             (case rl of
@@ -5272,7 +5269,7 @@ and check_rule calc_juddeps check_groundness ctxt prop =
      an Prioritaetsgraph der dann fuer Performance in numerische
      Prioris kompiliert wird
 *)
-and gen_add_rule local_rule check_groundness ctxt0 allow_constraint_rule_propag prior rule00 gctxt =
+and gen_add_rule local_rule check_groundness ctxt0 allow_rule_constraint_propag prior rule00 gctxt =
   let
      val {rules, depgraph, judgements, term_to_jud, ...} = get_current_ruledata gctxt
 
@@ -5301,7 +5298,7 @@ and gen_add_rule local_rule check_groundness ctxt0 allow_constraint_rule_propag 
   in
     gctxt
     |> map_rule_stuff
-      (Item_Net2.cons ((DirectRule rule, (matching_ty, allow_constraint_rule_propag)), prior)
+      (Item_Net2.cons ((DirectRule rule, (matching_ty, allow_rule_constraint_propag)), prior)
         (rule_net_index judgements term_to_jud))
       (K depgraph')
   end
@@ -5496,7 +5493,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                                (* TODO(opt!!): proof_of teuer *)
                                (* NB: we want generated brules to be available in subsequent metarec calls *)
                              #> (fn gctxt => gctxt
-                               |> gen_add_rule true false (Context.proof_of gctxt) AllowRuleConstraintPropag 0 brule')
+                               |> gen_add_rule true false (Context.proof_of gctxt) AllowRuleToConstraintPropag 0 brule')
                            end
 
                        (* fun str_of_thm_with_constTs th =
@@ -5599,7 +5596,7 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
             (* nicht nochmal nen wf-Check machen *)
             (* TODO(opt!!): proof_of teuer auf Theorien *)
         #> (fn gctxt => gctxt
-          |> gen_add_rule true false (Context.proof_of gctxt) AllowRuleConstraintPropag 0 fact_w_exactrule_marker')
+          |> gen_add_rule true false (Context.proof_of gctxt) AllowRuleToConstraintPropag 0 fact_w_exactrule_marker')
       end
   in
     ctxt
@@ -5724,9 +5721,6 @@ and gen_add_frule checked checked_grndness explicit traced frule0 gctxt =
         if can dest_brule concl then I
         else Net.insert_term_safe (op =) (concl, frule_id)) concls
 
-    val _ =
-      if explicit orelse null prems then ()
-      else err_with_trace ctxt "gen_add_frule: implicit frule has premises"
     val (avail_vars0, avail_tvars0) =
       (Term.add_vars (term_of maj_cprem) [], Term.add_tvars (term_of maj_cprem) [])
     val (avail_vars, avail_tvars, prem_juds) =
@@ -6369,16 +6363,16 @@ val _ = Outer_Syntax.local_theory "declare_frule" "declare forward rule" Keyword
 val _ = Outer_Syntax.local_theory "declare_ffact" "declare forward fact" Keyword.thy_decl ...
 *)
 
-fun add_rule allow_constraint_rule_propag prior rule gctxt =
-  gen_add_rule false true (Context.proof_of gctxt) allow_constraint_rule_propag prior rule gctxt
+fun add_rule allow_rule_constraint_propag prior rule gctxt =
+  gen_add_rule false true (Context.proof_of gctxt) allow_rule_constraint_propag prior rule gctxt
 
-fun add_rule_unchecked_grnd allow_constraint_rule_propag prior rule gctxt =
-  gen_add_rule false false (Context.proof_of gctxt) allow_constraint_rule_propag prior rule gctxt
+fun add_rule_unchecked_grnd allow_rule_constraint_propag prior rule gctxt =
+  gen_add_rule false false (Context.proof_of gctxt) allow_rule_constraint_propag prior rule gctxt
 
-fun add_rule_unchecked allow_constraint_rule_propag prior rule gctxt =
+fun add_rule_unchecked allow_rule_constraint_propag prior rule gctxt =
   let val ctxt = Context.proof_of gctxt
   in
-    gen_add_rule true false ctxt allow_constraint_rule_propag prior (normalize_lesseta_withvars ctxt rule) gctxt
+    gen_add_rule true false ctxt allow_rule_constraint_propag prior (normalize_lesseta_withvars ctxt rule) gctxt
   end
 
 
@@ -6392,8 +6386,8 @@ fun gen_MR_decl_attr add_rule = Scan.lift (Scan.option (Args.$$$ "no_rule_constr
        let
          val prio = the_default 0 prio_opt
          val rl_C_propag = case no_rl_C_propag_opt of
-             SOME _ => DisallowRuleConstraintPropag
-           | NONE => AllowRuleConstraintPropag
+             SOME _ => DisallowRuleToConstraintPropag
+           | NONE => AllowRuleToConstraintPropag
          val gctxt2 = gctxt |> add_rule rl_C_propag prio rule
        in (SOME gctxt2, SOME rule) end))
 

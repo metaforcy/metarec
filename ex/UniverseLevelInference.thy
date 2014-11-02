@@ -1,4 +1,3 @@
-
 theory UniverseLevelInference
 imports "../ZFMetaRec" "../DmitriySubtyping" (* AC *)
 begin
@@ -860,6 +859,9 @@ lemma [MR]: "
    for performance if no ZF-applications occur in terms *)
 
 
+(* TODO(refactor?): supunify only needed for elaboration of equality.
+  Can we simulate it? Unlikely? *)
+
 lemma [MR]: "
     primunify A B  ==>
   supunify A B A"
@@ -1414,6 +1416,16 @@ lemma [MR]: "[|
 
 
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
+(* FIXME?: to achieve deterministic synthesis for guniv i as for univlvl-annotated tycos,
+   we would need synthesis with caching of larger level:
+
+       [|  freshFOunifvar j  ;  constraint (j <: univlvl)  ;  constraint (i u< j)  |] ==>
+       guniv i  synthty  guniv j
+
+         try (exconstraint (?? j. inclvl i j))  ==>
+       guniv i  synthty  guniv j
+
+   always introducing fresh j is wasteful but not that bad regarding unification. *)
 lemma [elabMR_unchecked]: "[|
     freshFOunifvar i  ;  freshFOunifvar j  ;
     constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;   constraint (i u< j)  |] ==>
@@ -2114,7 +2126,9 @@ lemma [constraint_propag_rule]: "i u<= j &&& j u< k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
 
-(* NB: we avoid looping on  i u<= i &&& i u<= i ==> i u<= i *)
+(* NB: we avoid looping on  i u<= i &&& i u<= i ==> i u<= i
+   FIXME: was looping just a bug here?
+     simp rule for i u<= i should have priority. *)
 lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i u<= j &&& j u<= k ==> i u<= k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.le_trans)

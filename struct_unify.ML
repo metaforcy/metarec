@@ -3,6 +3,7 @@
 signature STRUCT_UNIFY =
 sig
   type flexflex
+  val term_name: term -> string
   val unify: theory -> term * term -> Envir.env * flexflex list -> Envir.env * flexflex list
   val solve_delayed_flexflexs: theory -> flexflex list -> Envir.env -> Envir.env
   val term_eq_of_flexflex: flexflex -> term
@@ -101,10 +102,12 @@ fun abstract_over_open (v, body) =
   in abs v 0 body handle Same.SAME => body end;
 
 
+(* from Pure/term.ML *)
 fun term_name (Const (x, _)) = Long_Name.base_name x
   | term_name (Free (x, _)) = x
   | term_name (Var ((x, _), _)) = x
   | term_name _ = Name.uu;
+
 
 fun lambda_name_open binderTs (x, v) t =
   Abs (if x = "" then term_name v else x,
