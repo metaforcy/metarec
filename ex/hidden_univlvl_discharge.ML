@@ -5,6 +5,13 @@ struct
 
   datatype univlvl_comparison = UnivLess | UnivLeq
 
+  fun ord_univlvl_comp (compty1, compty2) = case compty1 of
+      UnivLess => (case compty2 of
+          UnivLess => EQUAL
+        | UnivLeq => LESS)
+    | UnivLeq => (case compty2 of
+          UnivLess => GREATER
+        | UnivLeq => EQUAL)
 
   local
     fun dest_jud_name t =
@@ -28,6 +35,13 @@ struct
     | _ => NONE
   fun mk_univlvl i =
     @{term constraint_typing} $ i $ @{term univlvl} |> FOLogic.mk_Trueprop
+
+  fun dest_umax (Const(@{const_name univ_max}, _) $ t1 $ t2) = (t1, t2)
+    | dest_umax t = raise TERM("dest_umax", [t])
+  fun dest_umaxs t =
+    case try dest_umax t of
+      SOME (t1, t2) => dest_umaxs t1 @ dest_umaxs t2
+    | NONE => [t]
 
 
   (* TODO(feature): contract non-branching terminal u<=-chains (i.e. unify along them)
@@ -152,7 +166,15 @@ struct
           not (is_some (dest_univlvl ctxt C)) andalso not (is_some (dest_univ_ieq C))
           andalso member (op =) (Term.add_vars C []) (Term.dest_Var i)))
 
+      val _ = tracing ("hidden univlvls are:  "^commas (hidden_uls |> map (Syntax.string_of_term ctxt)))
 
+      (* TODO(opt): intermediate fully hidden sccs, i.e. with  ssc0 u< scc u< scc1, should
+         only be instantiated to one of the hiddens contained in the scc, not to something >= umax(usucc(scc0)).
+         This is because we will then have to reintroduce new intermediate univlvl vars in
+         uless_usucc_lhs_simp rule later due to   usucc(i) u< j   constraints where i:scc, j:scc1.
+         This poperty propagates along u<=-sup-trees that just accumulate umax's without usucc'ing,
+         so in effect we only collapse {u<=, u<}-sup-trees with at most one u< along each path
+         from leaves to the root. *)
       val ul_sccs_w_hidden = Term_Graph.strong_conn ul_graph |> map (fn ul_scc =>
           let
             val in_scc = member (op =) ul_scc
@@ -163,7 +185,7 @@ struct
                    Term_Graph.get_node ul_graph i
                    |> exists (fn (compty, (j, _)) => compty = UnivLess andalso in_scc j))
               then
-                error ("calc_hidden_univlvl_discharge: universe inconsistency in universe level scc\n"
+                MetaRec.err_with_trace ctxt ("calc_hidden_univlvl_discharge: universe inconsistency in universe level scc\n"
                   ^cat_lines (inner_ieqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt)))
               else ()
             val hiddens = inter (op =) hidden_uls ul_scc
@@ -186,84 +208,52 @@ struct
 
       val cert = cterm_of (Proof_Context.theory_of ctxt)
 
-      val (ctxt2, iq_ths) = (ctxt, []) |> fold (fn ((non_hiddens, hiddens), (inbound_ieqs, _)) => fn (ctxt_, ths) =>
+      val ctxt2 = ctxt |> fold (fn ((non_hiddens, hiddens), (inbound_ieqs, _)) => fn ctxt_ =>
           case non_hiddens of
             non_hidden :: _ =>
               let val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state (
                  fold (fn hidden => curry Envir.update (Term.dest_Var hidden, non_hidden)) hiddens))
-              in (ctxt_2, ths) end
+              in ctxt_2 end
           | [] =>
               let
                 val norm = MetaRec.norm_with_env_in_run_state ctxt_
+
+                (* NB: we unfold univ_max instantiations in inbound j and
+                   to optimize the larger univ_max that we construct in this step
+                   by distinctification of inbound "monadic" univlvl expressions usucc^n(i). *)
+                (* TODO(opt?): absorb usucc^n(i) by usucc^m(i) with m > n. This makes
+                   solving of inequation goals slightly less efficient because we cannot
+                   use the {uless,uleq}_umax1_direct* rules anymore. So is this actually worth it? *)
+                (* NB: if we have inbound  j u<= i, j u< i we use  i := usuc j  instead of  i := j umax (usucc j) *)
                 (* NB: normalization necessary due to instantiations that happened already *)
-                val inbound_ieqs' = inbound_ieqs |> map (fn (compty, (i, j)) => (compty, (norm i, norm j)))
-                  |> distinct (eq_snd (eq_fst (op aconv)))
+                val inbounds' = inbound_ieqs
+                  |> maps (fn (compty, (j, _)) => dest_umaxs (norm j) |> map (pair compty))
+                  |> sort (pairself fst #> ord_univlvl_comp) |> distinct (eq_snd (op aconv))
 
-                (* val _ = tracing ("inbound_ieqs for "^Syntax.string_of_term ctxt_ i
-                  ^" are "^commas (inbound_ieqs |> map (mk_univ_ieq #> Syntax.string_of_term ctxt_))) *)
-                (* TODO(opt): keep track of uninstantiated univlvls that inst_t0 already bounds and if
-                     the uninstantiated univlvls occurring in j' are covered by that, there is no need to
-                     add j'' subterm to inst_t. *)
-                fun inst_step_for (compty, (j', _)) =
-                  let
-                    val j''  = case compty of
+                (* val _ = tracing ("inbounds for fully hidden scc "
+                  ^(hiddens |> map (Syntax.string_of_term ctxt_))
+                  ^" are "^commas (inbounds |> map (fn (compty, j') => mk_univ_ieq (compty (j', hd hiddens))
+                    |> Syntax.string_of_term ctxt_))) *)
+
+                val hidden_inst_umax_set =
+                  case inbounds' of
+                    [] => [@{term first_univlvl}]
+                  | _ => inbounds' |> map (fn (compty, j') => case compty of
                         UnivLeq => j'
-                      | UnivLess => @{term "usucc"} $ j'
-                    val th0_j = (case compty of
-                        UnivLeq => @{thm uleq_base}
-                      | UnivLess => @{thm uless_base})
-                      |> Drule.instantiate' [] [SOME (cert j')]
-                  in (j'', th0_j) end
-
-                val (hidden_inst, iq_ths) =
-                  case inbound_ieqs' of
-                    [] => (@{term first_univlvl}, [])
-                  | hd_inbound_ieq' :: tl_inbound_ieqs' => inst_step_for hd_inbound_ieq' ||> single
-                      |> fold_rev (fn ieq as (compty, (j', _)) => fn (inst_t0, ths0) =>
-                             let
-                               val (j'', th0_j) = inst_step_for ieq
-                               val [j'_ct, j''_ct, inst_t0_ct] = map cert [j', j'', inst_t0]
-                               val umax1_th = case compty of
-                                   UnivLeq => @{thm uleq_umax1}
-                                 | UnivLess => @{thm uless_umax1}
-
-                               (* TODO(refactor?): instead of manual instantiation, match
-                                   conclusions of th_j, ths against inst_t? Easy with Thm.match? *)
-                               val th_j = (umax1_th |> Drule.instantiate' [] [SOME j'_ct, SOME j''_ct, SOME inst_t0_ct])
-                                 OF [th0_j]
-                               (* val _ = tracing ("th_j for "^Syntax.string_of_term ctxt_ (@{term Pair} $ j $ i)
-                                 ^": "^Display.string_of_thm ctxt_ th_j) *)
-                               val ths = ths0 |> map (fn th =>
-                                 let
-                                   val (umax2_th, (i0, j0)) = case dest_univ_ieq (Thm.concl_of th) of
-                                       SOME (UnivLeq, (i0, j0)) => (@{thm uleq_umax2}, (i0, j0))
-                                     | SOME (UnivLess, (i0, j0)) => (@{thm uless_umax2}, (i0, j0))
-                                     | NONE => error ("calc_hidden_univlvl_discharge: "
-                                         ^"expected univlvl inequality thm instead of "
-                                         ^Display.string_of_thm ctxt_ th)
-                                   val (i0_ct, j0_ct) = (i0, j0) |> pairself cert
-                                   val th' = (umax2_th |> Drule.instantiate' [] [SOME i0_ct, SOME j0_ct, SOME j''_ct])
-                                     OF [th]
-                                   (* val _ = tracing ("lifting:\n  "^Display.string_of_thm ctxt_ th
-                                    ^"\nto  "^Display.string_of_thm ctxt_ th') *)
-                                 in th' end)
-                               val inst_t = @{term univ_max} $ j'' $ inst_t0
-                             in
-                               (inst_t, th_j :: ths)
-                             end)
-                           tl_inbound_ieqs'
+                      | UnivLess => @{term "usucc"} $ j')
+                    |> distinct (op aconv)
+                val hidden_inst = hidden_inst_umax_set |> foldr1 (fn (t1, t2) => @{term "univ_max"} $ t1 $ t2)
 
                 (* val _ = tracing ("iq_ths for "^Syntax.string_of_term ctxt_ i^" are: "^
                   commas (iq_ths |> map (Display.string_of_thm ctxt_))) *)
-                val _ = tracing ("instantiating hidden universe levels "^commas (hiddens |> map (Syntax.string_of_term ctxt_))^" := "^
+                val _ = tracing ("instantiating hidden universe levels "
+                  ^commas (hiddens |> map (Syntax.string_of_term ctxt_))^" := "^
                   Syntax.string_of_term ctxt_ hidden_inst)
                 val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state (
                   fold (fn hidden => curry Envir.update (Term.dest_Var hidden, hidden_inst)) hiddens))
                 val env_2 = MetaRec.get_the_env_in_run_state ctxt_2
-                val ths' = map (MetaRec.instnorm_thm_with_env ctxt_2 env_2) ths 
-                  |> fold (insert Thm.eq_thm_prop) iq_ths 
               in
-                (ctxt_2, ths')
+                ctxt_2
               end)
         ul_sccs_w_hidden
 
@@ -286,11 +276,10 @@ struct
           (* NB: we don't use Variable.import/export because they are not exact inverses:
                export changes maxidx of unification vars, which makes exact matching
                of generated SimpCHR impossible *)
-      val ([uninst_uls_fxd, inbnd_inst_ul_iqs_fxd, inst_uls_fxd, _], (((_, freeze_th), (_, thaw_th)), ctxt3)) = ctxt2
+      val ([uninst_uls_fxd, inbnd_inst_ul_iqs_fxd, inst_uls_fxd], ((_, (_, thaw_th)), ctxt3)) = ctxt2
         |> fold_burrow
              (fn ts => MetaRec.exact_freeze_thaw ts #-> (fn (ts', fs) => fn ctxt_ => (ts', (fs, ctxt_))))
-             ([uninst_uls, inbnd_inst_ul_iqs, inst_uls] @ [map Thm.prop_of iq_ths])
-      val iq_ths_fxd = iq_ths |> map freeze_th
+             ([uninst_uls, inbnd_inst_ul_iqs, inst_uls])
 
       (* val _ = tracing ("uninstantiated univlvls: "^commas (uninst_uls
         |> map (Syntax.string_of_term ctxt2)))
@@ -309,9 +298,12 @@ struct
         |> filter (fn i => inbnd_inst_ul_iqs_fxd |> exists (fn iq =>
              member (op =) (Term.add_frees iq []) (Term.dest_Free i)))
         |> map (fn i => @{term constraint_const} $ mk_univlvl i)
-      val goal = 
-        inbnd_inst_ul_iqs_fxd @ map mk_univlvl inst_uls_fxd
+
+      (* NB: we leave the simplification of inequations that are outbound from instantiated
+         univlvls to the constraint simplification rules {uleq,uless}_{umax_sup,usucc_lhs}_simp *)
+      val goal = inbnd_inst_ul_iqs_fxd @ map mk_univlvl inst_uls_fxd
         |> Logic.mk_conjunction_balanced
+
       val simpth_opt =
         if null inst_uls then NONE
         else
@@ -322,8 +314,11 @@ struct
               print_tac "hidden univlvl discharge goal is"
               THEN REPEAT_DETERM_FIRST (
                 (* (fn _ => print_tac "current goal is")
-                THEN'*) match_tac ([Conjunction.conjunctionI] @ iq_ths_fxd @ univlvl_ty_rls
-                  @ map (fn th => @{thm constraintD} OF [th]) constr_univlvl_ty_prems)))
+                THEN'*) match_tac ([Conjunction.conjunctionI, @{thm umax_sup}, @{thm umax_less_sup},
+                    @{thm uleq_base}, @{thm uleq_base_usucc}, @{thm uleq_umax1_direct},
+                    @{thm uleq_umax1_direct_usucc}, @{thm uleq_umax2},
+                    @{thm uless_base}, @{thm uless_umax1_direct}, @{thm uless_umax2}]
+                  @ univlvl_ty_rls @ map (fn th => @{thm constraintD} OF [th]) constr_univlvl_ty_prems)))
           |> thaw_th |> SOME
       val _ = case simpth_opt of
           SOME simpth =>

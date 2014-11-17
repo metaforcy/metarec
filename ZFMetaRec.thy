@@ -273,9 +273,11 @@ ML {*
           val pat_inst = pat_inst0 |> MetaRec.norm_with_env_in_run_state ctxt_
           val (pat_inst_conjs, recomb) = dest_conj_list_with_recomb pat_inst
 
-          val pat_inst_conj_prfs = pat_inst_conjs |> map (fn pat_inst_conj =>
+          val pat_inst_conj_prfs = pat_inst_conjs |> map (fn pat_inst_conjunct =>
+            (* NB: here we expect the generated assumption to be identical to the assumption
+               generated for the found constraint that matches the pattern *)
             (* TODO(refactor): this proof construction is shared exactly with MetaRec.constraint_gen_proc *)
-            MetaRec.assumption_prf (lift_pat_inst pat_inst_conj)
+            MetaRec.assumption_prf (lift_pat_inst pat_inst_conjunct)
             |> fold (MetaRec.allE_rev_prf ctxt_) local_frees
             |> fold (MetaRec.mp_rev_prf ctxt_ o MetaRec.assumption_prf) rel_assms)
 
@@ -310,8 +312,15 @@ ML {*
                We don't have to care about the case of further instantiation of unification variables
                in particular, because their dependencies already have to be present. *)
             val pat_fxd_vard_lifted_conjs = pat_fxd_liftvard |> Logic.dest_conjunction_list 
+              (* minor FIXME: also lift over rel_assms *)
               |> map (fold_rev Logic.all local_frees)
 
+            (* minor FIXME: We should not focus (or even quantify) the variables in C that
+               are not present in pat (and therefore are frozen in the same way),
+               except if this is necessary to make it a pattern,
+               but constraints should mostly be patterns. If they are in a position that
+               can match against a metaex-variable of pat then we do not have to do
+               anything and if they are not there can be no match. *)
             fun prep_match C =
               let
                 (* NB: object is normed by pattern_match_envctxt, but freezing interferes *)
@@ -329,6 +338,9 @@ ML {*
                   NONE => NONE
                 | SOME ctxt_ =>
                     get_first (fn (C, _) =>
+                        (* NB: we have lifted the metaex-varified conjuncts of pat_fxd over local_frees because
+                           in the presence of local_frees we hope for a matching constraint with the same
+                           quantified local_frees in matching order. *)
                         case MetaRec.pattern_match_envctxt ctxt_ (pat_fxd_vard_lifted_conj, prep_match C) of
                           NONE => NONE
                         | SOME ctxt_2 =>

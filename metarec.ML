@@ -210,7 +210,6 @@ fun term_cv ctxt cv t =
   t |> cterm_of (Proof_Context.theory_of ctxt) |> cv |> Thm.rhs_of |> Thm.term_of
 
 
-
 fun ground t = null (Term.add_vars t []) andalso null (Term.add_tvars t [])
 
 (* NB: Variable.export is not exact w.r.t. indices of re-generalized Vars, they rather get maxidx+1 *)
@@ -685,6 +684,22 @@ end
 
 
 
+(* Propagation CHRs are forward directed and are executed in complete saturation of all possible rules and constraint matches.
+     Simplification CHRs are backward directed and only the first simp rule matching a given constraint combination
+   is executed, thereby avoiding executions of propagation CHRs away from this constraint combination
+   (actually just supersets of it for implementational reasons)
+   and thereby demanding a confluence-like property of simplification CHRs.
+     With regards to actual execution of simp CHRs the avoidance of propagation CHRs matching (some of) the same heads
+   is merely a performance optimization, because we cannot guarantee that no propagation CHRs were executed on subsets
+   of this constraint combination before a simplification CHR match on them was possible.
+   But the semantics of prioritizing simplication CHR applications over propagating CHR applications
+   is respected by the constraint hypergraph dependency calculation algrithm of course. 
+     By default only the first match for the other rule head positions of a SimpCHR is considered.
+   FIXME: this default seems to be bad, because simp CHRs have to be symmetric in unifiable heads,
+     as suggested by our case study for UniverseLevelInference
+       (without pervasive all matches execution we merely get an intermediate step
+        i u<=j, j u<= i, j u<= i <== i <: univlvl, j <: univlvl, i u<= i <== i <: univlvl, j <: univlvl),
+     so we should always consider all matches for the other rule head positions *)
 datatype constraint_rule_ty = PropagationCHR | SimpCHR
   (* TODO(opt): actually implement the symmetric, irreflexive and head-based memoization optimizations *) 
 datatype chr_flag = NoReEvalOnHeadReconsideration | SymmetricCHR | IrreflexiveCHR
@@ -2139,7 +2154,7 @@ fun fun_cong_prf prf t ctxt =
   let val (refl_prf, ctxt2) = reflexive_prf t ctxt
   in combination_prf prf refl_prf ctxt2 end
 
-
+fun assm_disch_prf ctxt prf = prf |> fold_rev (impI_prf ctxt) (assms_of_proofp prf)
 
 
 (* TODO(opt): sharing of prf in resulting proofterms *)
@@ -3535,7 +3550,7 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
   
   
 
-    (* TODO(feature): allgemeine Constraintmengen-Minimierung
+    (* allgemeine Constraintmengen-Minimierung
           (reicht fuer Typklassen und Universenlevel-Inferenz)
       * vereinfache die aus metarec-Ableitungen entstandenen Constraints mit metarec zu implikational
         elementareren Constraints C_0
@@ -3557,16 +3572,15 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
         C'_c mit C'_c ==> c
       * die vereinfachten Constraints <= C_0 sind dann diejenigen die nicht durch Abschluss-Generierung
         neu erzeugt werden koennen oder in einem C'_c vorkommen.
-        Warnung an User bei Constraints die sich wechselseitig implizieren.
+        Warnung an User bei Constraints die sich wechselseitig implizieren, bzw. einfach beide beibehalten.
         Diese werden ja gemaess obigem beibehalten.  
         (Es gaebe hier natuerlich auch die Alternative nur den "ergiebigsten" der Constraints beizubehalten
         die sich wechselseitig implizieren, naemlich den der am meisten impliziert und dabei moeglichst
         wenig andere Constraints braucht.)
 
-        Das Tracking welche constraints welche anderen implizieren muss wohl in der Form
-        eine Tabellierung
-          Constraint C |-> optional (wird impliziert von Constraints C_n und Theorem C_n ==> C dazu)
-        erfolgen.
+        Das Tracking welche constraints welche anderen implizieren erfolgt in der Form
+        einer Tabellierung
+          Constraint C |-> liste von Beweisen der Form (C_n ==> C).
         Das deckt dann Forwaerts-Propagierungs und Vereinfachungsschritte ab:
           * bei Forwaerts-Propagierung werden die neuen Constraints vom alten Constraint impliziert
           * bei Vereinfachungs-Schritten wird das alte Constraint von den neuen impliziert.
@@ -3580,67 +3594,10 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
         Nachfolger hat, dann koennen wir C1 ersetzen durch seine Nachfolger-Menge.
 
 
-
-
-        BEACHTEN: die Constraints die durch metarec-Ableitung generiert werden sind i.A. ja in HHF-Form
+          NB: die Constraints die durch metarec-Ableitung generiert werden sind i.A. ja in HHF-Form
             !! fixes. assms ==> Constraint(fixes)
-          also muss die Constraint-Propagierung und Vereinfachung unter fixes und assms stattfinden!!!
-
-          Preprocessing: wenn sich Constraints nur in den Annahmen
-          unterscheiden, dann schneidet man die Annahme-Mengen und nimmt nur
-          eines der Constraints. Wenn sich Constraints nur in Fixes
-          unterscheiden die nur in uninstantiierten
-          Unifikationsvariablen-Applikationen genutzt werden, dann schneidet
-          man die Fixes-Mengen und nimmst nur eines der Constraints.
-
-          Propagierung: bei Anwendung einer Propagierungregel auf mehrere Constraints
-          werden deren Fixes- und Annahme-Mengen vereinigt und die neu entstehenden
-          Constraints erhalten diese vereinigten Fixes und Annahmen. Die Propagierungsregel
-            [| G1 ;  ... ; Gk |] ==> H1 &&& .. &&& Hm ==> R1 &&& ... &&& Rn
-          wird also gelifted zu
-            [| lftd G1 ; ... ; lftd Gk |] ==> lftd H1 &&& .. &&& lftd Hm ==> lftd R1 &&& ... &&& lftd Rn
-          wobei lftd die vereinigten Fixes und Annahmen voranstellt und vorkommende Unifvar
-          ueber die vereinigten Fixes lifted.
-          Die H1, .., Hm werden vor Regelanwendung dann so *abgeschwaecht*, dass sie die vereinigten Fixes und
-          Annahmen aufweisen.
-
-          Vereinfachung(dual zu Propagierung): bei Anwendung einer Vereinfacungsregel auf mehrere Constraints
-          werden deren Fixes vereinigt und deren Annahme-Mengen geschnitten und die vereinfachten Constraints
-          erhalten diese vereinigten Fixes und geschnittenen Annahmen. Die Vereinfachungsregel
-            [| G1 ;  ... ; Gk ; constraint R1 ; ... ; constraint Rn |] ==> H1 &&& .. &&& Hm 
-          wird also geliftet zu
-            [| lftd G1 ;  ... ; lftd Gk ; lftd (constraint R1) ; ... ; lftd (constraint Rn) |]
-            ==> lftd H1 &&& .. &&& lftd Hm 
-          wobei lftd die vereinigten Fixes und geschnittenen Annahmen voranstellt und vorkommende Unifvar
-          ueber die vereinigten Fixes lifted.
-          Die H1, .., Hm werden vor Regelanwendung dann so *verstaerkt*, dass sie die vereinigten Fixes und
-          geschnittenen Annahmen aufweisen.
-
-          In der tracking-Tabelle stehen die Constraints dann ohne Fixes und Annahmen, d.h. mit loose bounds.
-
-          ABER ERSTMAL behandeln wir nur den haeufigen Fall der scheinbar immer bei
-          Universenlevel- und Typklassen-Inferenz vorliegt:
-            die Annahmen werden nur zur Vereinfachung von Constraints genutzt die waehrend der metarec-Ableitung
-            weiter instantiiert wurden und die Fixes von Constraints werden nur in Unifvar-Applikationen genutzt.
-              Vermutlich ist das damit zu erklaeren das Constraints nur fuer universen-level, die immer
-            als first-order betrachten werden koennen, oder fuer die Typisierung von freie Variablen im Input
-            generiert werden, wo also lokale Annahmen und Fixes keine Rollen spielen duerfen.
-
-            Also gehen wir wie folgt vor:
-              * Vereinfachung der Constraints unter ihren Fixes und Annahmen.
-              * Entfernung der Annahmen der resultierenden vereinfachten Constraints.
-              * Unliften der Unifvar in den resultierenden Constraints (durch Instantiierung mit frischen
-                ungelifteten Unifvar)
-              * Check das Fixes nicht mehr in den resultierenden Constraints vorkommen und anschliessender
-                Entfernung der Fixes-Quantifikationen.
-              * Propagierung, Minimierung, weitere Vereinfachung der resultierenden Constraints
-                ohne Fixes und Annahmen
-
-
-            Mal probieren ob es nicht noch einfacher geht:
-              beim Absetzen von constraints die vorkommenden Unifvar immer komplett unliften (d.h. mit ungelifteten
-              Unifvar instantiieren) keine Fixes und Annahmen davor.
-
+          daher vereinfachen wir solche Constraints mit metarec um zu "kontextuellen dischargerten"
+          Constraints zu gelangen auf denen die CHRs arbeiten.
 
 
 
@@ -3666,14 +3623,59 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
                 oder auch { A, C } -> { A, B, C } == { A, B } -> { A, B, C } == { A, C })
             statt dem minimalen Resultatet { A }. Es fehlt die Vereinfachungsregel A &&& C == A.
     *)
-    (* TODO(feature): Narrowing zur Constraint-Vereinfachung
-         * Das bloede an Narrowing im Vgl zu CHRs ist das Narrowing nur funktioniert wenn mindestens
-           ein Constraint eine lokal-eindeutige Loesung hat (d.h. Loesung dieses Constraints ist eindeutig,
-           auch wenn man die anderen Constraints ausser Acht laesst).
-           Nicht-konfluentes nicht-terminierendes verallgemeinertes Narrowing,
-           also bounded, nicht-determ, mit Eindeutigkeitscheck und
-           mit mehrkoepfigen Propagierungsregeln (?) waere wohl das coolste.
-         * das Bloede an CHRs ist das man ein spezialisiertes Regelsystem braucht.
+    (* simplification step (muessen konfluent sein):   prems ==> subgoals ==> conjunctioned heads
+         * match simprule conclusion-heads against input constraints
+         * solve premises of instantiated simprule (including subgoals)
+           which potentially generates new constraints
+         * form
+             (% new_constraints. instantiated_simprule MP solved_premises(new_constraints))
+             : new_constraints ==> conjunctioned input constraints
+         * new constraints generated are added to constraint store
+         * add new entries to tracking table:
+             input constraint |-> new_constraints
+               with proof
+                 conj_concl_extr_prf (instantiated_simprule MP solved_premises)
+                 : new_constraints ==> input constraint
+           where
+             conj_concl_extr_prf = (% R. (% new_constraint_prfs. conjDk_1 (... (conjDk_m (R new_constraint_prfs)) ..)))
+
+      propagation step:   prems ==> conjunctioned heads ==> conjunctioned new constraints
+         * rotate conjunctioned heads premise to front and curry proprule to format
+             heads ==> prems ==> conjunctioned new constraints
+           and rotate heads back to "implicational form"
+             prems ==> heads ==> conjunctioned new constraints
+         * match proprule heads against input constraints
+         * solve premises of instantiated proprule and discharge to
+             proprule' : input constraints ==> conjunctioned new constraints
+         * add instantiated new constraints to constraint store
+         * add new entries to tracking table:
+             new constraint |-> input constraints
+               with proof
+                 conj_concl_extr_prf proprule' : input constraints ==> new constraint
+           where
+             conj_concl_extr_prf = (% R. (% inputCs. conjDk_1 (... (conjDk_m (R inputCs)) ..)))
+
+      wenn neues constraint C hinzukommt:
+        * versuchen *einen* simplification Schritt auszufuehren der C nutzt
+        * wenn dies nicht geklappt hat, versuchen propagation Schritte auszufuehren die C nutzen
+          (TODO: kann es interessant sein auch nicht maximal vereinfachte Constraints zu propagieren?)
+
+      minimization
+         * zu jedem urspruengliche Constraint die azyklische terminale Nachfolgermenge im
+           tracking-Graphen mit Tiefensuche bilden (und dabei die Beweise verzahnen sodass ein Beweis
+             Nachfolger ==> Constraint entsteht).
+           Beachte das selbst-Abhaengigkeiten ignoriert werden sollen, was schon
+           dadurch gegen sein sollte das man den tracking Graphen azyklisch ablaeuft.
+           Breitensuche waere schlecht weil wir dann bei Tracking-Graph
+             A -> {B, C}, B -> {C};  C -> {B}
+           die Nachfolgermenge {B, C} fuer A ermitteln. Tiefensuche nutzt hier A -> B-> C um
+           auf die minimalere Nachfolgermenge {C} zu kommen.
+         * wenn die Nachfolgermenge zu einem Constraint C kein anderes Constraint C2 enthaelt
+           das C als Nachfolger hat, dann kann man C durch seine Nachfolger ersetzen.
+           Die Nachfolger werden also neue Constraints, C faellt raus und wir registrieren
+             C |-> Nachfolger ==> C
+           als Grund dafuer in Output-Tabelle 
+
     *)
 (* TODO(refactor): this contains an adaptation of the frules computation mechanism to propagation rules;
      can perhaps be realized with a common implementation, but the frules computation is completely ground *)
@@ -3744,9 +3746,10 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
     (* NB: local facts are always made available (with priority) as constraints that are already
          implied-by the facts, so they will be removed again during constraint simplification.
-       minor FIXME: this removal does not take place in mutual dependency situations. *)
+       minor FIXME(fixed now due to move towards simp fringe in constraint graph?):
+         this removal does not take place in mutual dependency situations. *)
     val constraints0_ext_impliedby_with_traces = 
-      map (fn ((prop, prf), _) => ((prop, SOME prf), ConstraintTrace [])) rel_facts
+      map (fn ((prop, prf), _) => ((prop, SOME (prf, SimpCHR)), ConstraintTrace [])) rel_facts
         @ map (fn (C, tr) => ((C, NONE), tr)) constraints0_with_traces
       |> distinct (eq_fst (eq_fst (aconv_norm (norm_with_env_in_run_state ctxt00))))
     val constraints0_ext_with_traces = constraints0_ext_impliedby_with_traces
@@ -3757,124 +3760,138 @@ and chr_constraint_simplification allow_propagation ctxt00 =
     val _ = tracing ("started chr constraint simplification on constraints\n  "
       ^commas (map (str_of_normed_term ctxt00 o fst) constraints0_ext_with_traces))
 
-    (* simplification step (muessen konfluent sein):   prems ==> subgoals ==> conjunctioned heads
-         * match simprule conclusion-heads against input constraints
-         * solve premises of instantiated simprule (including subgoals)
-           which potentially generates new constraints
-         * form
-             (% new_constraints. instantiated_simprule MP solved_premises(new_constraints))
-             : new_constraints ==> conjunctioned input constraints
-         * new constraints generated are added to constraint store
-         * add new entries to tracking table:
-             input constraint |-> new_constraints
-               with proof
-                 conj_concl_extr_prf (instantiated_simprule MP solved_premises)
-                 : new_constraints ==> input constraint
-           where
-             conj_concl_extr_prf = (% R. (% new_constraint_prfs. conjDk_1 (... (conjDk_m (R new_constraint_prfs)) ..)))
-
-      propagation step:   prems ==> conjunctioned heads ==> conjunctioned new constraints
-         * rotate conjunctioned heads premise to front and curry proprule to format
-             heads ==> prems ==> conjunctioned new constraints
-           and rotate heads back to "implicational form"
-             prems ==> heads ==> conjunctioned new constraints
-         * match proprule heads against input constraints
-         * solve premises of instantiated proprule and discharge to
-             proprule' : input constraints ==> conjunctioned new constraints
-         * add instantiated new constraints to constraint store
-         * add new entries to tracking table:
-             new constraint |-> input constraints
-               with proof
-                 conj_concl_extr_prf proprule' : input constraints ==> new constraint
-           where
-             conj_concl_extr_prf = (% R. (% inputCs. conjDk_1 (... (conjDk_m (R inputCs)) ..)))
-
-      wenn neues constraint C hinzukommt:
-        * versuchen *einen* simplification Schritt auszufuehren der C nutzt
-        * wenn dies nicht geklappt hat, versuchen propagation Schritte auszufuehren die C nutzen
-          (TODO: kann es interessant sein auch nicht maximal vereinfachte Constraints zu propagieren?)
-
-      minimization
-         * zu jedem urspruengliche Constraint die azyklische terminale Nachfolgermenge im
-           tracking-Graphen mit Tiefensuche bilden (und dabei die Beweise verzahnen sodass ein Beweis
-             Nachfolger ==> Constraint entsteht).
-           Beachte das selbst-Abhaengigkeiten ignoriert werden sollen, was schon
-           dadurch gegen sein sollte das man den tracking Graphen azyklisch ablaeuft.
-           Breitensuche waere schlecht weil wir dann bei Tracking-Graph
-             A -> {B, C}, B -> {C};  C -> {B}
-           die Nachfolgermenge {B, C} fuer A ermitteln. Tiefensuche nutzt hier A -> B-> C um
-           auf die minimalere Nachfolgermenge {C} zu kommen.
-         * wenn die Nachfolgermenge zu einem Constraint C kein anderes Constraint C2 enthaelt
-           das C als Nachfolger hat, dann kann man C durch seine Nachfolger ersetzen.
-           Die Nachfolger werden also neue Constraints, C faellt raus und wir registrieren
-             C |-> Nachfolger ==> C
-           als Grund dafuer in Output-Tabelle 
-
-    *)
 
 
-    (* exception CyclicDependencies *)
+   (* Constraint minimization problem statement:
+        we are searching for the "canonically minimal" subset of the *simp-rule-simplified*
+        initial constraints that implies the whole set of initial constraints.
+      "Canonically minimal": minimized cardinality, while keeping mutually dependent
+        constraints to ensure unique minimization choice.
+      If we would not keep mutually dependent contraints we would be sensitive to the
+      order in which we consider the constraints: e.g. the constraint set {C1, C2, C3}
+      with C1 <==> C2 /\ C3 would then be simplified by removing C1 to {C2, C3}.
+     
+      We therefore try to find the directed simp subhypergraph to C0 that only uses hyperedges
+      from simp rule apps. Simp cycle are not considered a fatal error due to rare speculative
+      simp CHRs that do not always result in simpler contraints but e.g. reuse existing constraints
+      that may simplify to the input constraints therefore leading to a cycle.
+        When no direct simp hyperedges to the fringe exist anymore, we opportunistically
+      adjoin propagation or (simp-fringe seperated) simp hyperedges with equal priority,
+      stopping right before adding cycles and considering the constraints right before the cycle
+      as elementary dependencies.
+      Use breadth-first search for this part of the search and try to find smallest
+      maximally-simple cycle-free fringe?  *) 
 
-    (* returns (constraints that C0 depends on, proof of C0 based on assumed dependencies)
-       if a constraint is not simplified according to the constraint graph, it has a self-dependency;
-       when discovering cycles we locally give up and share dependency results *)
+    exception CyclicDependencies
+    datatype dep_calc_param = OnlySimpDeps | ArbitraryDepsBoundedBy of term list
+    datatype dep_calc_res_ty = CycleAvoided | NoCycleSeen
+
     (* NB: since we only insert normed constraint entries into walked, calced, deps
        and since there are no instantiations while calc_dependencies runs,
        we can use aconv instead of aconv_norm for their comparison. *)
-    fun calc_dependencies_aux ctxt constraint_graph walked C0 calced =
+    fun triv_dep C = ([C], assumption_prf C)
+
+    (* returns ((constraints that C0 depends on, proof of C0 based on assumed dependencies),
+         whether cycles were avoided to construct the proof)
+       If a constraint is not acyclically implied according to the constraint graph, it gets a self-dependency.
+       We avoid cycles by regarding constraints right before walking the cycle as dependencies of the derivation.
+       When merging hyperedges joining towards a constraint we prioritize on derivations that
+       did not have to avoid cycles. *)
+    (* TODO(opt): use var_exact_net for calced *)
+    (* NB: sharing calc across intermediate dependency calculations leads to wrong result in general,
+       because walked trace differs leading to different cycle detections *)
+    fun calc_dependencies_aux ctxt constraint_graph param walked first_step C0 calced =
       let
         val norm = norm_with_env_in_run_state ctxt 
         val eq_C = aconv_norm norm
         val C = norm C0
         val C_eta = C |> Envir.eta_contract
-        fun triv_dep C2 = ([C2], assumption_prf C2)
       in
-        if exists (fn C' => aconv (C', C)) walked then
-          let val _ = tracing ("calc_dependencies: discovered cycle among constraints "
-            ^commas (cons C walked |> map (str_of_normed_term ctxt)))
-          in (*raise CyclicDependencies*) (triv_dep C, calced) end
+        if exists (fn (C', _) => aconv (C', C)) walked then
+          let val _ = tracing ("calc_dependencies: discovered cycle among constraints\n"
+            ^cat_lines (("  "^str_of_normed_term ctxt C)
+              :: (walked |> map (fn (C2, prf) =>
+               "  "^str_of_normed_term ctxt C2^"   <==  "^commas(assm_disch_prf ctxt prf
+                 |> prop_of_proofp |> Logic.strip_imp_prems |> map (str_of_normed_term ctxt))))))
+          in raise CyclicDependencies end
         else
           case filter (fn (C', _) => aconv (C', C)) calced of
             (_, res) :: _ => (res, calced)
           | [] =>
               let
-               (* TODO(correctness): Constraints koennen durch unification waehrend der Propagierung
-                    zusammenfallen.
-                      Deshalb beruecksichtigen wir bei der Dependency-Berechnung nicht nur den ersten,
-                    sondern auch die weiteren matchenden Eintraege im constraint Netz, bis wir einen
-                    Eintrag mit Vereinfachungsbeweis zum Constraint finden.
-                    Durch forced_reconsideration Registrierung nach Instantiierung von Constraints 
-                    sollte das aber jetzt nicht mehr noetig sein, aber auch nicht schaden. *)
-                val implied_by_opt =
+                val imp_by_prfs =
                   case Net.match_term constraint_graph C_eta
                     |> filter (fn (C', _) => eq_C (C', C))
                   of
                     [] => err_with_trace ctxt ("internal error when calculating dependencies: constraint "
                       ^str_of_normed_term ctxt C^" was not found in constraint graph")
-                  | C'_and_implied_by_opts => C'_and_implied_by_opts |> map_filter snd |> try hd
+                  | C'_and_implied_byss => 
+                      (* NB: we rely on the fact that the net for the constraint_graph is env normalized here *)
+                      C'_and_implied_byss |> try (hd #> snd) |> these
+                      |> filter (case param of
+                             ArbitraryDepsBoundedBy _ => (K true)
+                           | OnlySimpDeps => (fn (_, src_chr_ty) => src_chr_ty = SimpCHR))
+                      |> map fst
 
-                val (res, calced2) =
-                  case implied_by_opt of
-                    NONE => (triv_dep C, calced)
-                  | SOME implied_by_prf =>
-                     let
-                       val walked2 = cons C walked
-                       val Cs = Logic.strip_imp_prems (prop_of_proofp implied_by_prf)
-                       val (Cs_ress, calced2) = calced
-                         |> fold_map (calc_dependencies_aux ctxt constraint_graph walked2) Cs
-                       val deps = [] |> fold (union (op aconv)) (map fst Cs_ress)
-                       val prf = implied_by_prf |> fold (mp_rev_prf ctxt o snd) Cs_ress
-                     in
-                       ((deps, prf), calced2)
-                     end
+                fun try_imp imp_by_prf calced_ = 
+                  let
+                    val walked2 = cons (C, imp_by_prf) walked
+                    val Cs = Logic.strip_imp_prems (prop_of_proofp imp_by_prf)
+                    val (sub_ress, calced_2) = calced_
+                      |> fold_map (calc_dependencies_aux ctxt constraint_graph param walked2 false) Cs
+                    val res_ty =
+                      if exists (fn (_, sub_res_ty) => sub_res_ty = CycleAvoided) sub_ress then
+                        CycleAvoided
+                      else
+                        NoCycleSeen
+                    val deps = [] |> fold (fn ((sub_deps, _), _) => union (op aconv) sub_deps) sub_ress
+                    val prf = imp_by_prf |> fold (fn ((_, sub_prf), _) => mp_rev_prf ctxt sub_prf) sub_ress
+                  in
+                    (((deps, prf), res_ty), calced_2)
+                  end
 
-                 val calced3 = cons (C, res) calced2
+                fun standard_res () =
+                  let
+                    val (alt_ress, calced2) = calced |> fold_map (fn imp_prf => fn calced_ =>
+                        try_imp imp_prf calced_
+                        handle CyclicDependencies => ((triv_dep C, CycleAvoided), calced_)) 
+                      imp_by_prfs
+                    val alt_ress2 = alt_ress |> filter (fn (_, alt_res_ty) => alt_res_ty = NoCycleSeen)
+                    val (cycavoid_filt_alt_depss_and_prfs, res_ty) = 
+                      if null alt_ress then
+                        ([], NoCycleSeen)
+                      else if null alt_ress2 then
+                        (map fst alt_ress, CycleAvoided)
+                      else
+                        (map fst alt_ress2, NoCycleSeen)
+
+                    (* NB: we are conservative here including all possible deps so that mutual dependency check
+                       fails as soon as there is a possible interference *)
+                    val some_prf_opt = cycavoid_filt_alt_depss_and_prfs |> try (hd #> snd)
+                    val poss_deps = [] |> fold (union (op aconv) o fst) cycavoid_filt_alt_depss_and_prfs
+                  in
+                    case some_prf_opt of
+                      NONE => ((triv_dep C, res_ty), calced2)
+                    | SOME some_prf => (((poss_deps, some_prf), res_ty), calced2)
+                  end
+
+                val (res, calced2) = case param of
+                    ArbitraryDepsBoundedBy bound_Cs =>
+                      if not first_step andalso member eq_C bound_Cs C then
+                        ((triv_dep C, NoCycleSeen), calced)
+                      else
+                        standard_res ()
+                  | OnlySimpDeps => standard_res ()
+                val calced3 = cons (C, res) calced2
               in
                 (res, calced3)
               end
       end
-    fun calc_dependencies ctxt constraint_graph C0 =
-      calc_dependencies_aux ctxt constraint_graph [] C0 []
+
+    fun calc_dependencies ctxt constraint_graph param C0 =
+      let val (((deps, prf), res_ty), calced) =
+        calc_dependencies_aux ctxt constraint_graph param [] true C0 []
+      in (deps, prf) end
 
 
     fun reconsider_instantiated_constraints reason_trace (constraint_graph, ctxt) =
@@ -4014,6 +4031,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                
             fun lookup head =
               let
+                (* NB: we rely on the fact that the net for the constraint_graph is always env normalized here *)
                 (* NB: not Net.match_term, because the matching direction is reversed *)
                 (* TODO(minor opt): if exact_match_chr we could use Net.match_term. But this alone
                     does not help much in the case of univlvl constraint lookup since variables
@@ -4072,7 +4090,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                         val orig_term_pretty = norm_with_env_in_run_state ctxt00 #> Syntax.pretty_term ctxt00
                         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt_)
                         fun add_deps_for Cs deps0 = deps0 |> fold (fn C =>
-                            let val ((deps_, _), _) = calc_dependencies ctxt_ constraint_graph C
+                            let val (deps_, _) = calc_dependencies ctxt_ constraint_graph (ArbitraryDepsBoundedBy []) C
                             in union eq_C deps_ end)
                           Cs
                         val (deps, orig_deps, insts) = (add_deps_for cs_for_heads [], [], [])
@@ -4114,6 +4132,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
 
                     (* TODO(opt?): keep Net.content cached in a dedicated constraint graph data structure *)
+                    (* NB: we rely on the fact that the net for the constraint_graph is always env normalized here *)
                     val ctxt4_ = ctxt4 |> Context.proof_map (
                       map_constraints_in_run_state (K (Net.content constraint_graph 
                         |> map (fn (C, _) => (C, ConstraintTrace [], ActiveConstraint))))
@@ -4204,7 +4223,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                       (constraint_graph2, ctxt7)
                       |> reg_constraints false (SOME rl_prop)
                            (concls_prfs |> filter_out (fn (C, _) => C aconv (Data.mk_Trueprop Data.True))
-                            |> map (apsnd SOME))
+                            |> map (fn (C, imp_prf) => (C, SOME (imp_prf, PropagationCHR))))
                       (* TODO(feature): allow dynamic constraint generation in propagation rules:
                            append to concls_prfs:   ...  @ (map (rpair NONE) new_dynamic_constraints) *)
                       |> SOME
@@ -4213,7 +4232,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                       |> reg_constraints false (SOME rl_prop)
                              (* NB: since the concl_prfs always already exists in the constraint graph,
                                 this just ensures a proof for them is registered *)
-                           (map (apsnd SOME) concls_prfs 
+                           (map (fn (C, imp_prf) => (C, SOME (imp_prf, SimpCHR))) concls_prfs 
                             @ map (rpair NONE) new_constraints)
                       |> SOME
                   end
@@ -4260,23 +4279,23 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         (* TODO(opt!!): using varexact_net for constraint_graph will save a lot of
             O(n) matching in case of univlvl constraints, because net filtering is not very effective
             in that case *)
-        val existing_C_entries = Net.match_term constraint_graph C_eta
+        val ex_C_entries = Net.match_term constraint_graph C_eta
           |> filter (fn (C', _) => eq_C (C', C))
-        val exists_already = not (null existing_C_entries)
-        val implied_by_already_opt = existing_C_entries |> map_filter snd |> try hd 
+        val exists_already = not (null ex_C_entries)
+        val implied_by_alreadys = ex_C_entries |> map snd
 
         (* val _ = tracing ("registering constaint  "^str_of_normed_term ctxt C
           ^(case implied_by_opt of
              SOME implied_by => "\n implied by "^str_of_normed_term ctxt (prop_of_proofp implied_by)
            | NONE => "\n  implied by nothing")
-          ^"\nexisting_C_entries are:\n"
-          ^cat_lines (existing_C_entries |> map (fn (C', implied_by_opt_) =>
+          ^"\nex_C_entries are:\n"
+          ^cat_lines (ex_C_entries |> map (fn (C', implied_by_opt_) =>
             "  * "^str_of_normed_term ctxt C'
             ^(case implied_by_opt_ of
                 SOME implied_by_ => " implied by "^str_of_normed_term ctxt (prop_of_proofp implied_by_)
              | NONE => "")))) *)
         (* val _ =
-          if length existing_C_entries <= 1 orelse force_reconsideration then ()
+          if length ex_C_entries <= 1 orelse force_reconsideration then ()
           else
             error ("reg_constraint: registration of non-instantiated constraint "
               ^str_of_normed_term ctxt C^" and more than one existing constraint graph entry") *)
@@ -4289,23 +4308,23 @@ and chr_constraint_simplification allow_propagation ctxt00 =
           (*^"\n  constraint graph contains\n "
           ^commas (Net.content constraint_graph |> map (fst #> Syntax.string_of_term ctxt))*)
 
-        fun overwrite_C_entry_with implied_by_opt_ =
+        fun overwrite_C_entries_with implied_by_opts_ =
           let val _ = () (* tracing ("overwriting entry for constraint "^str_of_normed_term ctxt C
             ^(case implied_by_opt_ of
                SOME implied_by_ => " with implied-by proof "
                  ^str_of_normed_term ctxt (prop_of_proofp implied_by_)
              | NONE => " without implied-by proof")) *)
           in
-          constraint_graph
-          |> fold (fn (C', _) =>
-               (* NB: deletion from net expects precise term, not an instantiation of it,
-                    so we cannot use C_eta for this.
-                  We use deletion that is tolerant of non-existing C' because there can be serveral
-                  distinct C' with the same key-approximation, which are now identified with C and are
-                  thus all pruned by the first such net deletion *)
-               Net.delete_term_safe (apsnd fst #> eq_C) (Envir.eta_contract C', C'))
-             existing_C_entries
-          |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt_))
+            constraint_graph
+            |> fold (fn (C', _) =>
+                   (* NB: deletion from net expects precise term, not an instantiation of it,
+                        so we cannot use C_eta for this.
+                      We use deletion that is tolerant of non-existing C' because there can be serveral
+                      distinct C' with the same key-approximation, which are now identified with C and are
+                      thus all pruned by the first such net deletion *)
+                   Net.delete_term_safe (apsnd fst #> eq_C) (Envir.eta_contract C', C'))
+                 ex_C_entries
+            |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opts_))
           end
 
           (* NB: we avoid cluttering the constraint graph with trivially cyclic implied_by entries.
@@ -4314,21 +4333,35 @@ and chr_constraint_simplification allow_propagation ctxt00 =
             t <: A ==> t <: A entries from previous reflexive typing constraint
             merge rule application.
             Note that these entries can become cyclic later because of instantiations
-            due to subsequent unifications. We clear them out in this case
-            (implied_by_already_opt' = NONE). *)
-        fun nonify_trivially_cyclic_implied_by_opt implied_by_opt_ = 
-          case implied_by_opt_ of
-            NONE => NONE
-          | SOME implied_by_ =>
-              let val (assms, concl) = Logic.strip_horn (prop_of_proofp implied_by_)
-              in
-                if member (aconv_norm (norm_with_env_in_run_state ctxt )) assms concl then
-                  NONE
-                else
-                  SOME implied_by_
-              end
-        val (implied_by_opt', implied_by_already_opt') = (implied_by_opt, implied_by_already_opt)
-          |> pairself nonify_trivially_cyclic_implied_by_opt 
+            due to subsequent unifications. We clear them out then. *)
+        fun triv_cyclic_imp (imp_prf, _) = 
+          let val (assms, concl) = prop_of_proofp imp_prf 
+            |> norm_with_env_in_run_state ctxt |> Logic.strip_horn 
+          in member (op aconv) assms concl end
+        val implied_by_opt' = case implied_by_opt of 
+            SOME implied_by => if triv_cyclic_imp implied_by then NONE else SOME implied_by
+          | NONE => NONE
+
+        (* NB: equality of conclusion is assumed *)
+        fun subsumes (imp_prf1, src_chr_ty1) (imp_prf2, src_chr_ty2) =
+          let val prems_of = prop_of_proofp #> norm_with_env_in_run_state ctxt
+            #> Logic.strip_imp_prems
+          in
+            src_chr_ty1 = src_chr_ty2
+            andalso subset (op aconv) (prems_of imp_prf1, prems_of imp_prf2)
+          end
+        fun subsuming_merge_cons imp imps =
+          if exists (fn imp2 => subsumes imp2 imp) imps then imps
+          else imps |> filter_out (fn imp2 => subsumes imp imp2) |> cons imp
+        fun subsuming_merge imps1 imps2 = imps2 |> fold subsuming_merge_cons imps1
+
+          (* NB: in the current implementation we have to cater for the situation in which the net
+             for the constraint_graph is not env normalized yet, right after
+             reconsider_instantiated_constraints, i.e. with force_reconsideration = true *)
+          (* TODO(refactor): only we switch to var_exact_net for constraint_graph, we do not need to
+             cater for non-env-normalized situation with merge of implied_by lists *)
+        val ex_imps' = [] |> fold subsuming_merge implied_by_alreadys
+          |> filter_out triv_cyclic_imp
 
         val constraint_graph' =
           if force_reconsideration then
@@ -4338,18 +4371,25 @@ and chr_constraint_simplification allow_propagation ctxt00 =
               error "reg_constraint: internal error: force_reconsideration and not exists_already"
             else
               (* to keep C normalized in net and to achieve absorption after instantiation. *)
-              overwrite_C_entry_with implied_by_already_opt')
+              overwrite_C_entries_with ex_imps')
           else if exists_already then
-            case implied_by_already_opt' of
-              SOME _ =>
-                (* FIXME: if implied_by_opt' = SOME, register it as an *alternative*
-                   implied-by-proof, so that calc_dependencies has the choice of backtracking in
-                   case non-trivial cycles are encountered. This enables more constraint simplifications.
-                   Greedy pruning of choices if all current combinations lead to cycles seems like a bad idea? *)
+            (* NB: if implied_by_opt' = SOME, we register it as an *alternative*
+               implied-by-proof, so that calc_dependencies has alternative path choices in
+               case non-trivial cycles are encountered. This enables more constraint simplifications. *)
+            (* TODO(opt): norm propositions of proof_packs as preprocessing? *)
+            let
+              val new_imps = case implied_by_opt' of
+                  SOME implied_by_ => subsuming_merge_cons implied_by_ ex_imps'
+                | NONE => ex_imps'
+            in
+              (* NB: length implied_by_alreadys = 1 because force_reconsideration = false *)
+              if length ex_imps' = length (hd implied_by_alreadys) andalso length new_imps = length ex_imps' then
                 constraint_graph
-            | NONE => overwrite_C_entry_with implied_by_opt'
+              else
+                overwrite_C_entries_with new_imps
+            end
           else
-            constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opt'))
+            constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, the_list implied_by_opt'))
       in
         (((C0, C_eta), exists_already), (constraint_graph', ctxt))
       end
@@ -4376,10 +4416,10 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         val pot_propag_rls = pot_propag_and_simp_rls |> filter is_propag_chr
         val pot_simp_rls = pot_propag_and_simp_rls |> filter_out is_propag_chr
 
-        val _ = tracing ("pot_simp_rls for "
+        (* val _ = tracing ("pot_simp_rls for "
           ^(if force_reconsideration then "reconsidered" else "new")^" constraint "
           ^str_of_normed_term ctxt C0^" are (NoReEval ones filtered out)\n"
-          ^cat_lines (pot_simp_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt)))
+          ^cat_lines (pot_simp_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt))) *)
         (*val _ = tracing ("pot_propag_rls for new or reconsidered constraint "
           ^ Syntax.string_of_term ctxt C ^" are\n"
           ^cat_lines (pot_propag_rls |> map (fst #> fst #> fst #> Display.string_of_thm ctxt)))*)
@@ -4400,6 +4440,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
     and apply_simproc (serial, (exact_simpth_match, simproc)) (constraint_graph_, ctxt_) =
       let
+        (* NB: we rely on the fact that the net for the constraint_graph_ is always env normalized here *)
         (* TODO(opt): expensive. constraint simproc should provide pattern(s) for the
         constraints it finds interesting *)
         val Cs = constraint_graph_ |> Net.content |> map fst
@@ -4427,7 +4468,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
 
      (* constraint store with tracking which other constraints optionally imply this constraint *)
-    val constraint_graph0 = Net.empty : (term * proof_pack option) Net.net
+    val constraint_graph0 = Net.empty : (term * (proof_pack * constraint_rule_ty) list) Net.net
     val (constraint_graph', ctxt') = (constraint_graph0, ctxt00)
       |> reg_constraints false NONE (constraints0_ext_impliedby_with_traces |> map fst)
       |> fold apply_simproc constraint_simprocs
@@ -4445,57 +4486,138 @@ and chr_constraint_simplification allow_propagation ctxt00 =
           ^commas (envdiff |> map (fn (ixn, (T, t)) =>
              Syntax.string_of_term ctxt' (Var(ixn,T)) ^ " := "
              ^ str_of_normed_term ctxt' t)))
+        fun src_chr_ty_str SimpCHR = "SimpCHR"
+          | src_chr_ty_str PropagationCHR = "PropagationCHR"
         val _ = tracing ("resulting constraint graph is:\n"
           ^cat_lines (Net.content constraint_graph'
-            |> map (fn (C, implied_by_opt) =>
+            |> map (fn (C, implied_bys) =>
                  "  "^str_of_normed_term ctxt' C ^"  implied by  "
-                 ^(case implied_by_opt of
-                    NONE => "nothing"
-                  | SOME prf => str_of_normed_term ctxt' (prop_of_proofp prf)))))
+                 ^(if null implied_bys then "nothing"
+                  else
+                    commas (implied_bys |> map (fn (imp_prf, src_chr_ty) =>
+                      str_of_normed_term ctxt' (prop_of_proofp imp_prf)
+                      ^"  [from "^src_chr_ty_str src_chr_ty^"]"))))))
+        val rawstr_of_normed_term =
+          Print_Mode.setmp [Pretty.symbolicN]
+            (norm_with_env_in_run_state ctxt' #> Syntax.pretty_term ctxt' #> Pretty.str_of)
+        (* looks ok with graphviz dot renderer *)
+        (* TODO: try neato where edges leading to hyperedge node have higher weight and/or smaller length than those
+           leading out of the hyperedge node; paint hyperedges from SimpCHR applications thicker *)
+        val _ = tracing ("graphviz:\n"
+          ^"digraph ConstraintGraph {"
+          ^"\n  node [shape=ellipse]; "^(Net.content constraint_graph'
+            |> map (fn (C, _) => quote (rawstr_of_normed_term C)) |> space_implode "; ")
+          ^";\n  node [shape=box,height=0.1,width=0.1]; "^(Net.content constraint_graph'
+            |> maps (fn (_, implied_bys) => implied_bys |> map (fn (prf, src_chr_ty) =>
+                 quote (rawstr_of_normed_term (prop_of_proofp prf))
+                 ^"[label="^quote ""(*quote (src_chr_ty_str src_chr_ty)*)^"]")) |> space_implode "; ")
+          ^";\n"^cat_lines (Net.content constraint_graph' |> maps (fn (C, implied_bys) => implied_bys |> map (fn (prf, _) =>
+              let val prf_str = quote (rawstr_of_normed_term (prop_of_proofp prf))
+              in
+                "  "^prf_str^" -> "^quote (rawstr_of_normed_term C)^";\n"
+                ^cat_lines (Logic.strip_imp_prems (prop_of_proofp prf) |> map (fn prem =>
+                   "  "^quote (rawstr_of_normed_term prem)^" -> "^prf_str^";"))
+              end)))
+         ^"\n}")
       in () end
 
 
-    val constraints0_nodups = constraints0 |> distinct eq_C
+    (* TODO(minor opt): because this is normed and deps from calc_dependencies are normed,
+       many uses of eq_C below can be replaced by (op aconv) *)
+    val constraints0_nodups_normed = constraints0
+      |> map (norm_with_env_in_run_state ctxt') |> distinct (op aconv)
 
-    val constraints0_deps = constraints0_nodups |> map (fn C =>
-      let
-        val ((deps, prf), calced) = calc_dependencies ctxt' constraint_graph' C
-        (* val _ = tracing ("constraint "^str_of_normed_term ctxt' C^" has dependencies "
-          ^commas (deps |> map (str_of_normed_term ctxt'))) *)
-        val used = calced |> map fst
-      in (C, (deps, prf, used)) end)
-
-    val implied_constraints = constraints0_deps |> map_filter (fn (C, (deps, prf, used)) =>
-      if member eq_C deps C
-      then (* C is not implied by other constraints *)
+    val constraints0_simping  = constraints0_nodups_normed |> map (fn C => 
         let
-          val _ =
-            if length used > 1 then
-              tracing ("constraint "^str_of_normed_term ctxt' C
-                ^" has self-cyclic dependencies: "
-                ^commas (used |> map (str_of_normed_term ctxt')))
-            else 
-              ()
-        in NONE end
-      else if constraints0_deps |> exists (fn (C', (_, _, used')) =>
-          not (eq_C (C, C')) andalso member eq_C used' C andalso member eq_C used C')
-      then
-        (* mutually dependent *original* constraints C, C' are both retained,
-           even if they have both been simplified further
-           (i.e. they are both not terminal in the constraint graph) *)
-        NONE
-      else
-        SOME (C, (deps, prf)))
+          val (deps, simp_prf) = calc_dependencies ctxt' constraint_graph' OnlySimpDeps C
+          (* NB: we want actual assumptions of simplification derivation for C as simp_deps,
+             not the accumulative deps from all possible simplification derivations for C *)
+          val simp_deps = assms_of_proofp simp_prf
+        in
+          if member eq_C deps C then (C, ([C], simp_prf))
+          else (C, (simp_deps, simp_prf))
+        end)
+    (* we ensure that the simplification of original constraints that has been found is used in
+       stage2 if it walks over the original constraints *)
+    val constraint_graph'_simping_bridged = constraint_graph'
+      |> fold (fn (C, (simp_deps, simp_prf)) =>
+             let val C_eta = Envir.eta_contract C
+             in
+               if member eq_C simp_deps C then I
+               else
+                 (* NB: we rely on the fact that the net for the constraint_graph' is always env normalized here *)
+                 Net.delete_term_safe (apsnd fst #> eq_C) (C_eta, C)
+                 #> Net.insert_term (pairself fst #> eq_C) (C_eta,
+                      (C, [(assm_disch_prf ctxt' simp_prf, SimpCHR)]))
+             end)
+           constraints0_simping
+    val stage2_bounds = [] |> fold (fn (_, (simp_deps, _)) => union eq_C simp_deps) constraints0_simping 
 
-    val constraints' = constraints0_nodups |> subtract eq_C (map fst implied_constraints)
-      |> fold (union eq_C) (map (fn (_, (deps, _)) => deps) implied_constraints)
+    val _ = tracing ("stage2_bounds: "^commas (stage2_bounds |> map (str_of_normed_term ctxt')))
+    val _ = tracing ("constraint simping:\n"
+      ^cat_lines (constraints0_simping |> map (fn (C, (simp_deps, _)) =>
+         "  "^str_of_normed_term ctxt' C^"  <=simp=  "^commas (map (str_of_normed_term ctxt') simp_deps))))
+
+    val constraints0_deps = constraints0_simping |> map (fn (C, (simp_deps, simp_prf)) =>
+        let
+          val disch_simp_prf = assm_disch_prf ctxt' simp_prf
+          val walked0 = if member eq_C simp_deps C then [] else [(C, disch_simp_prf)]
+          val simp_deps_deps = simp_deps |> map (fn C2 =>
+            let
+              (* NB: we avoid indirect cycles into C which was simped to C2 previously *)
+              val (((deps2, prf2), _), _) = calc_dependencies_aux ctxt' constraint_graph'_simping_bridged
+                (ArbitraryDepsBoundedBy stage2_bounds) walked0 true C2 []
+              (* val _ = tracing ("constraint "^str_of_normed_term ctxt' C^" has dependencies "
+                ^commas (deps |> map (str_of_normed_term ctxt'))) *)
+            in (C2, (deps2, prf2)) end)
+          val prf = disch_simp_prf
+            |> fold (fn (_, (_, prf2)) => mp_rev_prf ctxt' prf2) simp_deps_deps
+        in
+          (C, (simp_deps, simp_prf), (simp_deps_deps, prf))
+        end)
+
+    val _ = tracing ("constraint0_deps:"
+      ^cat_lines (constraints0_deps |> map (fn (C, (simp_deps, _), (simp_deps_deps, _)) =>
+         let val rel_simp_deps_deps = simp_deps_deps |> filter_out (fn (C2, (deps2, _)) => member eq_C deps2 C2)
+         in
+           "\n  "^str_of_normed_term ctxt' C^"  <=simp=  "^commas (map (str_of_normed_term ctxt') simp_deps)
+           ^(if null rel_simp_deps_deps then ""
+             else
+               "\n"^cat_lines (rel_simp_deps_deps |> map (fn (C2, (deps2, _)) =>
+                 "      "^str_of_normed_term ctxt' C2^"  <==  "^commas (map (str_of_normed_term ctxt') deps2))))
+         end)))
+
+    (* FIXME: cater for situation in which a constraint depends on a initial constaint that has been simplified,
+       but cannot chain into its simplification because this would lead to a cycle *)
+    val implied_constraints = constraints0_deps |> map_filter (fn (C, (simp_deps, simp_prf), (simp_deps_deps, prf)) =>
+      let
+        val all_simp_deps_deps_implied = simp_deps_deps |> forall (fn (C2, (deps2, prf2)) =>
+          (* C2 is actually implied by other constraints *)
+          not (member eq_C deps2 C2)
+          (* (different) mutually dependent stage2 constraints C2, C2' are not regarded as implied *)
+          andalso constraints0_deps |> forall (fn (_, _, (simp_deps_deps', _)) =>
+            simp_deps_deps' |> forall (fn (C2', (deps2', _)) =>
+              eq_C (C2, C2') orelse not (member eq_C deps2' C2 andalso member eq_C deps2 C2'))))
+      in
+        if all_simp_deps_deps_implied then
+          let val imp_deps = [] |> fold (fn (_, (deps2, _)) => union eq_C deps2) simp_deps_deps
+          in SOME (C, (imp_deps, prf)) end
+        else if not (member eq_C simp_deps C) then
+          SOME (C, (simp_deps, simp_prf))
+        else
+          NONE
+      end)
+
+    val constraints' = constraints0_nodups_normed
+      |> subtract eq_C (map fst implied_constraints)
+      |> fold (fn (_, (imp_deps, _)) => union eq_C imp_deps) implied_constraints
       |> map (fn C => AList.lookup eq_C constraints0_ext_with_traces C
            |> the_default (ConstraintTrace []) |> pair C)
 
-    (* val _ = tracing ("constraints after chr: "
+    val _ = tracing ("constraints after chr: "
       ^commas (constraints' |> map (fst #> str_of_normed_term ctxt')))
     val _ = tracing ("implied constraints after chr: "
-      ^commas (implied_constraints |> map (fst #> str_of_normed_term ctxt'))) *)
+      ^commas (implied_constraints |> map (fst #> str_of_normed_term ctxt')))
 
     val implied_constraints_res = implied_constraints
       |> map (fn (C, (_, prf)) => (C, prf (* |> fold_rev (impI_prf ctxt') constraints' *)))
@@ -4591,14 +4713,14 @@ and metarec_constraint_simp_internal (C0, ConstraintTrace C0_trace) ctxt =
 
 and metarec_simp_instantiated_constraints ctxt =
     let
-      (* TODO(opt!!): faster determination of instantiated constraints via exact_net normalization.
+      (* TODO(opt!!): faster determination of instantiated constraints via var_exact_net normalization.
            If we can keep constraint list in cache, traversal should be quite fast.
            But in general the constraint modifications (e.g. in no-simp case below)
            based on aconv_norm comparisons are still too expensive! *)
 
       (* NB: we consider instantiated constraints simplified right away during metarec_constraint_simp,
          to avoid nontermination. If simplification of an instantiated constraint fails,
-         we consider it active again. Also normation of constraints is important here to avoid
+         we consider it active again. Also normalization of constraints is important here to avoid
          nontermination due to rediscovery of instantiatedness. *)
       val (constraints', inst_Cs) = [] |> fold_map (fn (C, tr, active) => fn inst_Cs =>
           let val C' = norm_with_env_in_run_state ctxt C
@@ -4636,6 +4758,7 @@ and metarec_simp_instantiated_constraints ctxt =
                      ctxt_2
                    end
                | NONE =>
+                   (* TODO(opt): quite slow? *)
                    ctxt_ |> Context.proof_map (map_constraints_in_run_state (
                      map (fn (C2, tr, active) =>
                        if aconv_norm (norm_with_env_in_run_state ctxt_) (C', C2) then
@@ -4672,13 +4795,13 @@ and metarec_constraint_simp prf ctxt =
            (get_simpd_constraints_in_run_state ctxt2)
       |> fold (fn (C, C_prf) => impI_prf ctxt3 C #> mp_rev_prf ctxt3 C_prf) implied_constraints
 
-    val _ = tracing ("active constraints before CHR simplification are "
+    val _ = tracing ("active constraints before CHR simplification are  "
       ^commas (get_active_constraints_in_run_state ctxt2 |> map (fst #> str_of_normed_term ctxt2))
-      ^"\nactive constraints after CHR simplification are "
+      ^"\nactive constraints after CHR simplification are  "
       ^commas (get_active_constraints_in_run_state ctxt3 |> map (fst #> str_of_normed_term ctxt3))
-      ^"\n  constraints' are "
+      ^"\nconstraints' are  "
       ^commas (constraints' |> map (fst #> str_of_normed_term ctxt3))
-      ^"\n  implied_constraints are\n"
+      ^"\nimplied_constraints are\n"
       ^cat_lines (implied_constraints |> map (fn (C, prf) =>
         "  "^str_of_normed_term ctxt3 C^"  impliedvia  "
           ^str_of_normed_term ctxt3 (prop_of_proofp (prf
@@ -5319,6 +5442,8 @@ and gen_add_rule local_rule check_groundness ctxt0 allow_rule_constraint_propag 
      not unification (which is not that bad because facts contain no variables,
      so this is non-pattern matching)
 *)
+(* TODO(refactor?): can we unify this with the code for constraint simplification
+     once it is also proof term based? *)
 and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head ctxt0 = 
   let
     fun do_pot_frule (frule_id, fact4head_opt) ctxt =
@@ -5487,6 +5612,7 @@ and gen_with_pot_frules local_run expl_frules_opt pot_frules_with_opt_fact4head 
                          else
                            let val brule' = Morphism.thm mor brule
                            in
+                             (* FIXME: eta contract conclusion of brule' for net insertion *)
                              map_gen_brule_concls (Net.insert_term Thm.eq_thm_prop (concl_wo_exactrule_cv brule', brule'))
                                (* NB: cannot use ctxt2 because declarations emit theory checkpoints
                                     which change the theory *)

@@ -136,7 +136,35 @@
         vermuten, goal neu aufsetzen (fuer moeglichst kleines non-termination bsp)
         und mit tabling und subgoal abstraction ausfuehren.
         * "Tabling": loggen welche Regeln schon auf welche Inputs angewandt
-          wurden um Zyklen zu finden
+          wurden um Zyklen zu finden. Waere auch allgemeinere (adaptive) Optimierung
+          als sharing-orientierte Skeleton-Lord-Optimization.
+            Um Tabling effizient durchfuehren zu koennen sind vermutlich Netze
+          notwendig die die Termindizierung lazy nur bis zur Indizierungs-Eindeutigkeit
+          in Symtabs ausrollen und auch unter lambdas indizieren.
+          Weiterhin ist die Indizierung in nicht-triv. Kontexten zu loesen,
+          ggf. ueber performantes lifting von Indizierungen in erweiterten Kontexten,
+          sonst fallen wir zur Selekton-Lord-Optimierung zurueck.
+          Unifvars in Termindizierungen muessen verfrischt behandelt werden
+          damit Instantiierungen von Unifvars nicht den Termindex unvorhersehbar
+          invalidieren? (bei Pientka im Wesentlichen so weil ueber existential Vars
+          abstrahiert wird)
+          (cf. Pientka's thesis:
+            (NB: Pientka nimmt bei der Beschr des Algorithmus implizit kanonische
+             Terme, d.h. beta-eta-long normal form, mit lowered existential vars.
+             Deshalb wird die Behandlung von Matching auf Abstraktionen im
+             Termindex viel einfacher weil kein near-eta-Redex im Term-Index
+             behandelt werden muss, was Larry dazu bewogen hat Abstraktionen
+             direkt als Wildcards anzusehen. Fuer uns ist on-the-fly
+             eta-expansion waehrend Indexmatching auch eine moegliche Loesung?)
+          tabling fuer Twelf ueber higher-order substitution tree index der
+          auf linearisierten Term-Indices arbeitet und deren Teilterme shared;
+          Pientka's "linearization", i.e. the factorization of unification
+          into a assignment of a linear clause head (all unifvar occurs only once
+          applied to all available bounds) with later solving of
+          residuated variable definitions seems, similiar to the filtering
+          process from discrimination net matching where unifvar are wildcards,
+          with the main difference being that net matching does not descend
+          into lambdas)
         * "Subgoal abstraction": subgoals die zu gross erscheinen werden
           abstrahiert, d.h. ab einer gewissen Tiefe (vermutlich am besten an
           Positionen wo Unifikationsvariablen einer Regel ansetzen wuerden) werden
@@ -889,6 +917,26 @@
      (ggf. unter Modifikation des Kontext, insbes Instantiierungen),
      die dann einmal ausgefuehrt wird
      (und entstehende Constraints werden normal hinzugefuegt)
+
+  * verallgemeinertes non-konfluentes bounded Narrowing zur Constraint-Vereinfachung
+    * Das bloede an Narrowing im Vgl zu CHRs ist das Narrowing nur funktioniert wenn mindestens
+      ein Constraint eine lokal-eindeutige Loesung hat (d.h. Loesung dieses Constraints ist eindeutig,
+      auch wenn man die anderen Constraints ausser Acht laesst).
+      Nicht-konfluentes nicht-terminierendes verallgemeinertes Narrowing,
+      also bounded, nicht-determ, mit Eindeutigkeitscheck und
+      mit mehrkoepfigen Propagierungsregeln (?) waere wohl das coolste.
+    * Nicht-Termination durch Laengen-Bound umgehen bis zu dem lokale Eindeutigkeit der
+      moeglichen Reduktionsfolgen klar sein muss
+    * Unfailing higher-order Knuth-Bendix, vllt sogar mit HO strukturellem matching statt
+      HO pattern matching, zur Bestimmung der elementaren Narrowing-Reduktionsregeln
+      (damit dann sogar gewoehnlicheres konfluentes Narrowing) die unter Kongruenzabschluss
+      statt nur Substitutionsabschluss angewandt werden sollen.
+      Ggf. sogar verallgemeinern auf metarec-conditional equivalence relations statt Gleichungen.
+    * Auch sinnvoll fuer allgemeine Unifikation statt nur Constraint-Vereinfachung?!?
+      Unifikations-Algorithmen funktionieren ja auch immer dann am schoensten wenn sich
+      kanonische Loesungssubstitution ergibt, also erscheint es sinnvoll aehnlich wie
+      bei der Nutzung von Narrowing bei lokal-eindeutiger Constraint-Vereinfachung vorzugehen.
+        Aber wie realisiert man Netze oder Substitution-Trees modulo Narrowing?
 
 
   * resolution modulo metarec

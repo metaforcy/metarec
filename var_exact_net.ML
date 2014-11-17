@@ -1,4 +1,9 @@
 
+(* Motivation: efficient rev_match_term in the face of common term shapes only differing in unifvars.
+   This cannot be realized by just fixing unifvars in index terms before net insertion and lookup,
+   because unifvars in index terms can become instantiated thus invalidating the indexing of the net
+   (which is just an approximation precision issue in normal nets where unifvars are approximated by wildcards).
+   Therefore we normalize the indexing. *)
 signature VAR_EXACT_NET =
 sig
   (* type key
@@ -42,13 +47,14 @@ end;
 
 structure VarExactNet : VAR_EXACT_NET = struct
 
-(* NB: exact nets are always understood wrt. a linearly-threadid EnvDiff.env
+(* NB: exact nets are always understood wrt. a linearly-threaded EnvDiff.env
    that contains the unprocessed instantiated unification variables in the diff_slot
    corresponding to the VarExactNet.net *)
 datatype 'a net = VarExactNet of {
   net: 'a Net.net,
   diff_slot_uid: string,
-  indices_with_unifvar: term Vartab.table }
+  indices_with_unifvar: term Vartab.table (* indices as they are used in net under fix_index_term trafo *)
+  }
 
 fun map_net f (VarExactNet {net, diff_slot_uid, indices_with_unifvar}) =
   VarExactNet {net = f net, diff_slot_uid = diff_slot_uid,
@@ -68,7 +74,7 @@ fun get_indices_with_unifvar (VarExactNet {net, diff_slot_uid, indices_with_unif
   indices_with_unifvar
 
 
-val empty = VarExactNet {
+fun empty () = VarExactNet {
   net = Net.empty,
   diff_slot_uid = "exact_net_"^string_of_int (serial ()),
   indices_with_unifvar: Vartab.empty }
@@ -83,7 +89,9 @@ fun normalize eq (enet, envdiff) =
     val inst_indices = [] |> fold (fn inst_var =>
         case Vartab.lookup (get_indices_with_unifvar enet) inst_var of
           SOME index_term =>
-            insert (eq_fst (op aconv)) (index_term, EnvDiff.norm_term envdiff index_term)
+            (* NB: eta contraction just to improve index approx, we keep exact correspondence with indices *)
+            insert (eq_fst (op aconv)) (index_term, EnvDiff.norm_term envdiff index_term
+              |> Envir.eta_contract)
         | NONE => I)
       inst_vars
     val enet' = enet
@@ -108,6 +116,7 @@ fun normalize eq (enet, envdiff) =
     (inst_indices, (enet', envdiff'))
   end
 
+(* NB: t not necessarily eta normal, but this is customary for better index approx *)
 fun insert_term eq (t, a) =
   let
     val t' = fix_index_term t
@@ -125,6 +134,9 @@ fun lookup_term eq t (enet, envdiff) =
     val as = Net.lookup (get_net enet) (Net.key_of_term t') 
   in (as, (enet', envdiff')) end
 
+(* NB: assumes t to be beta-eta normal *)
+(* Finds entries for indices that match against t. Normal net match operation
+   makes little sense for var_exact_nets, just use lookup_term. *)
 fun rev_match_term eq t (enet, envdiff) =
   let
     val (_, (enet', envdiff')) = normalize eq (enet, envdiff)
@@ -133,8 +145,31 @@ fun rev_match_term eq t (enet, envdiff) =
 
 val entries = Net.entries o get_net
 
-fun subtract eq enet1 enet2 = Net.subtract eq (get_net enet1) (get_net enet2)
-fun merge eq (enet1, enet2) = Net.merge eq (get_net enet1, get_net enet2)
+(* NB: assumes normalized enet inputs! *)
+fun subtract eq enet1 enet2 =
+  if get_diff_slot_uid enet1 <> get_diff_slot_uid enet2 then
+    error "var_exact_net subtract with different origins"
+  else
+    let val net' = Net.subtract eq (get_net net1) (get_net enet2)
+    in
+      enet2
+      |> map_net (K net')
+      |> map_indices_with_unifvar (Vartab.fold (fn (v, inst_t) =>
+           if null (Net.lookup net' (fix_index_term inst_t |> Net.key_of_term)) then
+             I
+           else
+             Vartab.update (v, inst_t)))
+    end
+
+(* NB: assumes normalized enet inputs! *)
+fun merge eq (enet1, enet2) =
+  if get_diff_slot_uid enet1 <> get_diff_slot_uid enet2 then
+    error "var_exact_net merge with different origins"
+  else
+    enet1
+    |> map_net (fn net1 => Net.merge eq (net1, get_net enet2))
+    |> map_indices_with_unifvar (fn indices_w_unifvar1 =>
+         Vartab.merge (op aconv) (indices_w_unifvar1, get_indices_with_unifvar enet2))
 
 val content = Net.content o get_net
 

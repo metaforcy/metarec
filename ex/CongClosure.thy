@@ -3,6 +3,15 @@ theory CongClosure
 imports "../HOLMetaRec"
 begin
 
+(* Congruence closure decision procedure implemented via
+   conglifting transitivity forward rule propagating equations 
+   and stratification of congruence closure derivations in
+   conglifting transivity chains from assumptions plus symmetry
+   and backwards-directed reasoning from goal with congruence and
+   reflexivity rules.
+     NB: because we allow beta-reductions, we already face non-termination
+   and this actually becomes a semi-decision procedure if we leave the
+   FO fragment. E.g. the case for  f = (% x. f (x + 1)) |- f x = f (x+1). *)
 
 definition
   find_occs ("_ <= _ under _") where
@@ -152,8 +161,10 @@ lemma [impl_frule]: "
   by (simp add: add_eqs_def)
 
 
+(* TODO(feature): Include quantified equations and employ user-defined unification in find_occs.
+   This leads to further possibilities of non-termination.  *)
 (* implements the schematic frule    [| a =cc= b &&& b' =cc= c ;  b <= b' under vec{f_n} |] ==>  vec{f_n a =cc= c} *)
-lemma trans_mod_cong[impl_frule]: "[|
+lemma conglift_trans[impl_frule]: "[|
    t1 =cc= t2  &&&  t2' =cc= t3  ;
    try( t2 <= t2' under eqs )  |]
   ==>  PROP add_eqs (eqs t1 t3)"
@@ -196,7 +207,7 @@ lemma cong4[MR]: "[|
 
 (* example
            x =cc= f y &&& g (g (f y)) =cc= z    f y <= g (g (f y)) under (% X. g (g X))
-       ---------------------------------------------------------------------------------- trans-mod-cong
+       ---------------------------------------------------------------------------------- conglif_trans
             g (g x) =cc= z
         -------------------------- sym
              z =cc= g (g x)

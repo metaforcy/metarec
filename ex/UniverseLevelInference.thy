@@ -2137,16 +2137,81 @@ lemma [constraint_simp_rule]: "universe_inconsistency(0) ==> i u< i"
   by (simp add: universe_inconsistency_def)+
 
   (* NB: no try around unify. corresponds to CHR  (i <= j , j <= i) == (i = j) *)
+  (* TODO(opt): we could make this rule no_re_eval_on_head_reconsideration *)
 lemma [constraint_simp_rule]: "[| primunify i j  ;  constraint (i <: univlvl)  ;  constraint (j <: univlvl)  |] ==>
   (i u<= j &&& j u<= i)"
   unfolding univ_less_def univ_leq_def univlvl_def
   apply (rule Pure.conjunctionI)
   by (simp add: primunify_const_def constraint_const_def constraint_typing_def)+
 
- (* actually a specialization of the rule above for j := i *)
+  (* FIXME: actually a specialization of the rule above for j := i,
+     so should be unecessary, in particular because only first matching simp CHR
+     is executed on a constraint combination? *)
+  (* TODO(opt): we could make this rule no_re_eval_on_head_reconsideration *)
 lemma [constraint_simp_rule]: "constraint (i <: univlvl) ==> i u<= i"
   unfolding univ_less_def univ_leq_def univlvl_def
   by (simp add: constraint_const_def constraint_typing_def)
+
+
+
+
+
+ML {*
+  fun test_chr_simp ctxt0 Cs =
+    let
+      val ctxt0 = ctxt0 |> fold Variable.declare_term Cs
+        |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
+      val ctxt = ctxt0
+        |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
+        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K (Cs
+             |> map (fn C => (C, MetaRec.ConstraintTrace [], MetaRec.ActiveConstraint)))))
+        |> MetaRec.put_concl_in_lin_ctxt @{prop "True"}
+      val ((Cs', implied_Cs), ctxt2) = MetaRec.chr_constraint_simplification true ctxt
+      val cert = cterm_of (Proof_Context.theory_of ctxt0)
+    in
+      (Cs' |> map (fst #> cert), map (fst #> cert) implied_Cs)
+    end
+*}
+
+ML {*
+  val res = test_chr_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_chr_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"}, @{prop "l <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
+  val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_chr_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_chr_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
+     @{prop "i u<= j"}, @{prop "j u< k"}, @{prop "i u< k"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+ML {*
+  val res = test_chr_simp @{context}
+    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"}, @{prop "l <: univlvl"},
+     @{prop "i u< j"}, @{prop "j u<= k"}, @{prop "k u< l"}, @{prop "i u< l"}]
+  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
+*}
+
+
+
+
+
 
 
 
@@ -2185,12 +2250,29 @@ lemma [constraint_simp_rule all_matches no_re_eval_on_head_reconsideration symme
     by auto
 
 
+(* NB: CHRs reduce problem to MR clauses, instead of employing CHR chaining,
+   for judgement <: which emits constraints for base cases *)
+lemma umax_univlvl_Cty[MR no_rule_constraint_propag(*, constraint_simp_rule*)]:
+    "i <: univlvl ==> j <: univlvl ==>
+  (i umax j) <: univlvl"
+  by (simp add: constraint_typing_def umax_univlvl_ty)
+lemma first_univlvl_Cty[MR no_rule_constraint_propag(*, constraint_simp_rule*)]:
+  "first_univlvl <: univlvl"
+  by (simp add: constraint_typing_def first_univlvl_ty)
+lemma usucc_univlvl_Cty[MR no_rule_constraint_propag(*, constraint_simp_rule*)]:
+    "i <: univlvl ==>
+  usucc(i) <: univlvl"
+  by (simp add: constraint_typing_def usucc_univlvl_ty)
+
+
 lemma uless_base: "i <: univlvl ==> i u< usucc(i)"
   by (simp add: univ_less_def univlvl_def constraint_typing_def usucc_def)
   (* NB: univlvl typing premises only necessary for uniformity *)
 lemma uless_umax1: "i u< i' ==> i' <: univlvl ==> j <: univlvl ==> i u< i' umax j"
   apply (simp add: univ_max_def univ_less_def max_def)
   apply (rule impI) by (rule Ordinal.lt_trans2)
+lemma uless_umax1_direct: "i <: univlvl ==> j <: univlvl ==> i u< usucc(i) umax j"
+  by (auto intro: uless_umax1 uless_base usucc_univlvl_Cty)
 lemma uless_umax2: "j u< j' ==> i <: univlvl ==> j' <: univlvl ==> j u< i umax j'"
   apply (simp add: univ_max_def univ_less_def max_def univlvl_def constraint_typing_def)
   apply (rule impI) apply (simp add: not_le_iff_lt) by (rule Ordinal.lt_trans)
@@ -2198,26 +2280,21 @@ lemma uless_umax2: "j u< j' ==> i <: univlvl ==> j' <: univlvl ==> j u< i umax j
 lemma uleq_base: "i <: univlvl ==> i u<= i"
   apply (simp add: constraint_typing_def)
   by (blast intro: uleq_refl univlvlDnat)
+lemma uleq_base_usucc: "i <: univlvl ==> i u<= usucc(i)"
+  by (simp add: univ_leq_def univlvl_def constraint_typing_def usucc_def)
   (* NB: univlvl typing premises only necessary for uniformity *)
 lemma uleq_umax1: "i u<= i' ==> i' <: univlvl ==> j <: univlvl ==> i u<= i' umax j"
   apply (simp add: univ_max_def univ_leq_def max_def)
   apply (rule impI) by (rule Ordinal.le_trans)
+lemma uleq_umax1_direct: "i <: univlvl ==> j <: univlvl ==> i u<= i umax j"
+  by (auto intro: uleq_umax1 uleq_base)
+lemma uleq_umax1_direct_usucc: "i <: univlvl ==> j <: univlvl ==> i u<= usucc(i) umax j"
+  by (auto intro: uleq_umax1 uleq_base_usucc usucc_univlvl_Cty)
 lemma uleq_umax2: "j u<= j' ==> i <: univlvl ==> j' <: univlvl ==> j u<= i umax j'"
   apply (simp add: univ_max_def univ_leq_def max_def univlvl_def constraint_typing_def)
   apply (rule impI) apply (simp add: not_le_iff_lt) by (rule leI, rule Ordinal.lt_trans1)
 
-(* NB: CHRs reduce problem to MR clauses for judgement <: which emits constraints for base cases *)
-lemma umax_univlvl_Cty[MR no_rule_constraint_propag, constraint_simp_rule]:
-    "i <: univlvl ==> j <: univlvl ==>
-  (i umax j) <: univlvl"
-  by (simp add: constraint_typing_def umax_univlvl_ty)
-lemma first_univlvl_Cty[MR no_rule_constraint_propag, constraint_simp_rule]:
-  "first_univlvl <: univlvl"
-  by (simp add: constraint_typing_def first_univlvl_ty)
-lemma usucc_univlvl_Cty[MR no_rule_constraint_propag, constraint_simp_rule]:
-    "i <: univlvl ==>
-  usucc(i) <: univlvl"
-  by (simp add: constraint_typing_def usucc_univlvl_ty)
+thm umax_sup umax_less_sup
 
 
 ML_file "hidden_univlvl_discharge.ML"
@@ -2229,8 +2306,9 @@ definition
   [MRjud 2 1]: "findinterm(i,j,i') == (i u< i' & i' u< j)"
 
 lemma [MR]: "[|
-    freshFOunifvar i'  ;  constraint (i u< i')  ;  constraint (i' u< j)  |] ==>
-  findinterm(i, j, i')"
+    freshFOunifvar intm_ul  ;  constraint (i u< intm_ul)  ;  constraint (intm_ul u< j)  ;
+    constraint (intm_ul <: univlvl) |] ==>
+  findinterm(i, j, intm_ul)"
   by (simp add: constraint_const_def findinterm_def)
 
 (* NB: we rely here on the transitivy propagation of constraints that happened before this findinterm
@@ -2245,21 +2323,21 @@ lemma [MR]: "
 definition
   "trace_outbound_univlvl_simp == 0"
 
-lemma [constraint_simp_rule]: "
+lemma uleq_umax_sup_simp[constraint_simp_rule]: "
     [|  tracing (trace_outbound_univlvl_simp)  ;
         constraint (i1 u<= j)  ;  constraint (i2 u<= j)  |] ==>
   i1 umax i2 u<= j"
   unfolding constraint_const_def
   by (rule umax_sup)
   
-lemma [constraint_simp_rule]: "
+lemma uless_umax_sup_simp[constraint_simp_rule]: "
     [|  tracing (trace_outbound_univlvl_simp)  ;
         constraint(i1 u< j)  ;  constraint (i2 u< j)  |] ==>
   i1 umax i2 u< j"
   unfolding constraint_const_def
   by (rule umax_less_sup)
 
-lemma [constraint_simp_rule]: "
+lemma uleq_usucc_lhs_simp[constraint_simp_rule]: "
     [| tracing (trace_outbound_univlvl_simp)  ;
        constraint (i u< j) |] ==>
   usucc(i) u<= j"
@@ -2267,7 +2345,9 @@ lemma [constraint_simp_rule]: "
   by (rule univ_less_is_usucc_leq)
 
 (* NB: reintroduces essential hidden universe level to avoid i+n algebraic universe level expressions *)
-lemma [constraint_simp_rule]: "
+(* NB: can lead to cycles just from simp CHR apps, because the found intermediate constraint does not have to be simpler
+   and might even be further simplified to the usucc(i) u< j we started from. *)
+lemma uless_usucc_lhs_simp[constraint_simp_rule]: "
     findinterm(i, j, i') ==>
   usucc(i) u< j"
   unfolding constraint_const_def findinterm_def
@@ -2457,7 +2537,6 @@ ML {*  elab @{context} @{term "<(g # x) abstractas y, y, g # x, y>"}  *}
 
 
 
-
 (* tests for terminal hidden universe level discharge *)
   (* i73 hidden and terminal *)
 ML {*  elab @{context} @{term "(PI x:A. PI y:B(x). C # x # y)"}  *}
@@ -2512,63 +2591,6 @@ ML {*  elab_with_expected_error "universe_inconsistency" @{context}
 ML {*  elab @{context} @{term "g # univ # (f # univ)"}  *}
 
 
-
-
-
-
-ML {*
-  fun test_chr_simp ctxt0 Cs =
-    let
-      val ctxt0 = ctxt0 |> fold Variable.declare_term Cs
-        |> Variable.add_fixes_direct ([] |> fold Term.add_free_names Cs)
-      val ctxt = ctxt0
-        |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
-        |> Context.proof_map (MetaRec.map_constraints_in_run_state (K (Cs
-             |> map (fn C => (C, MetaRec.ConstraintTrace [], MetaRec.ActiveConstraint)))))
-        |> MetaRec.put_concl_in_lin_ctxt @{prop "True"}
-      val ((Cs', implied_Cs), ctxt2) = MetaRec.chr_constraint_simplification true ctxt
-      val cert = cterm_of (Proof_Context.theory_of ctxt0)
-    in
-      (Cs' |> map (fst #> cert), map (fst #> cert) implied_Cs)
-    end
-*}
-
-(* minor FIXME: these tests omit the  i <: univlvl  constraints.
-    that should only make a difference regarding hidden univlvl discharge *)
-ML {*
-  val res = test_chr_simp @{context}
-    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
-     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u< k"}]
-  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
-*}
-
-ML {*
-  val res = test_chr_simp @{context}
-    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"}, @{prop "l <: univlvl"},
-     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "k u< l"}, @{prop "i u< l"}, @{prop "j u< l"}]
-  val _ = if length (snd res) = 2 then () else error "expected constraint simplification"
-*}
-
-ML {*
-  val res = test_chr_simp @{context}
-    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
-     @{prop "i u< j"}, @{prop "j u< k"}, @{prop "i u<= k"}]
-  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
-*}
-
-ML {*
-  val res = test_chr_simp @{context}
-    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"},
-     @{prop "i u<= j"}, @{prop "j u< k"}, @{prop "i u< k"}]
-  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
-*}
-
-ML {*
-  val res = test_chr_simp @{context}
-    [@{prop "i <: univlvl"}, @{prop "j <: univlvl"}, @{prop "k <: univlvl"}, @{prop "l <: univlvl"},
-     @{prop "i u< j"}, @{prop "j u<= k"}, @{prop "k u< l"}, @{prop "i u< l"}]
-  val _ = if length (snd res) = 1 then () else error "expected constraint simplification"
-*}
 
 
 
