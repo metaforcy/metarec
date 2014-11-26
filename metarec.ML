@@ -588,10 +588,12 @@ fun gen_decompose_judgement term_to_jud (judgements : judgements_type) string_of
 fun pack_jid_pobj_iobjs jid pobj iobjs =
   Term.list_comb (Free(jid, Term.dummyT), pobj :: iobjs)
 
+val fix_index_term = Term.map_aterms (fn Var((n, _), T) => Free(n, T) | t => t)
+
 (* NB: this is an approximative fixing that does not avoid name clashing, only used for net indexing *)
 fun exact_rule_lookup_idx jid pobj iobjs =
-  let val fix = Term.map_aterms (fn Var((n, _), T) => Free(n, T) | t => t)
-  in pack_jid_pobj_iobjs jid (fix pobj) (map fix iobjs) |> Envir.eta_contract end
+  pack_jid_pobj_iobjs jid (fix_index_term pobj) (map fix_index_term iobjs)
+  |> Envir.eta_contract
 
 (* NB: we index local rules under their conclusion in the *present* instantiation (which
    might be more partial than the instantiation in the current context, but in the only
@@ -1881,8 +1883,15 @@ fun prf_to_display_term ctxt prfp =
 
 
 
-(* TODO(opt): if we combine Thm-proofs, generate a new Thm-proof directly.
-   Convert assumption_prf with ground proposition prop to Thm-proof of Thm.assume prop directly. *)
+(* TODO(opt):
+   * Do *one* top-level proof-term eta-contraction step on proof in impI_prf
+   * If we combine Thm-proofs, generate a new Thm-proof directly.
+     But term-sharing of substitution is lost?
+   * Convert assumption_prf with ground proposition prop to Thm-proof of Thm.assume prop directly.
+   * Include explicit term substitutions in proof terms in order to share
+     subterms independent of externally maintained substitution?
+     This might be beneficial for sharing of term certification during proof replay,
+     but it might be faster and easier to just share all subterms there. *)
 
 fun genvar_on_run_state name T ctxt =
   let
@@ -2034,6 +2043,8 @@ fun allE_prf ctxt (ProofPack (prop, prf, assms)) t =
 fun allE_rev_prf ctxt t prf = allE_prf ctxt prf t
 
 
+
+(* NB: we make bound renaming explicit in proofs to help debugging *)
 fun bound_rename_prf ctxt renamed_prop (ProofPack (prop, prf, assms)) =
   let
     val norm = norm_with_env_in_run_state ctxt
@@ -2046,6 +2057,21 @@ fun bound_rename_prf ctxt renamed_prop (ProofPack (prop, prf, assms)) =
     ProofPack (renamed_prop, BoundRenaming(renamed_prop, prf), assms)
   end
 
+fun aconv_prf ctxt prop2 (prfp as ProofPack (prop, prf, assms)) =
+  let
+    val norm = norm_with_env_in_run_state ctxt
+    val _ =
+      if aconv_norm norm (prop2, prop) then ()
+      else err_with_trace ctxt ("internal error: aconv_prf failed: "
+        ^" prop2 "^Syntax.string_of_term ctxt (norm prop2)
+        ^" is not alpha-equal to "^Syntax.string_of_term ctxt (norm prop))
+  in
+    ProofPack (prop2, prf, assms)
+  end
+
+fun norm_prf ctxt (prfp as ProofPack (prop, prf, assms)) =
+  let val norm = norm_with_env_in_run_state ctxt
+  in ProofPack (norm prop, prf, map norm assms) end
 
 
 
@@ -2061,7 +2087,6 @@ fun fresh_proofp_of_rule (DirectRule th) ctxt = fresh_thm_prf th ctxt
       end
 fun proofp_of_exact_rule (DirectRule th) = unsafe_exact_thm_prf th
   | proofp_of_exact_rule (LocalRule proofp) = proofp
-
 
 
 
@@ -2156,6 +2181,12 @@ fun fun_cong_prf prf t ctxt =
 
 fun assm_disch_prf ctxt prf = prf |> fold_rev (impI_prf ctxt) (assms_of_proofp prf)
 
+fun assume_prems_prf ctxt prf =
+  let
+    val prems = prf |> prop_of_proofp |> norm_with_env_in_run_state ctxt |> Logic.strip_imp_prems 
+    val prf2 = prf |> fold (mp_rev_prf ctxt o assumption_prf) prems
+  in prf2 end
+
 
 (* TODO(opt): sharing of prf in resulting proofterms *)
 fun conj_extr_prfs prf ctxt =
@@ -2214,7 +2245,11 @@ fun declare_prf prfp ctxt = fold_terms_prf Variable.declare_term ctxt prfp ctxt
 
 
 
-(* TODO(opt): sharing of certified terms as they are shared in env *)
+(* TODO(opt!): sharing of certified types and terms as they are shared in env.
+    Even better: sharing of all subtypes and subterms via net
+    (term indexing is var-fixed and Abs get fully key-encoded; retrieval is exact lookup)
+    and their certification. Perhaps just register whole occurring terms and look for
+    occurences of them as subterms of terms to be certified? *)
 (* NB: non-local non-ground hyps are discharged, if they are allowed at all *)
 fun replay_prf allow_nonground_hyps ctxt prfp =
   let
@@ -3783,11 +3818,10 @@ and chr_constraint_simplification allow_propagation ctxt00 =
       maximally-simple cycle-free fringe?  *) 
 
     exception CyclicDependencies
-    datatype dep_calc_param = OnlySimpDeps | ArbitraryDepsBoundedBy of term list
     datatype dep_calc_res_ty = CycleAvoided | NoCycleSeen
 
     (* NB: since we only insert normed constraint entries into walked, calced, deps
-       and since there are no instantiations while calc_dependencies runs,
+       and since there are no instantiations while calc_simp_deps runs,
        we can use aconv instead of aconv_norm for their comparison. *)
     fun triv_dep C = ([C], assumption_prf C)
 
@@ -3800,7 +3834,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
     (* TODO(opt): use var_exact_net for calced *)
     (* NB: sharing calc across intermediate dependency calculations leads to wrong result in general,
        because walked trace differs leading to different cycle detections *)
-    fun calc_dependencies_aux ctxt constraint_graph param walked first_step C0 calced =
+    fun calc_simp_deps_aux ctxt constraint_graph walked C0 calced =
       let
         val norm = norm_with_env_in_run_state ctxt 
         val eq_C = aconv_norm norm
@@ -3808,7 +3842,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         val C_eta = C |> Envir.eta_contract
       in
         if exists (fn (C', _) => aconv (C', C)) walked then
-          let val _ = tracing ("calc_dependencies: discovered cycle among constraints\n"
+          let val _ = tracing ("calc_simp_deps: discovered cycle among constraints\n"
             ^cat_lines (("  "^str_of_normed_term ctxt C)
               :: (walked |> map (fn (C2, prf) =>
                "  "^str_of_normed_term ctxt C2^"   <==  "^commas(assm_disch_prf ctxt prf
@@ -3826,11 +3860,8 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                     [] => err_with_trace ctxt ("internal error when calculating dependencies: constraint "
                       ^str_of_normed_term ctxt C^" was not found in constraint graph")
                   | C'_and_implied_byss => 
-                      (* NB: we rely on the fact that the net for the constraint_graph is env normalized here *)
                       C'_and_implied_byss |> try (hd #> snd) |> these
-                      |> filter (case param of
-                             ArbitraryDepsBoundedBy _ => (K true)
-                           | OnlySimpDeps => (fn (_, src_chr_ty) => src_chr_ty = SimpCHR))
+                      |> filter (fn (_, src_chr_ty) => src_chr_ty = SimpCHR)
                       |> map fst
 
                 fun try_imp imp_by_prf calced_ = 
@@ -3838,7 +3869,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                     val walked2 = cons (C, imp_by_prf) walked
                     val Cs = Logic.strip_imp_prems (prop_of_proofp imp_by_prf)
                     val (sub_ress, calced_2) = calced_
-                      |> fold_map (calc_dependencies_aux ctxt constraint_graph param walked2 false) Cs
+                      |> fold_map (calc_simp_deps_aux ctxt constraint_graph walked2) Cs
                     val res_ty =
                       if exists (fn (_, sub_res_ty) => sub_res_ty = CycleAvoided) sub_ress then
                         CycleAvoided
@@ -3850,7 +3881,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                     (((deps, prf), res_ty), calced_2)
                   end
 
-                fun standard_res () =
+                val (res, calced2) =
                   let
                     val (alt_ress, calced2) = calced |> fold_map (fn imp_prf => fn calced_ =>
                         try_imp imp_prf calced_
@@ -3875,24 +3906,294 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                     | SOME some_prf => (((poss_deps, some_prf), res_ty), calced2)
                   end
 
-                val (res, calced2) = case param of
-                    ArbitraryDepsBoundedBy bound_Cs =>
-                      if not first_step andalso member eq_C bound_Cs C then
-                        ((triv_dep C, NoCycleSeen), calced)
-                      else
-                        standard_res ()
-                  | OnlySimpDeps => standard_res ()
                 val calced3 = cons (C, res) calced2
               in
                 (res, calced3)
               end
       end
 
-    fun calc_dependencies ctxt constraint_graph param C0 =
+    fun calc_simp_deps ctxt constraint_graph C0 =
       let val (((deps, prf), res_ty), calced) =
-        calc_dependencies_aux ctxt constraint_graph param [] true C0 []
+        calc_simp_deps_aux ctxt constraint_graph [] C0 []
       in (deps, prf) end
 
+
+    fun subsuming_cons subs imp (imps, ch) =
+      if exists (fn imp2 => subs (imp2, imp)) imps then
+        (imps, ch)
+      else
+        imps |> filter_out (fn imp2 => subs (imp, imp2))
+        |> cons imp |> rpair true
+    fun subsuming_merge_into subs imps1 imps2 = (imps2, false)
+      |> fold (subsuming_cons subs) imps1
+
+    fun impprf_subsumes norm (imp_prf1, imp_prf2) =
+      let
+        val ((prems1, concl1), (prems2, concl2)) = (imp_prf1, imp_prf2)
+          |> pairself (prop_of_proofp #> norm #> Logic.strip_horn) 
+      in concl1 aconv concl2 andalso subset (op aconv) (prems1, prems2) end
+    fun impby_subsumes norm ((imp_prf1, src_chr_ty1), (imp_prf2, src_chr_ty2)) =
+      impprf_subsumes norm (imp_prf1, imp_prf2) andalso src_chr_ty1 = src_chr_ty2
+
+    fun impby_subsuming_cons ctxt = subsuming_cons (impby_subsumes (norm_with_env_in_run_state ctxt))
+    fun impby_subsuming_merge_into ctxt = subsuming_merge_into (impby_subsumes (norm_with_env_in_run_state ctxt)) 
+
+    (* TODO(opt?): use variants of mp_rev_prf, impI_prf tuned for normed propositions *)
+    fun termhg_trancl ctxt constraint_graph =
+      let
+        val prems_of = prop_of_proofp #> Logic.strip_imp_prems
+        (* NB: since terms of hyperedges are not instantiated anymore, we used var-fixated
+           terms as net indices and during the derivation we even employ numerical indices
+           standing for the constraints. *)
+        val prep_index_term = Envir.eta_contract #> fix_index_term
+
+        fun norm_prf_prems_distinctify imp_prf0 = 
+          let
+            val imp_prf = norm_prf ctxt imp_prf0
+            val prems = prems_of imp_prf
+          in
+            if has_duplicates (op aconv) prems then
+              imp_prf |> assume_prems_prf ctxt
+              |> fold_rev (impI_prf ctxt) (distinct (op aconv) prems)
+            else
+              imp_prf
+          end
+
+        val normed_imp_prfs = Net.content constraint_graph |> maps (fn (_, implied_bys) => 
+          implied_bys |> map (fn (imp_prf, _) => norm_prf_prems_distinctify imp_prf))
+        val normed_constraints = normed_imp_prfs 
+          |> maps (prop_of_proofp #> Logic.strip_horn #> (fn (prems, concl) => concl :: prems))
+          |> sort_distinct Term_Ord.fast_term_ord
+
+        val constraint_num_net = Net.empty |> fold_index (fn (i, C) =>
+            Net.insert_term_safe (K false) (prep_index_term C, (C, i)))
+          normed_constraints
+        fun constraint_to_num C =
+          case Net.match_term constraint_num_net (prep_index_term C)
+            |> filter (fn (C', _) => C' aconv C)
+          of
+            (_, i) :: _ => i
+          | _ => error ("internal error: no number registered for constraint")
+        val constraint_to_bv = constraint_to_num #> BitVector.single
+
+
+        fun nimpprffastrep_subsumes (fastrep_proj1, fastrep_proj2) (arg1, arg2) = 
+          let
+            val (prems_bv1, (_, concl_num1)) = fastrep_proj1 arg1
+            val (prems_bv2, (_, concl_num2)) = fastrep_proj2 arg2
+          in
+            concl_num1 = concl_num2
+            andalso BitVector.subset prems_bv1 prems_bv2
+          end
+        val premnumbered_nimpprffastrep_subsuming_merge_into =
+          subsuming_merge_into (eq_pair (op =) (nimpprffastrep_subsumes (snd, snd)))
+        val nimpprffastrep_subsuming_merge_into = subsuming_merge_into (nimpprffastrep_subsumes (snd, snd))
+
+        fun cyclic_or_subsumed (_, concl_idxd) (fastrep as (_, (prems_nums, concl_num))) =
+          let
+            val cyclic = member (op =) prems_nums concl_num
+            val ex_imp_prfs_for_concl = Inttab.lookup concl_idxd concl_num |> these
+            val subsumed = ex_imp_prfs_for_concl
+              |> exists (fn imp_prf2_wfastrep => nimpprffastrep_subsumes (snd, I) (imp_prf2_wfastrep, fastrep))
+            val _ = ()
+              (*if cycle then
+                tracing ("cyclic:  "^str_of_normed_term ctxt (prop_of_proofp imp_prf))
+              else if subsumed then
+                tracing ("subsumed:  "^str_of_normed_term ctxt (prop_of_proofp imp_prf)  ^"  by  "
+                  ^(ex_imp_prfs_for_concl |> find_first (fn (imp_prf2, _) => nimpprf_subsumes (imp_prf2, imp_prf))
+                    |> the |> fst |> prop_of_proofp |> str_of_normed_term ctxt))
+              else  () *)
+          in
+            (cyclic orelse subsumed, ex_imp_prfs_for_concl)
+          end
+
+        (* NB: these functions assume that all imp_prfs are normed *)
+        fun register_imp_prf (imp_prf_wfastrep as (imp_prf, fastrep as (_, (prems_nums, concl_num))))
+              (res as (_, concl_idxd)) =
+          let
+            val ((cyclic_or_subsumed), ex_imp_prfs_for_concl) = cyclic_or_subsumed res fastrep
+          in
+            if cyclic_or_subsumed then
+              res
+            else
+              let
+                val (imp_prfs_for_concl', ch_imp_prfs_for_concl') = ex_imp_prfs_for_concl 
+                  |> nimpprffastrep_subsuming_merge_into [imp_prf_wfastrep] 
+                (* val _ = tracing ("registering "^str_of_normed_term ctxt (prop_of_proofp imp_prf)
+                  ^(if ch_imp_prfs_for_concl' then "  resulting in changes for conclusion entry" else "")) *)
+              in
+                res
+                |>> fold_index (fn (i, prem_num) => fn prem_idxd_ =>
+                        let
+                          val ex_imp_prfs_for_prem = Inttab.lookup prem_idxd_ prem_num |> these
+                          val (imp_prfs_for_prem', ch_imp_prfs_for_prem') = ex_imp_prfs_for_prem 
+                            |> premnumbered_nimpprffastrep_subsuming_merge_into [(i, imp_prf_wfastrep)]
+                        in
+                          prem_idxd_
+                          |> ch_imp_prfs_for_prem' ? Inttab.update (prem_num, imp_prfs_for_prem')
+                        end)
+                      prems_nums
+                ||> ch_imp_prfs_for_concl' ? Inttab.update (concl_num, imp_prfs_for_concl')
+                |> propag_imp_prf imp_prf_wfastrep
+             end
+          end
+
+        and propag_imp_prf (imp_prf, (prems_bv, (prems_nums, concl_num))) (res as (prem_idxd, concl_idxd)) = 
+          let
+            val (prems, concl) = imp_prf |> prop_of_proofp |> Logic.strip_horn
+            val concl_bv = constraint_to_bv concl
+            val imp_prf_prems_assmd = assume_prems_prf ctxt imp_prf 
+            val concl_as_prem_matches = Inttab.lookup prem_idxd concl_num |> these
+
+            (* NB: we do not have to use the concl_idxd state that would be current when the prem 
+               is actually processed under immediate hyperpath composition,
+               because the current concl_idxd state cannot differ in prems due to distinctness of
+               premises and avoidance of cycle (which avoids the formation of hyperpaths to the prem
+               that containing the subhyperpath imp_prf). *)
+            val prem_as_concl_matchess = prems ~~ prems_nums |> map (fn (prem, prem_num) => 
+              Inttab.lookup concl_idxd prem_num |> these |> pair (prem, prem_num))
+          in
+            (* NB: all hyperpaths using imp_prf (or even just its outline, because we would
+               absorb hyperpaths with that outline into imp_prf)
+               will occur later in the prem_idxd/concl_idxd entries for prems/concl. *)
+            res
+            |> fold (fn (i, (bot_imp_prf, (bot_prems_bv, (bot_prems_nums, bot_concl_num)))) => fn res_ =>
+                   let
+                     val bot_prems = prems_of bot_imp_prf
+                     val (comp_prems, comp_prems_nums) = bot_prems ~~ bot_prems_nums
+                       |> remove (eq_snd (op =)) (concl, concl_num)
+                       |> union (eq_snd (op =)) (prems ~~ prems_nums)
+                       |> split_list
+                     val comp_prems_bv = bot_prems_bv |> BitVector.subtract concl_bv 
+                       |> BitVector.union prems_bv
+                     val comp_fastrep = (comp_prems_bv, (comp_prems_nums, bot_concl_num))
+                   in
+                     if fst (cyclic_or_subsumed res_ comp_fastrep) then
+                       res_
+                     else
+                       let
+                         val comp_imp_prf = bot_imp_prf
+                           |> fold_index (fn (j, bot_prem) =>
+                                  if j = i then
+                                    mp_rev_prf ctxt imp_prf_prems_assmd
+                                  else
+                                    mp_rev_prf ctxt (assumption_prf bot_prem))
+                                bot_prems
+                           |> fold_rev (impI_prf ctxt) comp_prems
+                         val _ =
+                           if null (assms_of_proofp comp_imp_prf) then ()
+                           else error "internal error: no assms of composed imp_prf may remain"
+                       in
+                         res_ |> register_imp_prf (comp_imp_prf, comp_fastrep)
+                       end
+                   end)
+                 concl_as_prem_matches
+            |> fold (fn ((prem, prem_num), prem_as_concl_matches) =>
+                   fold (fn (top_imp_prf, (top_prems_bv, (top_prems_nums, _))) => fn res_ =>
+                       let
+                         val top_prems = prems_of top_imp_prf
+                         val (comp_prems, comp_prems_nums) = prems ~~ prems_nums
+                           |> remove (eq_snd (op =)) (prem, prem_num)
+                           |> union (eq_snd (op =)) (top_prems ~~ top_prems_nums)
+                           |> split_list
+                         val comp_prems_bv = prems_bv |> BitVector.subtract (constraint_to_bv prem)
+                           |> BitVector.union top_prems_bv
+                         val comp_fastrep = (comp_prems_bv, (comp_prems_nums, concl_num))
+                       in
+                         if fst (cyclic_or_subsumed res_ comp_fastrep) then
+                           res_
+                         else
+                           let
+                             val comp_imp_prf = imp_prf
+                               |> fold (fn prem2 =>
+                                      if prem aconv prem2 then
+                                        mp_rev_prf ctxt (assume_prems_prf ctxt top_imp_prf)
+                                      else
+                                        mp_rev_prf ctxt (assumption_prf prem2))
+                                    prems
+                               |> fold_rev (impI_prf ctxt) comp_prems
+                             val _ = 
+                               if null (assms_of_proofp comp_imp_prf) then ()
+                               else error "internal error: no assms of composed imp_prf may remain"
+                           in
+                             res_ |> register_imp_prf (comp_imp_prf, comp_fastrep)
+                           end
+                       end)
+                     prem_as_concl_matches)
+                 prem_as_concl_matchess
+          end
+
+        val (_, res_concl_idxd) = (Inttab.empty, Inttab.empty)
+          |> fold (fn nimp_prf =>
+                 let
+                   val (prems, concl) = nimp_prf |> prop_of_proofp |> Logic.strip_horn
+                   val prems_nums = prems |> map constraint_to_num
+                   val concl_num = constraint_to_num concl
+                   val prems_bv = BitVector.empty |> fold (BitVector.union o BitVector.single) prems_nums
+                   val fastrep = (prems_bv, (prems_nums, concl_num))
+                 in
+                   register_imp_prf (nimp_prf, fastrep)
+                 end)
+               normed_imp_prfs
+      in
+        (* We annotate resulting conclusion-indexed transitive closure of hypergraph with
+           conclusion-specific bitvectors for each hyperpath that signify transitive
+           derivational subsumption of hyperpaths, i.e. reachability of all premises
+           of the subsumed hyperpath with the same conclusion. *)
+        Net.empty |> Inttab.fold (fn (_, imp_prfs) =>
+            let
+              val concl = case imp_prfs of
+                  [] => error ("internal error: no imp_prfs for a concl after transitive hypergraph closure")
+                | (imp_prf, _) :: _ => imp_prf |> prop_of_proofp |> Logic.strip_imp_concl
+
+              val trsmaller_G = BitVectorGraph.empty
+                |> fold_index (fn (i, (imp_prf, (prems_bv, (prems_nums, _)))) =>
+                       BitVectorGraph.new_node (prems_bv, i))
+                     imp_prfs
+                |> fold (fn (_, (prems1_bv, (prems1_nums, _))) =>
+                       fold (fn (_, (prems2_bv, (prems2_nums, _))) =>
+                           if BitVector.eq (prems1_bv , prems2_bv) then I
+                           else
+                             let val trsmaller = prems1_nums |> subtract (op =) prems2_nums
+                               |> forall (fn prem1_num =>
+                                    Inttab.lookup res_concl_idxd prem1_num |> these
+                                    |> exists (fn (_, (interm_prems_bv, (interm_prems_nums, _))) =>
+                                        BitVector.subset interm_prems_bv prems2_bv))
+                             in
+                               trsmaller ? BitVectorGraph.add_edge (prems1_bv, prems2_bv)
+                             end)
+                         imp_prfs)
+                     imp_prfs
+
+
+              val imp_prfs2 = imp_prfs |> map (fn (imp_prf, (prems_bv, _)) =>
+                let
+                  (* NB: bitvector for prems_bv is included via reflexivity of all_preds *)
+                  val trsmaller_bv = BitVector.empty |> fold (fn small_bv =>
+                      BitVector.union (BitVectorGraph.get_node trsmaller_G small_bv |> BitVector.single))
+                    (BitVectorGraph.all_preds trsmaller_G [prems_bv])
+                in (imp_prf, trsmaller_bv) end)
+              
+              (*fun imp_prf_str_from_prems_bv prems1_bv = imp_prfs
+                |> map_filter (fn (imp_prf, (prems2_bv, _)) =>
+                     if BitVector.eq (prems2_bv, prems1_bv) then SOME imp_prf
+                     else NONE)
+                |> the_single |> prop_of_proofp |> str_of_normed_term ctxt
+              val _ = tracing ("local trsmaller_G:\n"
+                ^cat_lines (BitVectorGraph.dest trsmaller_G |> map (fn ((prems_bv, imp_prf_num), _) =>
+                   "   "^BitVector.to_string (BitVector.single imp_prf_num)^" = "
+                   ^imp_prf_str_from_prems_bv prems_bv
+                   ^"   >  "^space_implode ",  " (BitVectorGraph.immediate_preds trsmaller_G prems_bv
+                     |> map imp_prf_str_from_prems_bv))))
+              val _ = tracing ("local trsmaller_bv annotated imp_prfs:\n"
+                ^cat_lines (imp_prfs2 |> map (fn (imp_prf, trsmaller_bv) =>
+                    str_of_normed_term ctxt (prop_of_proofp imp_prf)
+                    ^"  trsmaller_bv: "^BitVector.to_string trsmaller_bv)))*)
+            in
+              Net.insert_term (K false) (prep_index_term concl, (concl, imp_prfs2))
+            end)
+          res_concl_idxd
+      end
 
     fun reconsider_instantiated_constraints reason_trace (constraint_graph, ctxt) =
       let
@@ -4031,7 +4332,8 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                
             fun lookup head =
               let
-                (* NB: we rely on the fact that the net for the constraint_graph is always env normalized here *)
+                (* NB: we rely on the fact that the net-indexed term stored in the constraint_graph is
+                   always env normalized here due to reconsideration of instantiated constraints. *)
                 (* NB: not Net.match_term, because the matching direction is reversed *)
                 (* TODO(minor opt): if exact_match_chr we could use Net.match_term. But this alone
                     does not help much in the case of univlvl constraint lookup since variables
@@ -4089,8 +4391,9 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                            during constraint propagation here *)
                         val orig_term_pretty = norm_with_env_in_run_state ctxt00 #> Syntax.pretty_term ctxt00
                         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt_)
+                        (* FIXME?: use termhg_trancl instead?  *)
                         fun add_deps_for Cs deps0 = deps0 |> fold (fn C =>
-                            let val (deps_, _) = calc_dependencies ctxt_ constraint_graph (ArbitraryDepsBoundedBy []) C
+                            let val (deps_, _) = calc_simp_deps ctxt_ constraint_graph C
                             in union eq_C deps_ end)
                           Cs
                         val (deps, orig_deps, insts) = (add_deps_for cs_for_heads [], [], [])
@@ -4132,7 +4435,8 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
 
                     (* TODO(opt?): keep Net.content cached in a dedicated constraint graph data structure *)
-                    (* NB: we rely on the fact that the net for the constraint_graph is always env normalized here *)
+                    (* NB: we rely on the fact that the net-indexed term stored in the constraint_graph is
+                       always env normalized here due to reconsideration of instantiated constraints. *)
                     val ctxt4_ = ctxt4 |> Context.proof_map (
                       map_constraints_in_run_state (K (Net.content constraint_graph 
                         |> map (fn (C, _) => (C, ConstraintTrace [], ActiveConstraint))))
@@ -4160,6 +4464,8 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                     val aconv_norm5 = aconv_norm (norm_with_env_in_run_state ctxt5_)
                     val new_dynamic_constraints = new_constraints
                       |> subtract aconv_norm5 (these static_new_constraints_opt)
+                    (* NB: also contains constraints that were used and were already present in ctxt4_,
+                       thus are not in new_constraints *)
                     val used_dynamic_constraints = []
                       |> fold (fn prem_prf => union aconv_norm5 (assms_of_proofp prem_prf)) solved_prems
                       |> subtract aconv_norm5 (these static_new_constraints_opt)
@@ -4266,7 +4572,6 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         |> fold (consider_rules_for_constraint force_reconsideration) exec_Cs
       end
 
-    (* TODO(feature): tracking of serveral implications leading to a constraint *)
     (* NB: force_reconsideration does *NOT* affect the constraints that are generated from this one,
          because the ones that are affected by an instantiation after their generation are all
          collected determined directly from the constraint graph *)
@@ -4342,25 +4647,13 @@ and chr_constraint_simplification allow_propagation ctxt00 =
             SOME implied_by => if triv_cyclic_imp implied_by then NONE else SOME implied_by
           | NONE => NONE
 
-        (* NB: equality of conclusion is assumed *)
-        fun subsumes (imp_prf1, src_chr_ty1) (imp_prf2, src_chr_ty2) =
-          let val prems_of = prop_of_proofp #> norm_with_env_in_run_state ctxt
-            #> Logic.strip_imp_prems
-          in
-            src_chr_ty1 = src_chr_ty2
-            andalso subset (op aconv) (prems_of imp_prf1, prems_of imp_prf2)
-          end
-        fun subsuming_merge_cons imp imps =
-          if exists (fn imp2 => subsumes imp2 imp) imps then imps
-          else imps |> filter_out (fn imp2 => subsumes imp imp2) |> cons imp
-        fun subsuming_merge imps1 imps2 = imps2 |> fold subsuming_merge_cons imps1
 
           (* NB: in the current implementation we have to cater for the situation in which the net
              for the constraint_graph is not env normalized yet, right after
              reconsider_instantiated_constraints, i.e. with force_reconsideration = true *)
           (* TODO(refactor): only we switch to var_exact_net for constraint_graph, we do not need to
              cater for non-env-normalized situation with merge of implied_by lists *)
-        val ex_imps' = [] |> fold subsuming_merge implied_by_alreadys
+        val ex_imps' = [] |> fold (fn imp_bys => impby_subsuming_merge_into ctxt imp_bys #> fst) implied_by_alreadys
           |> filter_out triv_cyclic_imp
 
         val constraint_graph' =
@@ -4374,16 +4667,21 @@ and chr_constraint_simplification allow_propagation ctxt00 =
               overwrite_C_entries_with ex_imps')
           else if exists_already then
             (* NB: if implied_by_opt' = SOME, we register it as an *alternative*
-               implied-by-proof, so that calc_dependencies has alternative path choices in
+               implied-by-proof, so that calc_simp_deps has alternative path choices in
                case non-trivial cycles are encountered. This enables more constraint simplifications. *)
             (* TODO(opt): norm propositions of proof_packs as preprocessing? *)
             let
-              val new_imps = case implied_by_opt' of
-                  SOME implied_by_ => subsuming_merge_cons implied_by_ ex_imps'
-                | NONE => ex_imps'
+              val _ =
+                if length implied_by_alreadys = 1 then () (* because force_reconsideration = false *)
+                else err_with_trace ctxt "metarec: implied_by_alreadys length assertion failed in constraint propagation"
+              val (new_imps, new_imps_ch) = (ex_imps', false)
+                |> (case implied_by_opt' of
+                     SOME implied_by_ => impby_subsuming_cons ctxt implied_by_
+                   | NONE => I)
             in
-              (* NB: length implied_by_alreadys = 1 because force_reconsideration = false *)
-              if length ex_imps' = length (hd implied_by_alreadys) andalso length new_imps = length ex_imps' then
+              (* NB: length implied_by_alreadys = 1, so length ex_imps' = length (hd implied_by_alreadys)
+                 implies ex_imps' = (hd implied_by_alreadys)  *)
+              if length ex_imps' = length (hd implied_by_alreadys) andalso not new_imps_ch then
                 constraint_graph
               else
                 overwrite_C_entries_with new_imps
@@ -4440,7 +4738,8 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
     and apply_simproc (serial, (exact_simpth_match, simproc)) (constraint_graph_, ctxt_) =
       let
-        (* NB: we rely on the fact that the net for the constraint_graph_ is always env normalized here *)
+        (* NB: we rely on the fact that the net-indexed term stored in the constraint_graph is
+           always env normalized here due to reconsideration of instantiated constraints. *)
         (* TODO(opt): expensive. constraint simproc should provide pattern(s) for the
         constraints it finds interesting *)
         val Cs = constraint_graph_ |> Net.content |> map fst
@@ -4475,6 +4774,37 @@ and chr_constraint_simplification allow_propagation ctxt00 =
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
 
+      (* looks good with graphviz dot renderer *)
+    fun graphviz name CG = 
+      let
+        val rawstr_of_normed_term =
+          Print_Mode.setmp [Pretty.symbolicN]
+            (norm_with_env_in_run_state ctxt' #> Syntax.pretty_term ctxt' #> Pretty.str_of)
+      in
+        "graphviz:\n"
+        ^"digraph "^name^" {"
+        ^"\n  node [shape=ellipse]; "^(Net.content CG
+          |> map (fn (C, _) => quote (rawstr_of_normed_term C)) |> space_implode "; ")
+        (*^";\n  node [shape=box,height=0.1,width=0.1]; "^(Net.content CG
+          |> maps (fn (_, implied_bys) => implied_bys |> map (fn (prf, src_chr_ty) =>
+               quote (rawstr_of_normed_term (prop_of_proofp prf))
+               ^"[label="^quote ""(*quote (src_chr_ty_str src_chr_ty)*)^"]")) |> space_implode "; ")*)
+        ^";\n"^cat_lines (Net.content CG |> maps (fn (C, implied_bys) =>
+          implied_bys |> map_index (fn (i, (prf, src_chr_ty)) =>
+            let val prf_str = quote (rawstr_of_normed_term (prop_of_proofp prf))
+            in
+              (*"  "^prf_str^" -> "^quote (rawstr_of_normed_term C)^";\n"
+              ^cat_lines (Logic.strip_imp_prems (prop_of_proofp prf) |> map (fn prem =>
+                 "  "^quote (rawstr_of_normed_term prem)^" -> "^prf_str^"[weight=2];"))*)
+              cat_lines (Logic.strip_imp_prems (prop_of_proofp prf) |> map (fn prem =>
+                 "  "^quote (rawstr_of_normed_term prem)^" -> "^quote (rawstr_of_normed_term C)
+                 ^"["^(if src_chr_ty = SimpCHR then "style=\"bold\", " else "arrowhead=\"empty\", ")
+                 ^(if i < 9 then "color=\"/set19/"^string_of_int (i + 1)^"\""
+                   else "label="^quote (string_of_int i))
+                 ^"];"))
+            end)))
+        ^"\n}"
+      end
     val _ = 
       let
         val constraints0_varixns = [] |> fold Term.add_vars constraints0 |> map fst
@@ -4497,87 +4827,172 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                     commas (implied_bys |> map (fn (imp_prf, src_chr_ty) =>
                       str_of_normed_term ctxt' (prop_of_proofp imp_prf)
                       ^"  [from "^src_chr_ty_str src_chr_ty^"]"))))))
-        val rawstr_of_normed_term =
-          Print_Mode.setmp [Pretty.symbolicN]
-            (norm_with_env_in_run_state ctxt' #> Syntax.pretty_term ctxt' #> Pretty.str_of)
-        (* looks ok with graphviz dot renderer *)
-        (* TODO: try neato where edges leading to hyperedge node have higher weight and/or smaller length than those
-           leading out of the hyperedge node; paint hyperedges from SimpCHR applications thicker *)
-        val _ = tracing ("graphviz:\n"
-          ^"digraph ConstraintGraph {"
-          ^"\n  node [shape=ellipse]; "^(Net.content constraint_graph'
-            |> map (fn (C, _) => quote (rawstr_of_normed_term C)) |> space_implode "; ")
-          ^";\n  node [shape=box,height=0.1,width=0.1]; "^(Net.content constraint_graph'
-            |> maps (fn (_, implied_bys) => implied_bys |> map (fn (prf, src_chr_ty) =>
-                 quote (rawstr_of_normed_term (prop_of_proofp prf))
-                 ^"[label="^quote ""(*quote (src_chr_ty_str src_chr_ty)*)^"]")) |> space_implode "; ")
-          ^";\n"^cat_lines (Net.content constraint_graph' |> maps (fn (C, implied_bys) => implied_bys |> map (fn (prf, _) =>
-              let val prf_str = quote (rawstr_of_normed_term (prop_of_proofp prf))
-              in
-                "  "^prf_str^" -> "^quote (rawstr_of_normed_term C)^";\n"
-                ^cat_lines (Logic.strip_imp_prems (prop_of_proofp prf) |> map (fn prem =>
-                   "  "^quote (rawstr_of_normed_term prem)^" -> "^prf_str^";"))
-              end)))
-         ^"\n}")
+        val _ = tracing (graphviz "ConstraintGraph" constraint_graph')
       in () end
 
 
-    (* TODO(minor opt): because this is normed and deps from calc_dependencies are normed,
+    (* TODO(minor opt): because this is normed and deps from calc_simp_deps are normed,
        many uses of eq_C below can be replaced by (op aconv) *)
     val constraints0_nodups_normed = constraints0
       |> map (norm_with_env_in_run_state ctxt') |> distinct (op aconv)
 
+    (* TODO(refactor): use termhg_trancl on simp-restriction of constraint_graph' *)
     val constraints0_simping  = constraints0_nodups_normed |> map (fn C => 
-        let
-          val (deps, simp_prf) = calc_dependencies ctxt' constraint_graph' OnlySimpDeps C
-          (* NB: we want actual assumptions of simplification derivation for C as simp_deps,
-             not the accumulative deps from all possible simplification derivations for C *)
-          val simp_deps = assms_of_proofp simp_prf
-        in
-          if member eq_C deps C then (C, ([C], simp_prf))
-          else (C, (simp_deps, simp_prf))
-        end)
+      let
+        val (deps, simp_prf) = calc_simp_deps ctxt' constraint_graph' C
+        (* NB: we want actual assumptions of simplification derivation for C as simp_deps,
+           not the accumulative deps from all possible simplification derivations for C *)
+        val simp_deps = assms_of_proofp simp_prf
+      in
+        if member eq_C deps C then (C, ([C], simp_prf))
+        else (C, (simp_deps, simp_prf))
+      end)
+    val simped_in_simping = constraints0_simping
+      |> filter_out (fn (C, (simp_deps, _)) => member eq_C simp_deps C) |> map fst
     (* we ensure that the simplification of original constraints that has been found is used in
        stage2 if it walks over the original constraints *)
+    (* TODO(opt!, correctness): give SimpCHR edges full priority by inlining fully-simped results
+       (i.e. simping of all simpable constraints, not just constraints0_simping)
+       in premises of PropagationCHR edges and then filtering out SimpCHR edges as well as
+       PropagationCHR edges with a simpable conclusion. *) 
     val constraint_graph'_simping_bridged = constraint_graph'
-      |> fold (fn (C, (simp_deps, simp_prf)) =>
-             let val C_eta = Envir.eta_contract C
+      |> fold (fn (C, implied_bys) =>
+             let
+               (* NB: we rely on the fact that the net-indexed term stored in the constraint_graph is
+                  always env normalized here due to reconsideration of instantiated constraints: C is normalized *)
+               val C_eta = Envir.eta_contract C
+               val (simp_deps, simp_prf) = calc_simp_deps ctxt' constraint_graph' C
              in
-               if member eq_C simp_deps C then I
+               if not (member eq_C simp_deps C) then
+                 Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
                else
-                 (* NB: we rely on the fact that the net for the constraint_graph' is always env normalized here *)
-                 Net.delete_term_safe (apsnd fst #> eq_C) (C_eta, C)
-                 #> Net.insert_term (pairself fst #> eq_C) (C_eta,
-                      (C, [(assm_disch_prf ctxt' simp_prf, SimpCHR)]))
+                 let
+                   val (implied_bys', ch_implied_bys) = false |> fold_map (fn (imp_prf, chr_src_ty) => fn ch =>
+                       let
+                         (* NB: prems not necessarily normalized (only C is normalized due to reconsideration
+                            of instantiated constraints that are indexed in constraint_graph) *)
+                         val prems = imp_prf |> prop_of_proofp |> Logic.strip_imp_prems
+                         val (prems_simping, ch_prems) = false |> fold_map (fn prem => fn ch2 =>
+                             let
+                               val (prem_simp_deps, prem_simp_prf) = calc_simp_deps ctxt' constraint_graph' prem
+                             in
+                               ((prem_simp_deps, prem_simp_prf),
+                                ch2 orelse not (member eq_C prem_simp_deps prem))
+                             end)
+                           prems
+                       in
+                         if ch_prems then
+                           let
+                             val new_prems = [] |> fold (union eq_C o fst) prems_simping
+                             val new_imp_prf = imp_prf |> fold (mp_rev_prf ctxt' o snd) prems_simping
+                               |> fold_rev (impI_prf ctxt') new_prems
+                           in ((new_imp_prf, chr_src_ty), true) end
+                         else
+                           ((imp_prf, chr_src_ty), ch)
+                       end)
+                     implied_bys 
+                 in
+                   ch_implied_bys ?
+                     (Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
+                     #> Net.insert_term (K false) (C_eta, (C, implied_bys')))
+                 end
              end)
-           constraints0_simping
-    val stage2_bounds = [] |> fold (fn (_, (simp_deps, _)) => union eq_C simp_deps) constraints0_simping 
+           (Net.content constraint_graph')
 
-    val _ = tracing ("stage2_bounds: "^commas (stage2_bounds |> map (str_of_normed_term ctxt')))
+    val _ = tracing (graphviz "ConstraintGraphSimpingBridged" constraint_graph'_simping_bridged)
+
+    val constraints1 = [] |> fold (fn (_, (simp_deps, _)) => union eq_C simp_deps) constraints0_simping 
+    val _ = tracing ("before trancl_simping_bridged_CG computation")
+    val trancl_simping_bridged_CG_concls = termhg_trancl ctxt' constraint_graph'_simping_bridged
+    val prems_of_impprf = prop_of_proofp #> Logic.strip_imp_prems
+
+    val _ = tracing ("constraints1: "^commas (constraints1 |> map (str_of_normed_term ctxt')))
     val _ = tracing ("constraint simping:\n"
       ^cat_lines (constraints0_simping |> map (fn (C, (simp_deps, _)) =>
          "  "^str_of_normed_term ctxt' C^"  <=simp=  "^commas (map (str_of_normed_term ctxt') simp_deps))))
+    val _ = tracing ("trancl_simping_bridged_CG_concls:"
+      ^cat_lines (Net.content trancl_simping_bridged_CG_concls |> map (fn (C, entries) =>
+         "\n  "^str_of_normed_term ctxt' C^"  <=prop=  \n"
+         ^cat_lines (entries |> map (fn (imp_prf, trsmaller_bv) =>
+           "    "^commas (prems_of_impprf imp_prf |> map (str_of_normed_term ctxt'))
+           ^"   trsmaller_bv: "^BitVector.to_string trsmaller_bv)))))
+
+
+
+    val constraints1_poss_imp_prfs = constraints1
+      |> map (fn C =>
+           let
+             val prepfix_index_term = Envir.eta_contract #> fix_index_term
+             val poss_imp_prfs = Net.match_term trancl_simping_bridged_CG_concls (prepfix_index_term C)
+               |> filter (fn (C', _) => C' aconv C) |> try (hd #> snd) |> these
+               |> map (fn (imp_prf, trsmaller_bv) =>
+                    let val simp_extendable = prems_of_impprf imp_prf |> exists (fn prem =>
+                      case Net.match_term constraint_graph'_simping_bridged (Envir.eta_contract prem)
+                        |> filter (fn (C', _) => eq_C (C', prem)) |> try (hd #> snd) |> these
+                      of
+                        (_, src_chr_ty) :: _ => src_chr_ty = SimpCHR
+                      | _ => false (* prem not a conclusion of a hyperpath *))
+                    in ((simp_extendable, trsmaller_bv), imp_prf) end)
+               (* we prefer hyperpaths that are non-simp-extendable, are composed of
+                  many hyperedges and have few premises *)
+               |> sort (rev_order o (fn (((simp_extbl1, trsmaller_bv1), imp_prf1), ((simp_extbl2, trsmaller_bv2), imp_prf2)) =>
+                    case bool_ord (not simp_extbl1, not simp_extbl2) of
+                      EQUAL => (case BitVector.subset_ord (trsmaller_bv1, trsmaller_bv2) of
+                        EQUAL => int_ord ((imp_prf1, imp_prf2) |> pairself (length o prems_of_impprf))
+                      | order => order)
+                    | order => order))
+               |> map snd
+           in (C, poss_imp_prfs) end)
+      |> sort (pairself (snd #> length) #> int_ord)
+
+    val _ = tracing ("constraints1_poss_imp_prfs:"
+      ^cat_lines (constraints1_poss_imp_prfs |> map (fn (C, poss_imp_prfs) =>
+         "\n  "^str_of_normed_term ctxt' C^"  <==  \n"^
+         cat_lines (poss_imp_prfs |> map (fn imp_prf =>
+           "    "^commas (prems_of_impprf imp_prf |> map (str_of_normed_term ctxt')))))))
+
+    (* choose approximately best possible combination that is not disallowed *)
+    val constraints1_deps = [] |> fold (fn (C, poss_imp_prfs) => fn curr_choices =>
+          let
+            val poss_imp_prfs2 = poss_imp_prfs
+              |> filter_out (fn imp_prf =>
+                   let val prems = prems_of_impprf imp_prf
+                   in
+                     (* disallow if a dep could not reenact the simping (due to a cycle). 
+                        NB: this is more than the mere prioritization of non-simp-extendable imp_prfs above. *)
+                     (not o null) (inter (op aconv) prems simped_in_simping)
+                     (* disallow mutually-dependent deps *)
+                     orelse curr_choices |> exists (fn (C2, imp_prf2) =>
+                       member (op aconv) (prems_of_impprf imp_prf2) C
+                       andalso member (op aconv) prems C2)
+                   end)
+            val choosen_imp_prf = case poss_imp_prfs2 of
+                imp_prf :: _ => imp_prf
+              | [] => assumption_prf C |> impI_prf ctxt' C
+          in (C, choosen_imp_prf) :: curr_choices end)
+        constraints1_poss_imp_prfs
+      |> map (fn (C, imp_prf) => (C, (prems_of_impprf imp_prf, assume_prems_prf ctxt' imp_prf)))
 
     val constraints0_deps = constraints0_simping |> map (fn (C, (simp_deps, simp_prf)) =>
-        let
-          val disch_simp_prf = assm_disch_prf ctxt' simp_prf
-          val walked0 = if member eq_C simp_deps C then [] else [(C, disch_simp_prf)]
-          val simp_deps_deps = simp_deps |> map (fn C2 =>
-            let
-              (* NB: we avoid indirect cycles into C which was simped to C2 previously *)
-              val (((deps2, prf2), _), _) = calc_dependencies_aux ctxt' constraint_graph'_simping_bridged
-                (ArbitraryDepsBoundedBy stage2_bounds) walked0 true C2 []
-              (* val _ = tracing ("constraint "^str_of_normed_term ctxt' C^" has dependencies "
-                ^commas (deps |> map (str_of_normed_term ctxt'))) *)
-            in (C2, (deps2, prf2)) end)
-          val prf = disch_simp_prf
-            |> fold (fn (_, (_, prf2)) => mp_rev_prf ctxt' prf2) simp_deps_deps
-        in
-          (C, (simp_deps, simp_prf), (simp_deps_deps, prf))
-        end)
+      let
+        val disch_simp_prf = assm_disch_prf ctxt' simp_prf
+        val simp_deps_deps = simp_deps |> map (fn C2 =>
+          let
+            (* NB: we avoid indirect cycles into C which was simped to C2 previously *)
+            val (deps2, prf2) = case AList.lookup (op aconv) constraints1_deps C2 of
+                SOME x => x
+              | NONE => err_with_trace ctxt' ("metarec: internal error: implicational proofs "
+                  ^"for a simplified constraint were not found")
+            (* val _ = tracing ("constraint "^str_of_normed_term ctxt' C^" has dependencies "
+              ^commas (deps |> map (str_of_normed_term ctxt'))) *)
+          in (C2, (deps2, prf2)) end)
+        val deps = [] |> fold (fn (_, (deps2, _)) => union eq_C deps2) simp_deps_deps
+        val prf = disch_simp_prf
+          |> fold (fn (_, (_, prf2)) => mp_rev_prf ctxt' prf2) simp_deps_deps
+      in (C, (simp_deps, simp_prf), (deps, simp_deps_deps, prf)) end)
 
     val _ = tracing ("constraint0_deps:"
-      ^cat_lines (constraints0_deps |> map (fn (C, (simp_deps, _), (simp_deps_deps, _)) =>
+      ^cat_lines (constraints0_deps |> map (fn (C, (simp_deps, _), (_, simp_deps_deps, _)) =>
          let val rel_simp_deps_deps = simp_deps_deps |> filter_out (fn (C2, (deps2, _)) => member eq_C deps2 C2)
          in
            "\n  "^str_of_normed_term ctxt' C^"  <=simp=  "^commas (map (str_of_normed_term ctxt') simp_deps)
@@ -4587,37 +5002,23 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                  "      "^str_of_normed_term ctxt' C2^"  <==  "^commas (map (str_of_normed_term ctxt') deps2))))
          end)))
 
-    (* FIXME: cater for situation in which a constraint depends on a initial constaint that has been simplified,
-       but cannot chain into its simplification because this would lead to a cycle *)
-    val implied_constraints = constraints0_deps |> map_filter (fn (C, (simp_deps, simp_prf), (simp_deps_deps, prf)) =>
-      let
-        val all_simp_deps_deps_implied = simp_deps_deps |> forall (fn (C2, (deps2, prf2)) =>
-          (* C2 is actually implied by other constraints *)
-          not (member eq_C deps2 C2)
-          (* (different) mutually dependent stage2 constraints C2, C2' are not regarded as implied *)
-          andalso constraints0_deps |> forall (fn (_, _, (simp_deps_deps', _)) =>
-            simp_deps_deps' |> forall (fn (C2', (deps2', _)) =>
-              eq_C (C2, C2') orelse not (member eq_C deps2' C2 andalso member eq_C deps2 C2'))))
-      in
-        if all_simp_deps_deps_implied then
-          let val imp_deps = [] |> fold (fn (_, (deps2, _)) => union eq_C deps2) simp_deps_deps
-          in SOME (C, (imp_deps, prf)) end
-        else if not (member eq_C simp_deps C) then
-          SOME (C, (simp_deps, simp_prf))
-        else
-          NONE
-      end)
+    val implied_constraints = constraints0_deps
+      |> map_filter (fn (C, _, (deps, _, prf)) =>
+           if member eq_C deps C then NONE
+           else SOME (C, (deps, prf)))
+
+    val _ = tracing ("implied constraints after chr:\n"
+      ^cat_lines (implied_constraints |> map (fn (C, (deps, prf)) =>
+        "  "^str_of_normed_term ctxt' C^"  <=imped=  "^commas (deps |> map (str_of_normed_term ctxt')))))
 
     val constraints' = constraints0_nodups_normed
       |> subtract eq_C (map fst implied_constraints)
-      |> fold (fn (_, (imp_deps, _)) => union eq_C imp_deps) implied_constraints
+      |> fold (fn (_, (deps, _)) => union eq_C deps) implied_constraints
       |> map (fn C => AList.lookup eq_C constraints0_ext_with_traces C
            |> the_default (ConstraintTrace []) |> pair C)
 
     val _ = tracing ("constraints after chr: "
       ^commas (constraints' |> map (fst #> str_of_normed_term ctxt')))
-    val _ = tracing ("implied constraints after chr: "
-      ^commas (implied_constraints |> map (fst #> str_of_normed_term ctxt')))
 
     val implied_constraints_res = implied_constraints
       |> map (fn (C, (_, prf)) => (C, prf (* |> fold_rev (impI_prf ctxt') constraints' *)))
@@ -5839,8 +6240,6 @@ and gen_add_frule checked checked_grndness explicit traced frule0 gctxt =
     (* insert this frule already to discover reflexive dependencies *)
     val frules' = frules |> Inttab.update (frule_id,
       (frule, if explicit then ExplicitFRule else ImplicitFRule, headjuds, Net.empty, traced))
-    (* braucht insert_term_safe weil Variablen der frule verschiedene
-       heads oder gen facts unifizierbar erscheinen lassen *)
     val frules_hdidx' = frules_hdidx |> fold_index (fn (i, head) =>
         Net.insert_term_safe (op =) (head, (frule_id, i))) heads
     val frules_factgen' = frules_factgen |> fold (fn concl =>
@@ -6174,8 +6573,6 @@ fun add_constraint_propag_rule checked_grndness chr_flags
 
     (* TODO(correctness): check if propag_rule is a propag_rule already *)
 
-    (* braucht insert_term_safe weil Variablen der propag_rule verschiedene
-       heads oder gen facts unifizierbar erscheinen lassen *)
     val constraint_propag_and_simp_rules_hdidx' = constraint_propag_and_simp_rules_hdidx
       |> fold_index (fn (i, head) =>
              Net.insert_term_safe (eq_pair (eq_fst (eq_fst Thm.eq_thm_prop)) (op =))
@@ -6244,8 +6641,6 @@ fun add_constraint_simp_rule checked_grndness chr_flags
 
     (* TODO(correctness): check if simp_rule is a simp_rule already *)
 
-    (* braucht insert_term_safe weil Variablen der simp_rule verschiedene
-       heads oder gen facts unifizierbar erscheinen lassen *)
     val constraint_propag_and_simp_rules_hdidx' = constraint_propag_and_simp_rules_hdidx
       |> fold_index (fn (i, head) =>
              Net.insert_term_safe (eq_pair (eq_fst (eq_fst Thm.eq_thm_prop)) (op =))

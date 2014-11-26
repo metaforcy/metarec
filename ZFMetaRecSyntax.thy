@@ -3,6 +3,8 @@ imports Main
 begin
 
 
+
+
 lemma lam_eq_quant_eq:
     "((% x::'a::{}. PROP P(x)) == (% x. PROP Q(x))) ==> ((!! x. PROP P(x)) == (!! x. PROP Q(x)))"
   by simp
@@ -100,6 +102,7 @@ ML_file "item_net2.ML"
 ML_file "impconv.ML"
 ML_file "decomp_pattern.ML"
 ML_file "struct_unify.ML"
+ML_file "bit_vector.ML"
 ML_file "metarec.ML"
 
 

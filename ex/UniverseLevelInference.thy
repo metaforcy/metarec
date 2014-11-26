@@ -2573,6 +2573,15 @@ ML {* elab @{context} @{term "f # x # y === g # x # y"} *}
 
 (* TODO(feature): discharge univlvl-upwards-joining constraints  i u<= k,  j u<= k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
+(* FIXME: hypergraph-based constraint minimization too slow, due to large number of
+   hyperedges with common target (~ 30) (from constraint on intermediate universe levels) *)
+(* FIXME: univlvl constraint for some intermediate univlvl vars are not derivationally 
+   needed in constraint minimization of initial constraints, so are correctly left out.
+   Problem is that hidden univlvl discharge optimization assumes all univlvl vars
+   have univlvl constraints. Include univlvl constraints into definition of
+   univlvl inequations? Or introduce artificial dependencies on univlvl constraints
+   for all univlvl related CHRs, making derivation generally slower due to processing
+   of useless premises? *)
 ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
 
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
@@ -3224,30 +3233,32 @@ ML {*
 *}
 
 
-
+(* NB: unstated constraint assumptions become facts available in assms
+   and have to be used to enable qed *)
 lemma assumes H0: "(x annotyped A) === y" shows "f # x === f # y"
 proof -
   thm H0
+  print_facts
   ML_prf {* Assumption.all_assms_of @{context} *}
 
   have "y === x"
-    ML_prf {* Assumption.all_assms_of @{context} *}
+    print_facts
     sorry
   have "f === f"
-    ML_prf {* Assumption.all_assms_of @{context} *}
+    print_facts
     sorry
 
   {
     fix z
     have "y === x &&& x === z"
-      ML_prf {* Assumption.all_assms_of @{context} *}
+      print_facts
       sorry
   }
   thm this
 
 
   have "y === x ==> f === g"
-    ML_prf {* Assumption.all_assms_of @{context} *}
+    print_facts
     sorry 
   thm this
 
@@ -3255,21 +3266,19 @@ proof -
 
   {
     assume "y === z"
-    and "x == x"
-      ML_prf {* Assumption.all_assms_of @{context} *}
+    and "x === x"
+      print_facts
     have "z === z"
-      ML_prf {* Assumption.all_assms_of @{context} *}
+      print_facts
       sorry
   }
   thm this
 
 
-  (* FIXME: elaboration creates two non-terminal hidden universe level variables (with analogous
-     inequality constraints), so the qed fails *)
   show "f # x === f # y"
-    ML_prf {*  Assumption.all_assms_of @{context} *}
+    print_facts
     sorry
-qed
+qed (rule assms)+
 
 
 

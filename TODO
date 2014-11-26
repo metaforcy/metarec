@@ -107,23 +107,113 @@
 
      * Compiler von metarec Klauseln zu Isabelle/ML Funktionen
        von ctermen zu thmen
-       * Compilerlauf geht immer auf gewissen Metarec-Klauselmengen
-         wenn neue dazukommen (insbes lokale) werden die ueber
-         Continuations vor/nachgeschaltet falls die Ueberlappungs-
-         situation der Klauseln und ihre Priorisieerung das
-         zulaesst. Ansonsten zumindest die Klauselauswahl
-         dynamisch ausfuehren.
-       * partielle Applikationen von Judgements werden zu Closures
-         von Aufrufen an die zugehoerige kompilierte ML-Funktion
-       * Netze und higher-order (decomposing) pattern matching wegcompilen
-         indem man alle Klauseln fuer ein Judgement gemeinsam betrachtet
-         und splitting-Tree fuer die Matchings erstellt
-       * cterm-Primitive nutzen beim matchen von ctermen auf patterns
-       * kein decomposen und maken von Judgementapplikationen mehr,
-         die Komponenten werden direkt als cterm-Tupel mitgefuehrt
-       * Annahmen an fixes (ohne Premissen) speziell verwalten (in Symtab?),
-         nicht als Regeln auf die man matcht
-         
+       * Ideen zum allgemeinen Fall
+         * Compilerlauf geht immer auf gewissen Metarec-Klauselmengen
+           wenn neue dazukommen (insbes lokale) werden die ueber
+           Continuations vor/nachgeschaltet falls die Ueberlappungs-
+           situation der Klauseln und ihre Priorisieerung das
+           zulaesst. Ansonsten zumindest die Klauselauswahl
+           dynamisch ausfuehren.
+         * partielle Applikationen von Judgements werden zu Closures
+           von Aufrufen an die zugehoerige kompilierte ML-Funktion
+         * Netze und higher-order (decomposing) pattern matching wegcompilen
+           indem man alle Klauseln fuer ein Judgement gemeinsam betrachtet
+           und splitting-Tree fuer die Matchings erstellt
+         * cterm-Primitive nutzen beim matchen von ctermen auf patterns
+         * kein decomposen und maken von Judgementapplikationen mehr,
+           die Komponenten werden direkt als cterm-Tupel mitgefuehrt
+         * Annahmen an fixes (ohne Premissen) speziell verwalten (in Symtab?),
+           nicht als Regeln auf die man matcht
+       * Pragmatischer Spezialfall
+         Judgements bei ihrer Definition als kompilierbar vermerkt und zu
+         ihnen duerfen dann statisch keine Annahmen abgesetzt werden
+         (fuer dynamische Annahmen fuehren wir zusaetzlichen dynamischen Check ein
+         das das Judgement der Annahme nicht kompilierbar ist).
+         * Zu kompilierbaren Judgements koennen dann nicht nur Regelmengen, sondern auch kompilierte Closures
+           bzw. PolyML-Funktionsnamen im Netz hinterlegt werden, deren Nutzung dann
+           Prioritaet ueber Anwendung einer Regel aus der Regelmenge haben. Wenn Closure
+           zu Judgement hinterlegt ist kann Judgement nicht mehr um neue Regeln erweitert werden,
+           bzw. wird die Closure invalidiert oder das Judgement (und die kompilierbaren
+           Judgements die von ihm abhaengen) neu kompiliert.
+         * Der haeufige Fall von Annahmenverwaltung in Typsystemen funktioniert
+           wird kompilierbare Judgements also nicht mehr direkt, sondern muss
+           ueber nicht-kompilierbare Hilfsjudgements realisiert werden.
+           Deren Lookup ist also nicht kompiliert sondern dynamisch ueber das Regelnetz,
+           genau wie wir es brauchen.
+         * Bei der Kompilation wird eine Menge von Judgements angegeben die
+           kompiliert werden soll, damit wechselseitige Rekursionen zwischen ihnen
+           als wechselseitige PolyML-Funktionen kompiliert werden koennen.
+         * Aufrufe an Judgements zu denen keine PolyML-Funktion vorliegt, v.a.
+           auch Aufrufe von hoeherstufigen Argumenten, werden normal ueber
+           solve_prems durchgefuehrt.
+         * Aufrufe an synth_procs werden direkt kompiliert
+         * Ueberlappungen der Regeln des Judgements werden ueber hoeherstufige
+           Anti-Unifikation der var-distinctified Input-Patterns gefunden
+           und zu Splitting-Tree aufgeloest.
+           Bei vorliegender vollstaendiger Ueberlappung mehrerer Regeln
+           (d.h. unifizierbarer Inputpatterns) wird dann gemaess
+           Regelpriorisierung in die kompilierten Regeln gelaufen,
+           ggf. mit (try .. handle local_fail => ..) fuer in try gewrappte aufrufe,
+           wobei handle zur Abarbeitung and der weiteren kompilierten ueberlappenden
+           Regeln mit niedrigerer Prioritaet fuehrt.
+         * Splitting-Tree-Tiefe heuristisch optimieren? NP-Complete?
+           "Immer die Regeln deren Inputpatterns mit dem groessten Anti-Unifikat ueberlappen im
+           Splitting-Tree gegenueberstellen, weil das die groessten case-Patterns ergibt."
+           Alternativ: wir realisieren direkt eine n-fache Antiunifikation und
+           ueberlassen PolyML die weitere Optimierung paralleler case-Patterns.
+           N-fache Antiunifikation: Partitioniere zu antiunifizierende Patterns
+           gemaess ggf. vorliegendem Head-Const/Free und der Antiunifikationen ihrer Typen,
+           gemaess ggf. vorliegender Abstraktion (Domain-Typ kann ignoriert werden weil
+           Invariante ist das Typen der zu Antiunifizierenden Terme bereits antiunifiziert wurden),
+           gemaess vorliegendem Variablen-Head (egal welcher).
+           Antiunifikation von Typen entsprechend und Antiunifikation
+           von Sorten ist einfach Sorts.union.
+         * Splitting-Tree wird in case-Expression kompiliert.
+           Wir verwalten die Bijektion zwischen Meta-Variablen im Splitting-Tree
+           und PolyML-Variablen im generierten Code.
+           Matching von t gegen Pattern-Variablen-Applikation (?x $ bound_args)
+           fuehrt zur Generierung von
+             let x = t |> fold_rev abstract_over(?) bound_args
+           Matching von t gegen Non-Pattern-Variablen-Applikatinon (?x $ t2) in
+           primaerer Position fuehrt zur Geneierung von
+             case t of
+               x $ ... => ...
+           Matching gegen bereits belegte Pattern-Variablen-Applikationen
+           fuehrt (in diesen Positionen) zum Check auf beta-eta-Gleichheit
+           unter der aktuellen Substitution.
+         * Forme Zuweisungen von PolyML-Variablen an PolyML-Variablen
+           zur direkten Nutzung der PolyML-Variablen um, d.h. genauer
+           Substituiere die PolyML-Variablenidentitaet bei direkten
+           Meta-Var zu Meta-Var Zuweisungen.
+         * Zwecks code-sharing fuehren wir fuer fuer alle kompilierten Regeln
+           des Judgements eine lokale Funktion ein mit den instantiierten Variablen
+           in den Input-Pattern als Argumenten.
+         * Premissen werden zu subcalls kompiliert (ggf. zu solve_prems falls es
+           sich um nicht-kompilierte Judgements handelt).
+           Kontexterweiterungen (!! xs. assms ==> ..) werden wie in metarec.ML
+           zu fixes, assumes, Erweiterungen des Regelnetzes und deren discharge
+           kompiliert.
+             Das Matching der im subcall erzeugten Terme gegen Output-Patterns wird zu
+           case Expressions kompiliert, wie oben beim Splitting-tree,
+           wobei der Kontext bei matching gegen Pattern-Variablen-Anwendungen
+           abstrahiert wird.
+           Failing Matches gegen Output-Patterns werden zu  raise local_fail
+           kompiliert.
+             Der Beweisterm der im subcall zurueckkommt wie in metarec.ML
+           ueber fixes, assumes discharged, ggf. try-gewrapped.
+         * Substitutionen fuer die globalen Unifikationsvariablen werden
+           wie in metarec.ML verwaltet und an subcalls durchgereicht,
+           allerdings in den kompilierten Matchings nicht um Bindings
+           an die lokalen Variablen erweitert.
+         * Der Gesamtbeweis wird zusammengesetzt, d.h. die angewandte Regel
+           und die Premissenbeweise werden gemaess der Belegung der PolyML-Variablen
+           in der aktuell berechneten Substitution instantiiert und dann mit
+           Modus Ponens komponiert.
+         * Wir koennen Invariante halten das die anfaenglichen Inputs
+           und abschliessenden Outputs von kompilierten Regeln immer normalisiert sind.
+           (Dazu ggf synthprocs anpassen, v.a. unify_proc)
+           Dann ist nur bei Applikationen von Matching-Variablen
+           Normalisierungsaufwand notwendig.
 *)
 
 
@@ -155,7 +245,13 @@
              Termindex viel einfacher weil kein near-eta-Redex im Term-Index
              behandelt werden muss, was Larry dazu bewogen hat Abstraktionen
              direkt als Wildcards anzusehen. Fuer uns ist on-the-fly
-             eta-expansion waehrend Indexmatching auch eine moegliche Loesung?)
+             eta-expansion waehrend Indexmatching auch eine moegliche Loesung?
+             Ggf. sehr wichtige Optimierung bei Substitution Trees (die nicht in Lit.
+             erwaehnt wird?) koennte Indizierung der Child-Substitutionsverfeinerungen
+             ueber Sequenz der ersten Symbole jeder instantiierten Variable sein
+             um wenigstens nicht im hier haeufigen lokalen best-case linear die
+             passende Verfeinerung suchen zu muessen, insbesondere von der Wurzel
+             aus gemaess Judgement indizieren.)
           tabling fuer Twelf ueber higher-order substitution tree index der
           auf linearisierten Term-Indices arbeitet und deren Teilterme shared;
           Pientka's "linearization", i.e. the factorization of unification
@@ -927,11 +1023,14 @@
       mit mehrkoepfigen Propagierungsregeln (?) waere wohl das coolste.
     * Nicht-Termination durch Laengen-Bound umgehen bis zu dem lokale Eindeutigkeit der
       moeglichen Reduktionsfolgen klar sein muss
-    * Unfailing higher-order Knuth-Bendix, vllt sogar mit HO strukturellem matching statt
+    * Unfailing higher-order Knuth-Bendix wichtig, vllt sogar mit HO strukturellem matching statt
       HO pattern matching, zur Bestimmung der elementaren Narrowing-Reduktionsregeln
       (damit dann sogar gewoehnlicheres konfluentes Narrowing) die unter Kongruenzabschluss
-      statt nur Substitutionsabschluss angewandt werden sollen.
+      statt nur Substitutionsabschluss angewandt werden sollen?
       Ggf. sogar verallgemeinern auf metarec-conditional equivalence relations statt Gleichungen.
+        Narrowing entspricht Paramodulation mit *orientierten* Gleichungen, also Knuth-Bendix Completion
+      nur fuer terminierende Orientierung mit Symmetriebildung wichtig fuer Narrowing, weil Narrowing
+      selbst die Gleichungsinstanzen fuer kritischen Paare ueber Unifikation findet.
     * Auch sinnvoll fuer allgemeine Unifikation statt nur Constraint-Vereinfachung?!?
       Unifikations-Algorithmen funktionieren ja auch immer dann am schoensten wenn sich
       kanonische Loesungssubstitution ergibt, also erscheint es sinnvoll aehnlich wie

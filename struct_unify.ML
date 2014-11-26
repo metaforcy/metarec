@@ -438,6 +438,11 @@ and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
 (* TODO(opt): only lift over those ss_reord that are "small", because sharing of
     "large" terms is unlikely to correspond to type dependency *)
 (* TODO(correctness?): should we order ss_nonbnds according to the occurence in each other? *)
+(* TODO(feature): would it be possible and useful to delay struct_insts in order
+   to execute them in order of dependencies of lhs vars wrt. to lhs var arguments?
+   This only changes the structure of the resulting instantiation, does not
+   influence its existence, but would make it independent of occurrence-based order
+   of struct_insts.  *)
 (* canonical example: the structural instantiation solution for  ?X(t) == (PROD x:?A. ?B(x))  is
       ?X := (% t. PROD x:?A'(t). ?B'(x, t))
       ?A := ?A'(t)   "propagating the dependency on t"
