@@ -4,8 +4,6 @@ begin
 
 
 
-
-
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
@@ -2324,21 +2322,21 @@ definition
   "trace_outbound_univlvl_simp == 0"
 
 lemma uleq_umax_sup_simp[constraint_simp_rule]: "
-    [|  tracing (trace_outbound_univlvl_simp)  ;
+    [|  (* tracing (trace_outbound_univlvl_simp)  ; *)
         constraint (i1 u<= j)  ;  constraint (i2 u<= j)  |] ==>
   i1 umax i2 u<= j"
   unfolding constraint_const_def
   by (rule umax_sup)
   
 lemma uless_umax_sup_simp[constraint_simp_rule]: "
-    [|  tracing (trace_outbound_univlvl_simp)  ;
+    [|  (* tracing (trace_outbound_univlvl_simp)  ; *)
         constraint(i1 u< j)  ;  constraint (i2 u< j)  |] ==>
   i1 umax i2 u< j"
   unfolding constraint_const_def
   by (rule umax_less_sup)
 
 lemma uleq_usucc_lhs_simp[constraint_simp_rule]: "
-    [| tracing (trace_outbound_univlvl_simp)  ;
+    [| (* tracing (trace_outbound_univlvl_simp)  ; *)
        constraint (i u< j) |] ==>
   usucc(i) u<= j"
   unfolding constraint_const_def

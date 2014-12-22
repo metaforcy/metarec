@@ -8,6 +8,8 @@ ML_file "item_net2.ML"
 ML_file "impconv.ML"
 ML_file "decomp_pattern.ML"
 ML_file "struct_unify.ML"
+ML_file "bit_vector.ML"
+ML_file "trie.ML"
 ML_file "metarec.ML"
 
 

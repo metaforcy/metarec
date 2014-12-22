@@ -5,6 +5,11 @@ signature BIT_VECTOR = sig
   type bitvec
 
   val empty : bitvec
+  val word32_mask : bitvec
+  val byte_mask : bitvec
+
+  val contains_index0 : bitvec -> bool
+  val shift_over_index0 : bitvec -> bitvec
 
   val is_empty : bitvec -> bool
   (* size is slow: O(largest contained index) *)
@@ -17,6 +22,7 @@ signature BIT_VECTOR = sig
   val intersect : bitvec -> bitvec -> bitvec
   val union : bitvec -> bitvec -> bitvec
   val subtract : bitvec -> bitvec -> bitvec
+  val split_first : bitvec -> (int * bitvec) option
 
   val to_int : bitvec -> int
   val from_int : int -> bitvec
@@ -34,17 +40,22 @@ end
 
 
 structure BitVector :> BIT_VECTOR = struct
+  (* valid bitvectors are the non-negative arbitrary size integers of SML *)
   type bitvec = int
 
   val empty = 0
 
   fun is_empty bv = (bv = 0)
+  fun contains_index0 bv = IntInf.andb(bv, 1) > 0 
+  fun shift_over_index0 bv = IntInf.~>>(bv, Word.fromInt 1)
+
+  (* TODO(refactor): realize with split_first, because this is slow anyway? *)
   fun size bv =
     if is_empty bv then
       0
     else
-      size (IntInf.~>>(bv, Word.fromInt 1))
-      + (if IntInf.andb(bv, 1) > 0 then 1 else 0)
+      size (shift_over_index0 bv)
+      + (if contains_index0 bv then 1 else 0)
   fun contains i bv = IntInf.andb(IntInf.~>>(bv, Word.fromInt i), 1) > 0
 
   fun single i = IntInf.<<(1, Word.fromInt i)
@@ -57,6 +68,27 @@ structure BitVector :> BIT_VECTOR = struct
   fun insert i bv = union bv (single i)
   fun remove i bv = bv |> subtract (single i)
 
+  (* NB: we cannot employ notb because negativity of ints is 
+     preserved on right-shifting instead of rotating in 0s *)
+  fun mask size = empty |> fold (fn i => union (single i)) (0 upto (size - 1))
+  val word32_mask = mask 32
+  val byte_mask = mask 8
+
+  fun split_first bv =
+    let
+      fun aux i bv =
+        if is_empty bv then
+          NONE
+        else if contains_index0 bv then
+          SOME (i, shift_over_index0 bv)
+        else if is_empty (intersect word32_mask bv) then (* skipping optimization *)
+          aux (i + 32) (IntInf.~>>(bv, Word.fromInt 32))
+        else if is_empty (intersect byte_mask bv) then (* skipping optimization *)
+          aux (i + 8) (IntInf.~>>(bv, Word.fromInt 8))
+        else
+          aux (i + 1) (shift_over_index0 bv)
+    in aux 0 bv end
+
   val to_int = I
   val from_int = I
 
@@ -64,8 +96,8 @@ structure BitVector :> BIT_VECTOR = struct
     if is_empty bv then
       []
     else
-      let val b1 = IntInf.andb(bv, 1) > 0
-      in b1 :: to_list (IntInf.~>>(bv, Word.fromInt 1)) end
+      let val b1 = contains_index0 bv
+      in b1 :: to_list (shift_over_index0 bv) end
   fun from_list [] = 0
     | from_list (b :: bs) =
         IntInf.orb(IntInf.<<(from_list bs, Word.fromInt 1), 
