@@ -70,11 +70,16 @@
        Pure/term_sharing.ML stellt maximales sharing syntaktisch
        gleicher Subterme her.
 
-     Einordnung: Term-DAG-Optimierung entspricht sharing bzgl Termstruktur,
+
+
+    Einordnung: Term-DAG-Optimierung entspricht sharing bzgl Termstruktur,
        Skeleton Optimierung entspricht sharing in Regeln?
        Wird die Skeleton-Optimierung die ich unten beschreibe einfacher wenn
        man die Term-DAGs Optimierung in Betracht zieht: nurnoch propagierung
        von Resultaeten ueber lokales Backtracking hinweg?
+
+
+
 
      * skeleton optimierung des simplifiers durchfaedeln
        caching des Typisierungs-Theorems von Subtermen wenigstens innerhalb einer Ableitung
@@ -104,6 +109,9 @@
      * wenn Patterns von extrem einfacher Struktur wie (c $ ?x), (c $ (% x. ?f x))
        sind und die Terme direkt draufpassen gleich das allgemeinste Matching von
        Hand konstruieren statt ueber Pattern.match zu gehen
+
+
+
 
      * Compiler von metarec Klauseln zu Isabelle/ML Funktionen
        von ctermen zu thmen

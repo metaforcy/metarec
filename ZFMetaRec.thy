@@ -277,9 +277,9 @@ ML {*
             (* NB: here we expect the generated assumption to be identical to the assumption
                generated for the found constraint that matches the pattern *)
             (* TODO(refactor): this proof construction is shared exactly with MetaRec.constraint_gen_proc *)
-            MetaRec.assumption_prf (lift_pat_inst pat_inst_conjunct)
+            MetaRec.assumption_prf ctxt_ (lift_pat_inst pat_inst_conjunct)
             |> fold (MetaRec.allE_rev_prf ctxt_) local_frees
-            |> fold (MetaRec.mp_rev_prf ctxt_ o MetaRec.assumption_prf) rel_assms)
+            |> fold (MetaRec.mp_rev_prf ctxt_ o MetaRec.assumption_prf ctxt_) rel_assms)
 
           val (pat_inst_prf, ctxt_2) = ctxt_ |> recomb (fn (prf1, prf2) => 
               MetaRec.mps_match_on_freshthm_prf @{thm Pure.conjunctionI} [prf1, prf2])

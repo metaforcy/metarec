@@ -4,6 +4,9 @@ begin
 
 
 
+
+
+
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
@@ -2523,8 +2526,8 @@ ML {*  elab @{context} @{term "<g # x, f # x>"}  *}
 ML {*  elab @{context} @{term "<g # x, f # (g # x)>"}  *}
 (* g should be dependent here *)
 ML {*  elab @{context} @{term "<g # x, f # x # (g # x)>"}  *}
-ML {*  Timing.timeit (*MetaRec.output_local_cumul_timing_for ["hidden_univlvl_discharge_proc"]*)
-  (fn () => elab @{context} @{term "<x, <g # x, f # x # (g # x)>>"})  *}
+ML {*  CumulTiming.print_block "cumul elab timing" ["hidden_univlvl_discharge_proc"] (fn () =>
+   elab @{context} @{term "<x, <g # x, f # x # (g # x)>>"}) *}
 ML {*  elab @{context} @{term "<x, <y, f # x # y>>"}  *}
 ML {*  elab @{context} @{term "<x, <y, f # y # x>>"}  *}
 ML {*  elab @{context} @{term "<h # f # x, i # g # y>"}  *}
@@ -2540,7 +2543,8 @@ ML {*  elab @{context} @{term "<(g # x) abstractas y, y, g # x, y>"}  *}
 ML {*  elab @{context} @{term "(PI x:A. PI y:B(x). C # x # y)"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. B(x))"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y))"}  *}
-(* also tests contextual discharge of zf-applications *)
+  (* also tests contextual discharge of zf-applications *)
+ML {* Toplevel.profiling := 0 *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:(B # x). C # x # y)"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y)) # D"}  *}
 ML {*  elab @{context} @{term "(lam x:guniv i. fun f. f # x)"} *}
@@ -2571,8 +2575,6 @@ ML {* elab @{context} @{term "f # x # y === g # x # y"} *}
 
 (* TODO(feature): discharge univlvl-upwards-joining constraints  i u<= k,  j u<= k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
-(* FIXME: hypergraph-based constraint minimization too slow, due to large number of
-   hyperedges with common target (~ 30) (from constraint on intermediate universe levels) *)
 (* FIXME: univlvl constraint for some intermediate univlvl vars are not derivationally 
    needed in constraint minimization of initial constraints, so are correctly left out.
    Problem is that hidden univlvl discharge optimization assumes all univlvl vars

@@ -329,7 +329,7 @@ struct
       ((simpth_opt, uninst_uls, ul_instantiation), ctxt2)
     end
 
-  fun hidden_univlvl_discharge_simproc Cs = MetaRec.cumul_timing "hidden_univlvl_discharge_proc"
+  fun hidden_univlvl_discharge_simproc Cs = CumulTiming.timing "hidden_univlvl_discharge_proc"
     (fn ctxt => calc_hidden_univlvl_discharge Cs ctxt |> apfst #1)
 
   val setup = Context.theory_map (MetaRec.add_constraint_simproc true

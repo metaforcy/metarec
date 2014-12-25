@@ -80,50 +80,6 @@ fun string_of_thm_in_gctxt gctxt =
 
 
 
-val cumul_timing_tab = Synchronized.var "cumul_timing_tab" (Symtab.empty : Timing.timing Symtab.table)
-val timing_zero = {elapsed=Time.zeroTime, cpu=Time.zeroTime, gc=Time.zeroTime}
-fun timing_plus timing1 timing2 =
-  { elapsed = #elapsed timing1 + #elapsed timing2,
-    cpu = #cpu timing1 + #cpu timing2,
-    gc = #gc timing1 + #gc timing2 }
-
-fun output_local_cumul_timing_for names delayed_computation =
-  let
-    val tab0 = Synchronized.value cumul_timing_tab
-    val timing0_opts = names |> map (Symtab.lookup tab0)
-    val _ = Synchronized.change cumul_timing_tab (fold Symtab.delete_safe names)
-
-    val res = delayed_computation ()
-    val tab = Synchronized.value cumul_timing_tab
-    val timings = names |> map (fn name =>
-      case Symtab.lookup tab name of
-        SOME timing => timing
-      | NONE => error ("local_cumul_timing: no timing associated with name "^quote name^" took place"))
-
-    val _ = tracing (cat_lines (names ~~ timings |> map (fn (name, timing) =>
-      "timing for "^quote name^": "^Timing.message timing)))
-    val _ = Synchronized.change cumul_timing_tab (
-      fold (fn (name, timing0_opt) => case timing0_opt of
-            SOME timing0 => (Symtab.update (name, timing0))
-          | NONE => Symtab.delete_safe name)
-        (names ~~ timing0_opts))
-  in
-    res
-  end
-
-(* FIXME: does not seem to work in a cumulative fashion after all *)
-(* NB: potential recursion has to stay inside f, otherwise the timings for recursive subcalls
-  are counted multiple times *)
-fun cumul_timing name f x =
-  let
-    val (timing, res) = Timing.timing f x
-    val _ = Synchronized.change cumul_timing_tab (
-      Symtab.map_default (name, timing_zero) (timing_plus timing))
-  in
-    res 
-  end
-
-
 
 
 (* returns NONE if f always returns NONE on xs and st,
@@ -1955,16 +1911,19 @@ fun unsafe_exact_thm_prf th =
 fun grnd_exact_thm_prf th =
   let
     val prop = prop_of th
-    val tvars = Term.add_tvars prop [] |> rev
-    val vars = Term.add_vars prop [] |> rev
     val _ =
-      if null vars andalso null tvars then ()
+      if ground prop then ()
       else error ("grnd_exact_thm_prf on non-ground theorem "
         ^Display.string_of_thm_global (Thm.theory_of_thm th) th)
   in unsafe_exact_thm_prf th end
 
 
-fun assumption_prf t = ProofPack (t, Assumption t, [t])
+fun assumption_prf ctxt t =
+  (*if ground t then
+    let val thy = Proof_Context.theory_of ctxt
+    in grnd_exact_thm_prf (Thm.assume (cterm_of thy t)) end
+  else*)
+    ProofPack (t, Assumption t, [t])
 
 fun allI_prf ctxt (x, T) (ProofPack (prop, prf, assms)) =
   let
@@ -2185,7 +2144,7 @@ fun assm_disch_prf ctxt prf = prf |> fold_rev (impI_prf ctxt) (assms_of_proofp p
 fun assume_prems_prf ctxt prf =
   let
     val prems = prf |> prop_of_proofp |> norm_with_env_in_run_state ctxt |> Logic.strip_imp_prems 
-    val prf2 = prf |> fold (mp_rev_prf ctxt o assumption_prf) prems
+    val prf2 = prf |> fold (mp_rev_prf ctxt o assumption_prf ctxt) prems
   in prf2 end
 
 
@@ -2211,7 +2170,7 @@ fun conj_extr_prfs prf ctxt =
 fun conj_concl_extr_prfs prf ctxt =
   let
     val prems = Logic.strip_imp_prems (prop_of_proofp prf)
-    val concl_prf = prf |> fold (mp_rev_prf ctxt o assumption_prf) prems
+    val concl_prf = prf |> fold (mp_rev_prf ctxt o assumption_prf ctxt) prems
     val (concl_ress, ctxt2) = conj_extr_prfs concl_prf ctxt
     val disch_prf = fold_rev (impI_prf ctxt2) prems
   in
@@ -2246,16 +2205,71 @@ fun declare_prf prfp ctxt = fold_terms_prf Variable.declare_term ctxt prfp ctxt
 
 
 
-(* TODO(opt!): sharing of certified types and terms as they are shared in env.
-    Even better: sharing of all subtypes and subterms via net
-    (term indexing is var-fixed and Abs get fully key-encoded; retrieval is exact lookup)
-    and their certification. Perhaps just register whole occurring terms and look for
-    occurences of them as subterms of terms to be certified? *)
+(* NB: sharing type certification efforts result in almost no performance improvement.
+   Use of Typtab slightly faster than Net via typ as term encoding.*)
+fun shared_typ_cert thy (T, cT_opt) Tcert_tab = (ctyp_of thy T, Tcert_tab)
+  (*case Typtab.lookup Tcert_tab T of
+    NONE =>
+      let
+        val cT = case cT_opt of
+            SOME cT => cT
+          | NONE => ctyp_of thy T
+        val Tcert_tab2 = Tcert_tab |> Typtab.update_new (T, cT)
+      in (cT, Tcert_tab2) end
+  | SOME cT =>
+      (cT, Tcert_tab)*)
+      
+(* Performance Stats:
+   This is a 38% optimization of unoptimized replay_prf.
+   About 5.7% improvement on actual elapsed times vs. unoptimized replay_prf.
+   Unoptimized replay_prf contributes about 15% to actual elapsed times. *)
+fun shared_term_cert ctxt t ctabs =
+  let
+    val thy = Proof_Context.theory_of ctxt
+
+    fun atom_cert a (Tcert_tab, cert_tab) =
+      case Termtab.lookup cert_tab a of
+        NONE =>
+          let
+            val ca = cterm_of thy a
+            val cT = Thm.ctyp_of_term ca
+            val T = Thm.typ_of cT
+            val cert_tab2 = cert_tab |> Termtab.update_new (a, ca)
+            val (_, Tcert_tab2) = Tcert_tab |> shared_typ_cert thy (T, SOME cT)
+          in (ca, (Tcert_tab2, cert_tab2)) end
+      | SOME ca =>
+          (ca, (Tcert_tab, cert_tab))
+
+    fun aux ctxt cfixes t ctabs =
+      case t of
+        t1 $ t2 =>
+          let
+            val (ct1, ctabs2) = aux ctxt cfixes t1 ctabs
+            val (ct2, ctabs3) = aux ctxt cfixes t2 ctabs2
+          in (Thm.apply ct1 ct2, ctabs3) end
+      | Abs(x, T, body) =>
+          let 
+            val ([x'], ctxt2) = Variable.variant_fixes [x] ctxt 
+            val free = Free(x', T)
+            val (cfree, ctabs2) = atom_cert free ctabs
+            val (cfixd_body, ctabs3) = ctabs2
+              |> aux ctxt2 (cfree :: cfixes) body
+            val ct = Thm.lambda_name (x, cfree) cfixd_body
+          in (ct, ctabs3) end
+      | Bound i => (nth cfixes i, ctabs)
+      | a => atom_cert a ctabs
+  in
+    (cterm_of thy t, ctabs)
+    (*aux ctxt [] t ctabs*)
+  end
+
+
 (* NB: non-local non-ground hyps are discharged, if they are allowed at all *)
-fun replay_prf allow_nonground_hyps ctxt prfp =
+fun replay_prf allow_nonground_hyps ctxt = CumulTiming.timing "replay_prf" (fn prfp =>
   let
     val prf = proof_of_proofp prfp
     val hyps = assms_of_proofp prfp |> map (norm_with_env_in_run_state ctxt)
+    val grnd_hyps = filter ground hyps
     val nongrnd_hyps = filter_out ground hyps
 
     val _ =
@@ -2266,8 +2280,9 @@ fun replay_prf allow_nonground_hyps ctxt prfp =
           ^"\nhas some nonground hyps (we also print ground ones):\n  "
           ^commas (hyps |> map (str_of_normed_term ctxt)))
 
-    val cert = cterm_of (Proof_Context.theory_of ctxt)
-    val certT = ctyp_of (Proof_Context.theory_of ctxt)
+    val thy = Proof_Context.theory_of ctxt
+    val cert = cterm_of thy
+    val certT = ctyp_of thy
 
     (* TODO(opt?): just collect vars from proposition and hyps *)
     val vars = add_vars_prf ctxt prfp []
@@ -2277,13 +2292,13 @@ fun replay_prf allow_nonground_hyps ctxt prfp =
     (* NB: we avoid fx_n ending with "_", to avoid problem with
        Name.clean_index generating unexpecting variables
        for the fixed frees in Term_Subst.generalize in Thm.generalize *)
-    val ((fxvar_ns, fxTvar_ns), _) = ctxt2 |> Variable.set_body false
+    val ((fxvar_ns, fxTvar_ns), ctxt3) = ctxt2 |> Variable.set_body false
       |> Variable.variant_fixes (map (fst #> fst #> Name.clean) vars)
       ||>> Variable.variant_fixes (map (fst #> fst #> Name.clean) tvars)
       ||> Variable.restore_body ctxt2
     val var_fixing = vars ~~ fxvar_ns
     val tvar_fixing = tvars ~~ fxTvar_ns
-    val fxenv = Envir.merge (get_the_env_in_run_state ctxt2,
+    val fxenv = Envir.merge (get_the_env_in_run_state ctxt3,
       Envir.Envir { maxidx = 0, tenv = Vartab.empty,
         tyenv = Vartab.empty |> fold (fn ((ixn, S), fx_n) =>
           Vartab.update_new (ixn, (S, TFree(fx_n, S)))) tvar_fixing }
@@ -2291,51 +2306,74 @@ fun replay_prf allow_nonground_hyps ctxt prfp =
          might be fine because of deep normalization in Envir.norm_term *)
       |> fold (fn ((ixn, T), fx_n) => curry Envir.update ((ixn, T), (Free (fx_n, T)))) var_fixing)
 
-    val certnorm = cert o Envir.norm_term fxenv
+    fun certnorm t ctabs = (*(cert (Envir.norm_term fxenv t), ctabs)*)
+      shared_term_cert ctxt3 (Envir.norm_term fxenv t) ctabs
     val normT = Envir.norm_type (Envir.type_env fxenv)
-    val certnormT = certT o normT
+    (*val certnormT = certT o normT*)
+    fun certnormT T Tcert_tab = shared_typ_cert thy (normT T, NONE) Tcert_tab
+      
 
-    fun replay (Assumption t) = Thm.assume (certnorm t)
-      | replay (AllI ((x, T), prf)) =
-        let val th = replay prf
-        in Thm.forall_intr (certnorm (Free (x, T))) th end
-      | replay (ImpI (t, prf)) =
-          let val th = replay prf
-          in Thm.implies_intr (certnorm t) th end
-      | replay (ThmPrf (th, Tinst, inst)) =
+    fun replay (Assumption t) ctabs =
+          let val (ct, ctabs2) = certnorm t ctabs
+          in (Thm.assume ct, ctabs2) end
+      | replay (AllI ((x, T), prf)) ctabs =
           let
-            val cTinst = Tinst |> map (fn (v, T) => (certT (TVar v), certnormT T))
-            val cinst = inst |> map (fn (v, t) => (cert (Var (apsnd normT v)), certnorm t))
+            val (th, ctabs2) = replay prf ctabs
+            val (cx, ctabs3) = certnorm (Free (x, T)) ctabs2
+          in (Thm.forall_intr cx th, ctabs3) end
+      | replay (ImpI (t, prf)) ctabs =
+          let
+            val (th, ctabs2) = replay prf ctabs
+            val (ct, ctabs3) = certnorm t ctabs2
+          in (Thm.implies_intr ct th, ctabs3) end
+      | replay (ThmPrf (th, Tinst, inst)) (Tcert_tab, cert_tab) =
+          let
+            val (cTinst, Tcert_tab2) = Tcert_tab |> fold_map (fn (v, T) => fn Tcert_tab_ =>
+                let
+                  val (cv, Tcert_tab_2) = shared_typ_cert thy (TVar v, NONE) Tcert_tab_
+                  val (cT, Tcert_tab_3) = certnormT T Tcert_tab_2
+                in ((cv, cT), Tcert_tab_3) end)
+              Tinst 
+            val (cinst, ctabs3) = (Tcert_tab2, cert_tab) |> fold_map (fn (v, t) => fn ctabs_ =>
+                let
+                  val (cv, ctabs_2) = (*(cert (Var(apsnd normT v)), ctabs_)*)
+                    shared_term_cert ctxt3 (Var (apsnd normT v)) ctabs_
+                  val (ct, ctabs_3) = certnorm t ctabs_2
+                in ((cv, ct), ctabs_3) end)
+              inst 
           in
-            Thm.instantiate (cTinst, cinst) th |> beta_convert
+            (Thm.instantiate (cTinst, cinst) th |> beta_convert, ctabs3)
           end
-      | replay (MP (prf1, prf2)) =
-         let
-           (* TODO(opt): beta conversion necessary here if done at Assumption, ImpI, AllE proof replay? *)
-           val th1 = replay prf1 |> beta_convert
-           val th2 = replay prf2 |> beta_convert
-         in
-           Thm.implies_elim th1 th2
-         end
-      | replay (AllE (prf, t)) =
-          let val th = replay prf
-          in Thm.forall_elim (certnorm t) th |> beta_convert end
-      | replay (BoundRenaming (t, prf)) =
+      | replay (MP (prf1, prf2)) ctabs =
           let
-            val renaming_impl = Thm.trivial (certnorm t)
-            val th = replay prf
-          in Thm.implies_elim renaming_impl th end
+            (* TODO(opt): beta conversion necessary here if done at Assumption, ImpI, AllE proof replay? *)
+            val (th1, ctabs2) = replay prf1 ctabs |>> beta_convert
+            val (th2, ctabs3) = replay prf2 ctabs2 |>> beta_convert
+          in
+            (Thm.implies_elim th1 th2, ctabs3)
+          end
+      | replay (AllE (prf, t)) ctabs =
+          let
+            val (th, ctabs2) = replay prf ctabs
+            val (ct, ctabs3) = certnorm t ctabs2
+          in (Thm.forall_elim ct th |> beta_convert, ctabs3) end
+      | replay (BoundRenaming (t, prf)) ctabs =
+          let
+            val (th, ctabs2) = replay prf ctabs
+            val (ct, ctabs3) = certnorm t ctabs2
+            val renaming_impl = Thm.trivial ct
+          in (Thm.implies_elim renaming_impl th, ctabs3) end
             
 
-    val th_fxd = replay prf
-      handle THM(msg, _, ths) => err_with_trace ctxt2 ("replay_prf: exception while replaying proof of "
-        ^str_of_normed_term ctxt2 (prop_of_proofp prfp)
+    val (th_fxd, ctabs) = replay prf (Typtab.empty, Termtab.empty)
+      handle THM(msg, _, ths) => err_with_trace ctxt3 ("replay_prf: exception while replaying proof of "
+        ^str_of_normed_term ctxt3 (prop_of_proofp prfp)
         ^":\n"^msg
-        ^"\n"^cat_lines (map (Display.string_of_thm ctxt2) ths)
+        ^"\n"^cat_lines (map (Display.string_of_thm ctxt3) ths)
         ^"\n\nproof is\n"
-        ^str_of_normed_term ctxt2 (prf_to_display_term ctxt2 prfp))
-    val th_fxd_disch = th_fxd
-      |> Drule.implies_intr_list (map certnorm nongrnd_hyps)
+        ^str_of_normed_term ctxt3 (prf_to_display_term ctxt3 prfp))
+    val (c_nongrnd_hyps, _) = ctabs |> fold_map certnorm nongrnd_hyps
+    val th_fxd_disch = th_fxd |> Drule.implies_intr_list c_nongrnd_hyps
 
     val maxidx' = Thm.maxidx_of th_fxd_disch + 1
     val T_reinst = tvar_fixing |> map (fn ((ixn, S), fx_n) => (((fx_n, maxidx'), S), TVar(ixn, S)))
@@ -2347,15 +2385,20 @@ fun replay_prf allow_nonground_hyps ctxt prfp =
            (T_reinst |> map (fn (ixnS, T') => pairself certT (TVar ixnS, T')),
              (* NB: T is already reinstantiated *)
             var_fixing |> map (fn ((ixn, T), fx_n) => pairself cert (Var((fx_n, maxidx'), T), Var(ixn, T))))
-      handle THM(msg, _, _) => err_with_trace ctxt2 ("replay_prf: exception while instantiating replayed proof of "
-        ^str_of_normed_term ctxt2 (prop_of_proofp prfp)
-        ^"\nfixed replay gave "^Display.string_of_thm ctxt2 th_fxd
+      handle THM(msg, _, _) => err_with_trace ctxt3 ("replay_prf: exception while instantiating replayed proof of "
+        ^str_of_normed_term ctxt3 (prop_of_proofp prfp)
+        ^"\nfixed replay gave "^Display.string_of_thm ctxt3 th_fxd
         ^"\nerror:  "^msg
         ^"\n\ngeneralizing over: "^commas (map snd tvar_fixing @ map snd var_fixing)
-        ^"\n\nhyps of fixed replay are: "^commas (Thm.hyps_of th_fxd |> map (Syntax.string_of_term ctxt2)))
+        ^"\n\nhyps of fixed replay are: "^commas (Thm.hyps_of th_fxd |> map (Syntax.string_of_term ctxt3)))
+
+    (* val th = prop_of_proofp prfp |> norm_with_env_in_run_state ctxt
+      |> curry Logic.list_implies (grnd_hyps @ nongrnd_hyps)
+      |> cert |> Skip_Proof.make_thm_cterm
+      |> fold (Thm.elim_implies o Thm.assume o cert) grnd_hyps *)
   in
     th
-  end
+  end)
 
 
 
@@ -2868,7 +2911,7 @@ fun pot_note_in_lthy fact ctxt =
 
 
 (* NB: assms are assumed to be normalized wrt. env in run state *)
-and add_assm_terms_internal assms ctxt =
+and add_assm_terms_internal assms = CumulTiming.timing "add_assm_terms_internal" (fn ctxt =>
   if null assms then ctxt
   else
   let
@@ -2916,7 +2959,7 @@ and add_assm_terms_internal assms ctxt =
         (* TODO(opt): if R_th_disch is of the form  P ==> P, then just give back the allI-closed assumption_prf P *)
         (* NB: exact_thm_prf is safe here because thaw_th constructed theorem with instantation into current env *)
         val prf = unsafe_exact_thm_prf R_th_disch
-          |> fold (mp_rev_prf ctxt3 o assumption_prf) assms_used_thawed
+          |> fold (mp_rev_prf ctxt3 o assumption_prf ctxt3) assms_used_thawed
           |> fold_rev (allI_prf ctxt_2) (map (snd #> Term.dest_Free) loc_var_fixing)
 
         (* val _ = tracing ("constructed local rule "^str_of_normed_term ctxt_2 (prop_of_proofp prf)
@@ -2967,7 +3010,7 @@ and add_assm_terms_internal assms ctxt =
             I)
         end)
       new_local_rules
-  end
+  end)
 
 (* TODO(semantics): dynamisch auf Wohlgeformtheit der entstehenden Metafunktion
      pruefen, dh zu jedem Atom und inputs gibt es hoechstens eine Annahme
@@ -3027,7 +3070,8 @@ and add_assm checked th ctxt =
    In particular the uninstantiated variables in locally generated brules should be
    interpreted as generalization variables and not be accidentally instantiated from the
    surrounding metarec state.  *)
-and solve_prems_standalone global_fail_cont local_fail_cont rule prems ctxt0 =
+and solve_prems_standalone global_fail_cont local_fail_cont rule prems =
+  CumulTiming.timing "solve_prems_standalone" (fn ctxt0 =>
   let
     val run_st0_opt = get_run_state (Context.Proof ctxt0)
     val ctxt0_decld_prems = ctxt0 |> fold Variable.declare_term prems (* NB: for correct maxidx *)
@@ -3042,7 +3086,7 @@ and solve_prems_standalone global_fail_cont local_fail_cont rule prems ctxt0 =
     val ctxt3 = ctxt2 |> Context.proof_map (set_run_state run_st0_opt)
   in
     ((ths, env), ctxt3)
-  end
+  end)
 
 (* prems have to be normal, rule is only used for printing *)
  (* ctxt is the thy-transferred version of ctxt0 corresponding to 
@@ -3716,7 +3760,8 @@ and normalize_term ctxt t = normalize_term_conv ctxt t
 (* TODO(refactor): this contains an adaptation of the frules computation mechanism to propagation rules;
      can perhaps be realized with a common implementation, but the frules computation is completely ground *)
 
-and chr_constraint_simplification allow_propagation ctxt00 =
+and chr_constraint_simplification allow_propagation =
+  CumulTiming.timing "chr_constraint_simplification" (fn ctxt00 =>
   let
     val gctxt00 = Context.Proof ctxt00
     val { assms, rules, constraint_propag_and_simp_rules_hdidx, constraint_simprocs,
@@ -3821,10 +3866,6 @@ and chr_constraint_simplification allow_propagation ctxt00 =
     exception CyclicDependencies
     datatype dep_calc_res_ty = CycleAvoided | NoCycleSeen
 
-    (* NB: since we only insert normed constraint entries into walked, calced, deps
-       and since there are no instantiations while calc_simp_deps runs,
-       we can use aconv instead of aconv_norm for their comparison. *)
-    fun triv_dep C = ([C], assumption_prf C)
 
     (* returns ((constraints that C0 depends on, proof of C0 based on assumed dependencies),
          whether cycles were avoided to construct the proof)
@@ -3841,6 +3882,11 @@ and chr_constraint_simplification allow_propagation ctxt00 =
         val eq_C = aconv_norm norm
         val C = norm C0
         val C_eta = C |> Envir.eta_contract
+
+        (* NB: since we only insert normed constraint entries into walked, calced, deps
+           and since there are no instantiations while calc_simp_deps runs,
+           we can use aconv instead of aconv_norm for their comparison. *)
+        fun triv_dep C = ([C], assumption_prf ctxt C)
       in
         if exists (fn (C', _) => aconv (C', C)) walked then
           let val _ = tracing ("calc_simp_deps: discovered cycle among constraints\n"
@@ -3942,7 +3988,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
 
 
     (* TODO(opt?): use mutable Arrays instead of Inttabs for prem_idxd, concl_idxd ? *)
-    fun termhg_trancl ctxt constraint_graph =
+    fun termhg_trancl ctxt = CumulTiming.timing "termhg_trancl" (fn constraint_graph =>
       let
         val prems_of = prop_of_proofp #> Logic.strip_imp_prems
         (* NB: since terms of hyperedges are not instantiated anymore, we used var-fixated
@@ -4189,9 +4235,10 @@ and chr_constraint_simplification allow_propagation ctxt00 =
               Net.insert_term (K false) (prep_index_term concl, (concl, lazy_imp_prfs))
             end)
           res_concl_idxd
-      end
+      end)
 
-    fun reconsider_instantiated_constraints reason_trace (constraint_graph, ctxt) =
+    fun reconsider_instantiated_constraints reason_trace =
+      CumulTiming.timing "reconsider_instantiated_constraints" (fn (constraint_graph, ctxt) =>
       let
         (* NB: determination of existing constraints that have been instantiated now relies on the facts that
              * constraints in the constraint graph are fully normalized 
@@ -4231,7 +4278,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
       in
         (constraint_graph, ctxt2)
         |> reg_constraints true NONE (map (fst #> rpair NONE) inst_old_Cs)
-      end
+      end)
 
 
     and gen_with_pot_rules common_rulety pot_rules_with_C4head (constraint_graph0, ctxt0) = 
@@ -4961,7 +5008,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
                      member (op aconv) prems2 C andalso member (op aconv) prems C2))
             val choosen_imp_prf = case poss_lazy_imp_prfs2 of
                 x :: _ => x
-              | [] => ([C], fn _ => assumption_prf C)
+              | [] => ([C], fn _ => assumption_prf ctxt' C)
           in (C, choosen_imp_prf) :: curr_choices end)
         constraints1_poss_lazy_imp_prfs
       |> map (fn (C, (prems, lazy_imp_prf)) => (C, (prems, lazy_imp_prf ctxt')))
@@ -5017,7 +5064,7 @@ and chr_constraint_simplification allow_propagation ctxt00 =
       |> map (fn (C, (_, prf)) => (C, prf (* |> fold_rev (impI_prf ctxt') constraints' *)))
   in
     ((constraints', implied_constraints_res), ctxt')
-  end
+  end)
 
 and metarec_constraint_simp_internal (C0, ConstraintTrace C0_trace) ctxt =
   let
@@ -5106,6 +5153,7 @@ and metarec_constraint_simp_internal (C0, ConstraintTrace C0_trace) ctxt =
   end
 
 and metarec_simp_instantiated_constraints ctxt =
+  ctxt |> CumulTiming.timing "metarec_constraint_simp_instantiated_constraints" (fn ctxt =>
     let
       (* TODO(opt!!): faster determination of instantiated constraints via var_exact_net normalization.
            If we can keep constraint list in cache, traversal should be quite fast.
@@ -5162,10 +5210,10 @@ and metarec_simp_instantiated_constraints ctxt =
              inst_Cs
     in
       ctxt2
-    end
+    end)
 
 
-and metarec_constraint_simp prf ctxt =
+and metarec_constraint_simp prf = CumulTiming.timing "metarec_constraint_simp" (fn ctxt =>
   let
     val {constraints, ...} = get_the_run_state (Context.Proof ctxt)
 
@@ -5210,10 +5258,10 @@ and metarec_constraint_simp prf ctxt =
              (constraints' |> map (fn (C, tr) => (C, tr, ActiveConstraint))))
            #> map_simpd_constraints_in_run_state (K []))
       |> invoke_linear_ctxt_boundary_handlers ChrConstraintSimpBoundary
-  in (prf2, ctxt4) end
+  in (prf2, ctxt4) end)
 
 
-and metarec_structural_unifications prf ctxt = 
+and metarec_structural_unifications prf = CumulTiming.timing "metarec_structural_unifications" (fn ctxt =>
   let
     val {env, delayed_unifs, ...} = get_the_run_state (Context.Proof ctxt)
 
@@ -5297,19 +5345,19 @@ and metarec_structural_unifications prf ctxt =
       |> invoke_linear_ctxt_boundary_handlers DelayedUnificationsBoundary
   in
     (prf2, ctxt4)
-  end
+  end)
 
 
 
   (* NB: assumes normalized pobj, iobjs *)
-and metarec_no_constraintsimp failcont ctxt jid (pobj, iobjs) =
+and metarec_no_constraintsimp failcont ctxt jid = CumulTiming.timing "metarec_no_constraintsimp" (fn (pobj, iobjs) =>
   metarec_worker true ctxt (SOME failcont) jid (pobj, iobjs)
-  ||> invoke_linear_ctxt_boundary_handlers MetarecBoundary
+  ||> invoke_linear_ctxt_boundary_handlers MetarecBoundary)
 
 (* pobj, iobjs  may not contain any Vars
      (not true anymore, because init_run_state uses current maxidx?)
    metarec calculates beta,comp_rule-normal  oobjs  with  J pobj iobjs oobjs *)
-and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
+and metarec_with_failcont failcont ctxt0 jid = CumulTiming.timing "metarec_with_failcont" (fn (pobj, iobjs) =>
   let
     val ctxt = ctxt0
       |> add_to_msg_trace ("metarec: on judgement "^quote jid^" with input ("
@@ -5416,7 +5464,7 @@ and metarec_with_failcont failcont ctxt0 jid (pobj, iobjs) =
     val constraints' = get_constraints_in_run_state ctxt5 |> map (#1 #> norm5)
   in
     ((th, oobjs'), (delayed_unifs', constraints'))
-  end
+  end)
 
 
 and metarec ctxt0 jid (pobj, iobjs) =
@@ -6383,7 +6431,7 @@ fun print_new_facts gctxt =
      add_expl_frule, add_impl_frule, add_rule etc sind
      ja alles Attribute also werden die wohl wie Declarations
      mitinstantiiert *)
-fun run_expl_frules lthy0 =
+fun run_expl_frules lthy0 = lthy0 |> CumulTiming.timing "run_expl_frules" (fn lthy0 =>
   let
     val lthy1 = lthy0 |> set_running_expl_frules true
     val {depgraph, frules, new_facts=new_facts0, ...} =
@@ -6510,7 +6558,7 @@ fun run_expl_frules lthy0 =
         ^(rev log |> map (fn s => "  "^s) |> cat_lines))
   in
     lthy3
-  end
+  end)
   
 
 
@@ -7189,7 +7237,7 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
 
     fun nonpattern_cont () =
       let
-        val delayed_assm = assumption_prf (Logic.mk_equals (t1_lft, t2_lft))
+        val delayed_assm = assumption_prf ctxt (Logic.mk_equals (t1_lft, t2_lft))
         val (appd_delayed_assm, ctxt2) = (delayed_assm, ctxt)
           |> fold (fn arg => fn (prf, ctxt_) => fun_cong_prf prf arg ctxt_) local_frees
         val aconv' = aconv_norm (norm_with_env_in_run_state ctxt2)
@@ -7324,7 +7372,7 @@ fun constraint_gen_proc ctxt fail_cont (C0, [], _) =
     (* val _ = tracing ("local_frees are "^commas (map (Syntax.string_of_term ctxt) local_frees)) *)
     
     val C_lifted = fold_rev Logic.all local_frees (Logic.list_implies (rel_assms, C))
-    val C_lifted_prf = assumption_prf C_lifted
+    val C_lifted_prf = assumption_prf ctxt C_lifted
 
     (* val _ = tracing ((*compose_err_from_trace ctxt*)
       ("\n\ngenerated constraint\n  "^str_of_normed_term ctxt C_lifted)
@@ -7341,7 +7389,7 @@ fun constraint_gen_proc ctxt fail_cont (C0, [], _) =
 
     val C_prf = C_lifted_prf
       |> fold (allE_rev_prf ctxt2) local_frees
-      |> fold (mp_rev_prf ctxt2 o assumption_prf) rel_assms
+      |> fold (mp_rev_prf ctxt2 o assumption_prf ctxt2) rel_assms
 
     val (res_prf, ctxt3) = mps_match_on_freshthm_prf Data.constraintI [C_prf] ctxt2
     val st2 = get_the_run_state (Context.Proof ctxt3)
