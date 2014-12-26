@@ -1,5 +1,6 @@
 (* Immutable bit vectors of arbitrary size, based on SMLs arbitrary size integers.
-   Bit indexing is zero-based. *)
+   Bit indexing is zero-based.
+   NB: these bitvectors are not really fast compared to small lists of integers, even subset check *)
 signature BIT_VECTOR = sig
 
   type bitvec
@@ -24,12 +25,20 @@ signature BIT_VECTOR = sig
   val subtract : bitvec -> bitvec -> bitvec
   val split_first : bitvec -> (int * bitvec) option
 
+  val fold : (int -> 'a -> 'a) -> bitvec -> 'a -> 'a
+  val forall : (int -> bool) -> bitvec -> bool
+  val exists : (int -> bool) -> bitvec -> bool
+
   val to_int : bitvec -> int
   val from_int : int -> bitvec
 
   val to_list : bitvec -> bool list
   val from_list : bool list -> bitvec
+  
+  val to_index_list : bitvec -> int list
+
   val to_string : bitvec -> string
+  val to_index_string : bitvec -> string
 
   val eq : bitvec * bitvec -> bool
   val subset : bitvec -> bitvec -> bool
@@ -74,20 +83,25 @@ structure BitVector :> BIT_VECTOR = struct
   val word32_mask = mask 32
   val byte_mask = mask 8
 
-  fun split_first bv =
+  fun split_first bv0 =
     let
       fun aux i bv =
         if is_empty bv then
           NONE
         else if contains_index0 bv then
-          SOME (i, shift_over_index0 bv)
+          SOME (i, bv0 |> remove i)
         else if is_empty (intersect word32_mask bv) then (* skipping optimization *)
           aux (i + 32) (IntInf.~>>(bv, Word.fromInt 32))
         else if is_empty (intersect byte_mask bv) then (* skipping optimization *)
           aux (i + 8) (IntInf.~>>(bv, Word.fromInt 8))
         else
           aux (i + 1) (shift_over_index0 bv)
-    in aux 0 bv end
+    in aux 0 bv0 end
+
+  fun fold f bv a =
+    case split_first bv of
+      NONE => a
+    | SOME (i, bv2) => fold f bv2 (f i a)
 
   val to_int = I
   val from_int = I
@@ -102,8 +116,15 @@ structure BitVector :> BIT_VECTOR = struct
     | from_list (b :: bs) =
         IntInf.orb(IntInf.<<(from_list bs, Word.fromInt 1), 
           if b then 1 else 0)
+
+  fun to_index_list bv = fold cons bv []
+  fun forall p bv = true |> fold (fn i => fn b => b andalso p i) bv
+  fun exists p bv = false |> fold (fn i => fn b => b orelse p i) bv
+
   val to_string =
     to_list #> map (fn b => if b then "1" else "0") #> implode #> quote
+  fun to_index_string bv =
+    "[ "^(to_index_list bv |> map string_of_int |> commas)^" ]"
 
   fun eq (bv1, bv2) = bv1 = bv2
   fun subset bv1 bv2 = (intersect bv1 bv2 = bv1)
@@ -114,8 +135,13 @@ structure BitVector :> BIT_VECTOR = struct
     else if subset bv2 bv1 then GREATER
     else EQUAL
   val bv_int_ord = pairself to_int #> int_ord
+
+
 end
 
+val _ =
+  PolyML.addPrettyPrinter (fn depth => fn _ => fn (bv : BitVector.bitvec) =>
+    BitVector.to_index_list bv |> rpair depth |> PolyML.prettyRepresentation)
 
 structure BitVectorTab = Table(type key = BitVector.bitvec val ord = BitVector.bv_int_ord);
 structure BitVectorGraph = Graph(type key = BitVector.bitvec val ord = BitVector.bv_int_ord);

@@ -114,9 +114,9 @@ fun endprint_block { cumul_name, timing_names, timer_start,
 fun print_block cumul_name timing_names f =
   let
     val cumul_timing_block = start_block cumul_name timing_names
-    val res = f ()
+    val res0 = Exn.interruptible_capture f ()
     val _ = endprint_block cumul_timing_block
-  in res end
+  in Exn.release res0 end
 
 
 (* NB: since we do not treat timings of recursive functions,

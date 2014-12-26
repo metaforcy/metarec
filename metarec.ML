@@ -61,6 +61,7 @@ functor MetaRec(Data : MetaRecData) =
 struct
 
 
+structure IntListGraph = Graph(type key = int list val ord = list_ord int_ord)
 
 (* TODO(feature):
      * globally track unification variables (those introduced by fresh_unifvar_proc;
@@ -80,6 +81,11 @@ fun string_of_thm_in_gctxt gctxt =
 
 
 
+fun list_subset_ord eq (l1, l2) =
+  if eq_set eq (l1, l2) then EQUAL
+  else if subset eq (l1, l2) then LESS
+  else if subset eq (l2, l1) then GREATER
+  else EQUAL (* incomparable *)
 
 
 (* returns NONE if f always returns NONE on xs and st,
@@ -3965,12 +3971,22 @@ and chr_constraint_simplification allow_propagation =
       in (deps, prf) end
 
 
-    fun subsuming_cons subs imp (imps, ch) =
-      if exists (fn imp2 => subs (imp2, imp)) imps then
-        (imps, ch)
-      else
-        imps |> filter_out (fn imp2 => subs (imp, imp2))
-        |> cons imp |> rpair true
+    (* NB: traversing imps2 only once is a 100% performance optimization *)
+    fun subsuming_cons_aux subs imp (imps0, ch0) imps2 acc =
+      case imps2 of
+        imp2 :: imps2' =>
+          if subs (imp2, imp) then
+            (imps0, ch0)
+          else if subs (imp, imp2) then
+            subsuming_cons_aux subs imp (imps0, ch0) imps2' acc
+          else
+            subsuming_cons_aux subs imp (imps0, ch0) imps2' (cons imp2 acc)
+      | [] =>
+          (* NB: reversing result is not necessary semantically, but statistically
+             improves performance, sometimes tenfold, which is not related to cache locality *)
+          (cons imp acc (*|> rev*), true)
+    fun subsuming_cons subs imp (imps, ch) = 
+      subsuming_cons_aux subs imp (imps, ch) imps []
     fun subsuming_merge_into subs imps1 imps2 = (imps2, false)
       |> fold (subsuming_cons subs) imps1
 
@@ -4057,18 +4073,19 @@ and chr_constraint_simplification allow_propagation =
 
         fun naprffastrep_subsumes (fastrep_proj1, fastrep_proj2) (arg1, arg2) = 
           let
-            val (prems_bv1, (_, concl_num1)) = fastrep_proj1 arg1
-            val (prems_bv2, (_, concl_num2)) = fastrep_proj2 arg2
+            val (prems1_nums, concl_num1) = fastrep_proj1 arg1
+            val (prems2_nums, concl_num2) = fastrep_proj2 arg2
           in
             concl_num1 = concl_num2
-            andalso BitVector.subset prems_bv1 prems_bv2
+            andalso subset (op =) (prems1_nums, prems2_nums)
           end
-        val premnumbered_naprffastrep_subsuming_merge_into =
-          subsuming_merge_into (eq_pair (op =) (naprffastrep_subsumes (snd, snd)))
+        (* val premnumbered_naprffastrep_subsuming_merge_into =
+          subsuming_merge_into (eq_pair (op =) (naprffastrep_subsumes (snd, snd))) *)
         val naprffastrep_subsuming_merge_into = subsuming_merge_into (naprffastrep_subsumes (snd, snd))
 
-        fun cyclic_or_subsumed (_, concl_idxd) (fastrep as (prems_bv, (prems_nums, concl_num))) =
+        fun cyclic_or_subsumed (_, concl_idxd) (fastrep as (prems_nums, concl_num)) =
           let
+            (* NB: list membership here slightly faster than bitvector operation! *)
             val cyclic = member (op =) prems_nums concl_num
             val ex_aprfs_for_concl = Inttab.lookup concl_idxd concl_num |> these
             val subsumed = ex_aprfs_for_concl
@@ -4077,7 +4094,7 @@ and chr_constraint_simplification allow_propagation =
             (cyclic orelse subsumed, ex_aprfs_for_concl)
           end
 
-        fun register_aprf (aprf_wfastrep as (aprf, fastrep as (prems_bv, (prems_nums, concl_num))))
+        fun register_aprf (aprf_wfastrep as (aprf, fastrep as (prems_nums, concl_num)))
               (res as (_, concl_idxd)) =
           let
             val ((cyclic_or_subsumed), ex_aprfs_for_concl) = cyclic_or_subsumed res fastrep
@@ -4092,11 +4109,11 @@ and chr_constraint_simplification allow_propagation =
                   ^(if ch_aprfs_for_concl' then "  resulting in changes for conclusion entry" else "")) *)
               in
                 res
-                |>> fold_index (fn (i, prem_num) => fn prem_idxd_ =>
+                |>> fold (fn prem_num => fn prem_idxd_ =>
                         let
                           val ex_aprfs_for_prem = Inttab.lookup prem_idxd_ prem_num |> these
                           val (aprfs_for_prem', ch_aprfs_for_prem') = ex_aprfs_for_prem 
-                            |> premnumbered_naprffastrep_subsuming_merge_into [(i, aprf_wfastrep)]
+                            |> naprffastrep_subsuming_merge_into [aprf_wfastrep]
                         in
                           prem_idxd_
                           |> ch_aprfs_for_prem' ? Inttab.update (prem_num, aprfs_for_prem')
@@ -4107,7 +4124,7 @@ and chr_constraint_simplification allow_propagation =
              end
           end
 
-        and propag_aprf (aprf, (prems_bv, (prems_nums, concl_num))) (res as (prem_idxd, concl_idxd)) = 
+        and propag_aprf (aprf, (prems_nums, concl_num)) (res as (prem_idxd, concl_idxd)) = 
           let
             val concl_as_prem_matches = Inttab.lookup prem_idxd concl_num |> these
 
@@ -4123,32 +4140,28 @@ and chr_constraint_simplification allow_propagation =
                absorb hyperpaths with that outline into aprf)
                will occur later in the prem_idxd/concl_idxd entries for prems/concl. *)
             res
-            |> fold (fn (i, (bot_aprf, (bot_prems_bv, (bot_prems_nums, bot_concl_num)))) => fn res_ =>
+            |> fold (fn (bot_aprf, (bot_prems_nums, bot_concl_num)) => fn res_ =>
                    let
                      val comp_prems_nums = bot_prems_nums |> remove (op =) concl_num
                        |> union (op =) prems_nums
-                     val comp_prems_bv = bot_prems_bv |> BitVector.subtract (BitVector.single concl_num) 
-                       |> BitVector.union prems_bv
-                     val comp_fastrep = (comp_prems_bv, (comp_prems_nums, bot_concl_num))
+                     val comp_fastrep = (comp_prems_nums, bot_concl_num)
                    in
                      if fst (cyclic_or_subsumed res_ comp_fastrep) then
                        res_
                      else
                        let
-                         val comp_aprf = CompositeAPrf (aprf, nth bot_prems_nums i, bot_aprf)
+                         val comp_aprf = CompositeAPrf (aprf, concl_num, bot_aprf)
                        in
                          res_ |> register_aprf (comp_aprf, comp_fastrep)
                        end
                    end)
                  concl_as_prem_matches
             |> fold (fn (prem_num, prem_as_concl_matches) =>
-                   fold (fn (top_aprf, (top_prems_bv, (top_prems_nums, _))) => fn res_ =>
+                   fold (fn (top_aprf, (top_prems_nums, _)) => fn res_ =>
                        let
                          val comp_prems_nums = prems_nums |> remove (op =) prem_num
                            |> union (op =) top_prems_nums
-                         val comp_prems_bv = prems_bv |> BitVector.subtract (BitVector.single prem_num)
-                           |> BitVector.union top_prems_bv
-                         val comp_fastrep = (comp_prems_bv, (comp_prems_nums, concl_num))
+                         val comp_fastrep = (comp_prems_nums, concl_num)
                        in
                          if fst (cyclic_or_subsumed res_ comp_fastrep) then
                            res_
@@ -4169,13 +4182,13 @@ and chr_constraint_simplification allow_propagation =
                    val (prems, concl) = nimp_prf |> prop_of_proofp |> Logic.strip_horn
                    val prems_nums = prems |> map constraint_to_num
                    val concl_num = constraint_to_num concl
-                   val prems_bv = BitVector.empty |> fold (BitVector.union o BitVector.single) prems_nums
-                   val fastrep = (prems_bv, (prems_nums, concl_num))
+                   val fastrep = (prems_nums, concl_num)
                    val aprf = ElementaryAPrf nimp_prf
                  in
                    register_aprf (aprf, fastrep)
                  end)
                normed_imp_prfs
+
       in
         (* We annotate resulting conclusion-indexed transitive closure of hypergraph with
            conclusion-specific bitvectors for each hyperpath that signify transitive
@@ -4185,36 +4198,33 @@ and chr_constraint_simplification allow_propagation =
             let
               val concl = case aprfs of
                   [] => error ("internal error: no aprfs for a concl after transitive hypergraph closure")
-                | (aprf, (_, (_, concl_num))) :: _ => num_to_constraint concl_num
+                | (aprf, (_, concl_num)) :: _ => num_to_constraint concl_num
 
-              val trsmaller_G = BitVectorGraph.empty
-                |> fold_index (fn (i, (_, (prems_bv, (prems_nums, _)))) =>
-                       BitVectorGraph.new_node (prems_bv, i))
-                     aprfs
-                |> fold (fn (_, (prems1_bv, (prems1_nums, _))) =>
-                       fold (fn (_, (prems2_bv, (prems2_nums, _))) =>
-                           if BitVector.eq (prems1_bv , prems2_bv) then I
+              val trsmaller_G = IntListGraph.empty
+                |> fold_index (fn (i, (_, (prems_nums, _))) => IntListGraph.new_node (prems_nums, i)) aprfs
+                |> fold (fn (_, (prems1_nums, _)) =>
+                       fold (fn (_, (prems2_nums, _)) =>
+                           if eq_set (op =) (prems1_nums, prems2_nums) then I
                            else
                              let val trsmaller = prems1_nums |> subtract (op =) prems2_nums
                                |> forall (fn prem1_num =>
                                     Inttab.lookup res_concl_idxd prem1_num |> these
-                                    |> exists (fn (_, (interm_prems_bv, _)) =>
-                                         BitVector.subset interm_prems_bv prems2_bv))
+                                    |> exists (fn (_, (interm_prems_nums, _)) =>
+                                         subset (op =) (interm_prems_nums, prems2_nums)))
                              in
-                               trsmaller ? BitVectorGraph.add_edge (prems1_bv, prems2_bv)
+                               trsmaller ? IntListGraph.add_edge (prems1_nums, prems2_nums)
                              end)
                          aprfs)
                      aprfs
 
 
-              val lazy_imp_prfs = aprfs |> map (fn (aprf, (prems_bv, (prems_nums, _))) =>
+              val lazy_imp_prfs = aprfs |> map (fn (aprf, (prems_nums, _)) =>
                 let
-                  (* NB: bitvector for prems_bv is included via reflexivity of all_preds *)
-                  val trsmaller_bv = BitVector.empty |> fold (fn small_bv =>
-                      BitVector.union (BitVectorGraph.get_node trsmaller_G small_bv |> BitVector.single))
-                    (BitVectorGraph.all_preds trsmaller_G [prems_bv])
+                  (* NB: number for prems_nums is included via reflexivity of all_preds *)
+                  val trsmaller_nums = IntListGraph.all_preds trsmaller_G [prems_nums]
+                    |> map (IntListGraph.get_node trsmaller_G)
                   val prems = prems_nums |> map num_to_constraint
-                in (prems, lazy_aprf_construct aprf, trsmaller_bv) end)
+                in (prems, lazy_aprf_construct aprf, trsmaller_nums) end)
               
               (*fun imp_prf_str_from_prems_bv prems1_bv = imp_prfs
                 |> map_filter (fn (imp_prf, (prems2_bv, _)) =>
@@ -4965,23 +4975,24 @@ and chr_constraint_simplification allow_propagation =
       |> map (fn C =>
            let
              val prepfix_index_term = Envir.eta_contract #> fix_index_term
+
              val poss_lazy_imp_prfs = Net.match_term trancl_simping_bridged_CG_concls (prepfix_index_term C)
                |> filter (fn (C', _) => C' aconv C) |> try (hd #> snd) |> these
-               |> map (fn (prems, lazy_imp_prf, trsmaller_bv) =>
+               |> map (fn (prems, lazy_imp_prf, trsmaller_nums) =>
                     let val simp_extendable = prems |> exists (fn prem =>
                       case Net.match_term constraint_graph'_simping_bridged (Envir.eta_contract prem)
                         |> filter (fn (C', _) => eq_C (C', prem)) |> try (hd #> snd) |> these
                       of
                         (_, src_chr_ty) :: _ => src_chr_ty = SimpCHR
                       | _ => false (* prem not a conclusion of a hyperpath *))
-                    in ((simp_extendable, trsmaller_bv), (prems, lazy_imp_prf)) end)
+                    in ((simp_extendable, trsmaller_nums), (prems, lazy_imp_prf)) end)
                (* we prefer hyperpaths that are non-simp-extendable, are composed of
                   many hyperedges and have few premises *)
                |> sort (rev_order o
-                    (fn (((simp_extbl1, trsmaller_bv1), (prems1, _)),
-                         ((simp_extbl2, trsmaller_bv2), (prems2, _))) =>
+                    (fn (((simp_extbl1, trsmaller1_nums), (prems1, _)),
+                         ((simp_extbl2, trsmaller2_nums), (prems2, _))) =>
                       case bool_ord (not simp_extbl1, not simp_extbl2) of
-                        EQUAL => (case BitVector.subset_ord (trsmaller_bv1, trsmaller_bv2) of
+                        EQUAL => (case list_subset_ord (op =) (trsmaller1_nums, trsmaller2_nums) of
                           EQUAL => int_ord (length prems1, length prems2)
                         | order => order)
                       | order => order))
