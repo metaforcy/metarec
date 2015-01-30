@@ -1,8 +1,8 @@
 
 signature DECOMP_PATTERN =
 sig
-  val decompose_match_w_shared_vars: theory -> term * term -> Type.tyenv * Envir.tenv -> Type.tyenv * Envir.tenv
-  val match_w_shared_vars: theory -> term * term -> Type.tyenv * Envir.tenv -> Type.tyenv * Envir.tenv
+  val decompose_match_w_shared_vars: theory -> term * term -> EnvDiff.env -> EnvDiff.env
+  val match_w_shared_vars: theory -> term * term -> EnvDiff.env -> EnvDiff.env
 end;
 
 structure DecompPattern: DECOMP_PATTERN =
@@ -13,7 +13,7 @@ exception NotBetaNormal
 
 fun string_of_term thy env binders t =
   Syntax.string_of_term_global thy
-    (Envir.norm_term env (subst_bounds (map Free binders, t)));
+    (EnvDiff.norm_term env (subst_bounds (map Free binders, t)));
 
 val trace_match_fail = Unsynchronized.ref false;
 
@@ -27,8 +27,8 @@ fun ocheck_fail_matching thy (F,t,binders,env) =
        end
   else ()
 
-fun occurs(F,t,env) =
-    let fun occ(Var (G, T))   = (case Envir.lookup (env, (G, T)) of
+fun occurs env F t =
+    let fun occ(Var (G, T))   = (case EnvDiff.lookup env (G, T) of
                                  SOME(t) => occ t
                                | NONE    => F=G)
           | occ(t1$t2)      = occ t1 orelse occ t2
@@ -63,7 +63,7 @@ fun ints_of []             = []
       in if member (op =) is i then raise Pattern.Pattern else i::is end
   | ints_of _              = raise Pattern.Pattern;
 
-fun ints_of' env ts = ints_of (map (Envir.head_norm env) ts);
+fun ints_of' env ts = ints_of (map (EnvDiff.head_norm env) ts);
 
 
 fun app (s,(i::is)) = app (s$Bound(i),is)
@@ -83,25 +83,25 @@ fun downto0 (i :: is, n) = i = n andalso downto0 (is, n - 1)
 
 (*** Matching ***)
 
-fun typ_match thy TU tyenv = Sign.typ_match thy TU tyenv
+fun typ_match thy TU env = EnvDiff.typ_match thy TU env
   handle Type.TYPE_MATCH => raise Pattern.MATCH;
 
 
 
 (* Matching of higher-order patterns *)
 
-fun match_bind(itms,binders,ixn,T,is,t) =
+fun match_bind binders (ixn,T) is t env =
   let val js = loose_bnos t
   in
     if null is then
-      if null js then Vartab.update_new (ixn, (T, t)) itms
+      if null js then EnvDiff.update ((ixn, T), t) env
       else raise Pattern.MATCH
     else
       if subset (op =) (js, is) then
         let val t' =
           if downto0(is,length binders - 1) then t
           else mapbnd (idx is) t
-        in Vartab.update_new (ixn, (T, mkabs (binders, is, t'))) itms end
+        in EnvDiff.update ((ixn, T), mkabs (binders, is, t')) env end
       else raise Pattern.MATCH
   end;
 
@@ -112,27 +112,27 @@ fun match_bind(itms,binders,ixn,T,is,t) =
 
 fun first_order_match_w_shared_vars thy =
   let
-    fun mtch k instsp (pat, obj0) =
-      let val obj = obj0
-        |> Envir.head_norm (Envir.Envir{maxidx=0, tenv=snd instsp, tyenv=fst instsp})
-      in mtch_aux k instsp (pat, obj) end
-    and mtch_aux k (instsp as (tyinsts,insts)) = fn
+    fun mtch k env (pat, obj0) =
+      let val obj = obj0 |> EnvDiff.head_norm env
+      in mtch_aux k env (pat, obj) end
+    and mtch_aux k env = fn
         (Var(ixn,T), t)  =>
           if k > 0 andalso Term.is_open t then raise Pattern.MATCH
           else
-           (case Envir.lookup' (insts, (ixn, T)) of
-             NONE => (typ_match thy (T, fastype_of t) tyinsts,
-                      Vartab.update_new (ixn, (T, t)) insts)
-           | SOME u => if Pattern.aeconv (t, u) then instsp else raise Pattern.MATCH)
+           (case EnvDiff.lookup' env (ixn, T) of
+             NONE =>
+               env |> typ_match thy (T, fastype_of t)
+               |> EnvDiff.update ((ixn, T), t)
+           | SOME u => if Pattern.aeconv (t, u) then env else raise Pattern.MATCH)
       | (Free (a,T), Free (b,U)) =>
-          if a=b then (typ_match thy (T,U) tyinsts, insts) else raise Pattern.MATCH
+          if a=b then env |> typ_match thy (T,U) else raise Pattern.MATCH
       | (Const (a,T), Const (b,U))  =>
-          if a=b then (typ_match thy (T,U) tyinsts, insts) else raise Pattern.MATCH
-      | (Bound i, Bound j)  =>  if  i=j  then  instsp  else raise Pattern.MATCH
+          if a=b then env |> typ_match thy (T,U) else raise Pattern.MATCH
+      | (Bound i, Bound j)  =>  if  i=j  then  env  else raise Pattern.MATCH
       | (Abs(_,T,t), Abs(_,U,u))  =>
-          mtch (k + 1) (typ_match thy (T,U) tyinsts, insts) (t,u)
-      | (f$t, g$u) => mtch k (mtch k instsp (f,g)) (t, u)
-      | (t, Abs(_,U,u))  =>  mtch (k + 1) instsp ((incr t)$(Bound 0), u)
+          mtch (k + 1) (typ_match thy (T,U) env) (t,u)
+      | (f$t, g$u) => mtch k (mtch k env (f,g)) (t, u)
+      | (t, Abs(_,U,u))  =>  mtch (k + 1) env ((incr t)$(Bound 0), u)
       | _ => raise Pattern.MATCH
   in fn tu => fn env => mtch 0 env tu end;
 
@@ -141,41 +141,39 @@ fun first_order_match_w_shared_vars thy =
 
 (* matching were variables with same identity in pat and obj are regarded as shared
   NB: no deep variable bindings, as this would correspond to unification, so we only norm the object *)
-fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
+fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
   let
-    fun toenv (iTs,itms) = Envir.Envir {maxidx=0, tenv=itms, tyenv=iTs}
-
     (* Pre: pat and obj have same type *)
-    fun mtch binders (pat, obj0) (env as (iTs,itms)) =
+    fun mtch binders (pat, obj0) env =
       let 
         (* NB: we normalize in order to regard common variables in object and pattern as shared.
            Only object is normalized to avoid deep matching, which would correspond to unification. *)
-        val obj = obj0 |> Envir.head_norm (toenv env)
+        val obj = obj0 |> EnvDiff.head_norm env
       in
         case pat of
           Abs(ns,Ts,ts) =>
             (case obj of
-               Abs(nt,Tt,tt) => mtch ((nt,Tt)::binders) (ts,tt) env
+               Abs(nt,Tt,tt) => mtch ((nt,Tt)::binders) (ts, tt) env
             | _ =>
               if is_decompose_match then raise Pattern.MATCH
               else
-                let val Tt = Envir.subst_type iTs Ts
-                in mtch((ns,Tt)::binders) (ts,(incr obj)$Bound(0)) env end)
+                let val Tt = EnvDiff.subst_type env Ts
+                in mtch ((ns,Tt)::binders) (ts, incr obj $ Bound 0) env end)
         | _ => (case obj of
                   Abs(nt,Tt,tt) =>
-                    mtch((nt,Tt)::binders) ((incr pat)$Bound(0),tt) env
-               | _ => cases(binders,env,pat,obj))
+                    mtch ((nt,Tt)::binders) (incr pat $ Bound 0, tt) env
+               | _ => cases binders env pat obj)
       end
 
-    and cases(binders,env as (iTs,itms),pat,obj) =
+    and cases binders env pat obj =
       let
         val (ph,pargs) = strip_comb pat
         val (oh,oargs) = strip_comb obj
-        fun rigrig1 (iTs_,itms_) = fold (mtch binders) (pargs~~oargs) (iTs_,itms_)
+        fun rigrig1 env_ = fold (mtch binders) (pargs~~oargs) env_
           handle ListPair.UnequalLengths => raise Pattern.MATCH
         fun rigrig2 ((a,Ta), (b,Tb)) =
           if a <> b then raise Pattern.MATCH
-          else rigrig1 (typ_match thy (Ta,Tb) iTs, itms)
+          else env |> typ_match thy (Ta, Tb) |> rigrig1
       in
         case ph of
           Var(ixn,T) =>
@@ -183,16 +181,16 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
               fun varmatch () = 
                 let
                   val _ =
-                    if occurs(ixn,obj,toenv env) then
-                      (ocheck_fail_matching thy (ixn,obj,binders,toenv env);
+                    if occurs env ixn obj then
+                      (ocheck_fail_matching thy (ixn,obj,binders,env);
                       raise Pattern.MATCH)
                     else ()
                 in 
                   case (SOME (ints_of pargs)
                     handle Pattern.Pattern => NONE)
                   of
-                    SOME is => (case Envir.lookup' (itms, (ixn, T)) of
-                        NONE => (iTs,match_bind(itms,binders,ixn,T,is,obj))
+                    SOME is => (case EnvDiff.lookup' env (ixn, T) of
+                        NONE => env |> match_bind binders (ixn,T) is obj
                       | SOME u =>
                           if Pattern.aeconv (obj, red u is []) then env
                           else raise Pattern.MATCH)
@@ -202,8 +200,8 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
                           obj1 $ obj2 =>
                             let val typ_of = curry fastype_of1 (map snd binders)
                             in
-                              (iTs, itms)
-                              |>> typ_match thy (typ_of pat1, typ_of obj1)
+                              env
+                              |> typ_match thy (typ_of pat1, typ_of obj1)
                               |> fold (mtch binders) ([pat1, pat2] ~~ [obj1, obj2])
                             end
                         | _ => raise Pattern.MATCH)
@@ -229,11 +227,10 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) envir =
           | _                 => raise Pattern.MATCH)
       end;
 
-    val pT = fastype_of pat
-    and oT = fastype_of obj
-    val envir' = apfst (typ_match thy (pT, oT)) envir;
   in
-    mtch [] po envir'
+    env0
+    |> typ_match thy (fastype_of pat, fastype_of obj)
+    |> mtch [] po
   end;
 
 

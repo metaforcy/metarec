@@ -337,12 +337,13 @@ fun instnorm_thm_with_env ctxt env th =
     val vars = Term.add_vars (prop_of th) [] |> map Var
     val tvars = Term.add_tvars (prop_of th) [] |> map TVar
     val thy = Proof_Context.theory_of ctxt
-    val normT = Envir.norm_type (Envir.type_env env)
+    val normT = EnvDiff.norm_type env
   in
     th
     |> Thm.instantiate (
          tvars |> map (fn v => (v, normT v) |> pairself (ctyp_of thy)),
-         vars |> map (fn (v as Var(ixn, T)) => (Var(ixn, normT T), Envir.norm_term env v) |> pairself (cterm_of thy)))
+         vars |> map (fn (v as Var(ixn, T)) => (Var(ixn, normT T), EnvDiff.norm_term env v)
+           |> pairself (cterm_of thy)))
     |> beta_convert
   end
 
@@ -430,7 +431,7 @@ type run_state = {
     outer_ctxt: Proof.context,
     (* linearly threaded context that contains the state customizable by synprocs *)
     linear_ctxt: Proof.context, 
-    env : Envir.env,
+    env : EnvDiff.env,
     (* The delayed unifs are implicit assumptions t1 == t2 (fully lambda lifted into the outer_ctxt)
        during the derivation, which were non-patterns at the time their unification was tried.
        The bool signifies whether the unification problem has been solved by now, due to a reconsideration
@@ -1260,7 +1261,7 @@ fun map_run_state f = map_run_info (fn (running_expl_frules, running_on_thy_lvl,
   (running_expl_frules, running_on_thy_lvl, f run_state))
 fun set_run_state st2 = map_run_state (K st2)
 fun init_run_state ctxt =
-  SOME { outer_ctxt=ctxt, linear_ctxt=ctxt, env=Envir.empty (Variable.maxidx_of ctxt),
+  SOME { outer_ctxt=ctxt, linear_ctxt=ctxt, env=EnvDiff.empty (Variable.maxidx_of ctxt),
     delayed_unifs=[], constraints=[], simpd_constraints=[],
     fo_vars=[] }
 fun map_constraints_in_run_state f =
@@ -1313,7 +1314,7 @@ fun get_delayed_unifs_in_run_state ctxt = Context.Proof ctxt |> get_the_run_stat
 fun get_linear_ctxt_in_run_state ctxt = Context.Proof ctxt |> get_the_run_state
   |> (fn { linear_ctxt, ... } => linear_ctxt)
 fun norm_with_env_in_run_state ctxt t =
-  Envir.norm_term (get_the_env_in_run_state ctxt) t
+  EnvDiff.norm_term (get_the_env_in_run_state ctxt) t
   handle TYPE (msg, Ts, ts) =>
     raise TYPE ("exception while norming "^Syntax.string_of_term ctxt t^":  "^msg, Ts, ts)
 fun aconv_norm_run_state_env ctxt = aconv_norm (norm_with_env_in_run_state ctxt)
@@ -1473,12 +1474,16 @@ fun invoke_linear_ctxt_boundary_handlers boundary ctxt =
 
 
 fun pattern_fun_to_env_mapper f input env =
-  let val (tyenv2, tenv2) = f input (Envir.type_env env, Envir.term_env env)
-  in Envir.Envir { maxidx = Envir.maxidx_of env, tenv = tenv2, tyenv = tyenv2 } end
+  let
+    val (tyenv2, tenv2) = f input (EnvDiff.type_env env, EnvDiff.term_env env)
+    val env_cont = Envir.Envir { maxidx = EnvDiff.maxidx_of env, tenv = tenv2, tyenv = tyenv2 }
+  in
+    env |> EnvDiff.map_env (K env_cont)
+  end
 
 (* TODO(refactor): use is inlined in some other places *)
 fun envdiff_str ctxt env1 env2 =
-  env2 |> Envir.term_env |> fold Vartab.delete (Vartab.keys (Envir.term_env env1))
+  env2 |> EnvDiff.term_env |> fold Vartab.delete (Vartab.keys (EnvDiff.term_env env1))
   |> Vartab.dest |> map (fn (ixn, (T, t)) =>
     Syntax.string_of_term ctxt (Var(ixn, T))^":="^Syntax.string_of_term ctxt t)
   |> commas
@@ -1498,9 +1503,7 @@ fun gen_pattern_match_envctxt match norm ctxt (pat, term0) =
     val term = norm ctxt term0
     (* val _ = tracing ("  (normed): "^Syntax.string_of_term ctxt term
       ^" against "^Syntax.string_of_term ctxt pat) *)
-    val env2 = env
-      |> pattern_fun_to_env_mapper (match (Proof_Context.theory_of ctxt))
-           (pat, term)
+    val env2 = env |> match (Proof_Context.theory_of ctxt) (pat, term)
     (* val _ = tracing ("new bindings: "^envdiff_str ctxt env env2) *)
   in
     ctxt |> Context.proof_map (map_env_in_run_state (K env2))
@@ -1574,15 +1577,13 @@ fun try_struct_unify ctxt (t1_0, t2_0) (env, delayed_flexflexs) =
   let
     fun unif_failed () = raise TryStructUnify(ctxt, (t1_0, t2_0), "try_struct_unify: structural unification of "
           ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
-    val (t1, t2) = pairself (Envir.norm_term env) (t1_0, t2_0)
+    val (t1, t2) = pairself (EnvDiff.norm_term env) (t1_0, t2_0)
   in
     let
       val thy = Proof_Context.theory_of ctxt
-      val (tyenv2, maxidx2) = (Envir.type_env env, Envir.maxidx_of env)
-        |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
-      val env2 = Envir.Envir { maxidx = maxidx2, tenv = Envir.term_env env, tyenv = tyenv2 }
+      val env2 = env |> EnvDiff.typ_unify thy (fastype_of t1, fastype_of t2) 
     in
-      StructUnify.unify thy (t1, t2) (env2, delayed_flexflexs) |> SOME
+      StructUnify.unify true thy (t1, t2) (env2, delayed_flexflexs) |> SOME
     end
       handle
           StructUnify.Unif => unif_failed ()
@@ -1605,20 +1606,23 @@ fun try_pat_unify ctxt (t1_0, t2_0) env =
   let
     fun unif_failed () = raise TryPatUnify(ctxt, (t1_0, t2_0), "try_pat_unify: pattern unification of "
       ^str_of_normed_term ctxt t1_0^" and "^str_of_normed_term ctxt t2_0^" failed")
+    val (t1, t2) = pairself (EnvDiff.norm_term env) (t1_0, t2_0)
   in
     let
-      val (t1, t2) = pairself (Envir.norm_term env) (t1_0, t2_0)
       val thy = Proof_Context.theory_of ctxt
-      val (tyenv3, maxidx3) = (Envir.type_env env, Envir.maxidx_of env)
-        |> Sign.typ_unify thy (fastype_of t1, fastype_of t2) 
-      val env3 = Envir.Envir { maxidx = maxidx3, tenv = Envir.term_env env, tyenv = tyenv3 }
-      val env4 = Pattern.unify thy (t1, t2) env3
+      val env2 = env |> EnvDiff.typ_unify thy (fastype_of t1, fastype_of t2) 
+      val (env3, delayed_flexflex) = StructUnify.unify false thy (t1, t2) (env2, [])
+      val _ =
+        if null delayed_flexflex then ()
+        else
+          error
+            ("try_pat_unify: internal error: pattern unification returned delayed flexflex pairs")
     in
-      SOME env4
+      SOME env3
     end
       handle
-          Pattern.Pattern => NONE
-        | Pattern.Unif => unif_failed ()
+          StructUnify.Pattern => NONE
+        | StructUnify.Unif => unif_failed ()
         | Type.TUNIFY => unif_failed ()
   end
 
@@ -1859,7 +1863,7 @@ fun prf_to_display_term ctxt prfp =
 fun genvar_on_run_state name T ctxt =
   let
     val env = get_the_env_in_run_state ctxt
-    val (env2, v) = Envir.genvar name (env, T)
+    val (v, env2) = EnvDiff.genvar name T env
     val ctxt2 = ctxt |> Context.proof_map (map_env_in_run_state (K env2))
     (* val _ = tracing ("generated fresh var: "^Syntax.string_of_term ctxt2 v) *)
   in
@@ -1935,7 +1939,7 @@ fun allI_prf ctxt (x, T) (ProofPack (prop, prf, assms)) =
   let
     val env = get_the_env_in_run_state ctxt
     val norm = norm_with_env_in_run_state ctxt
-    val normT = Envir.norm_type (Envir.type_env env)
+    val normT = EnvDiff.norm_type env
     val free = Free (x, normT T)
   in
     case assms |> find_first (fn assm => member (op =) (Term.add_frees (norm assm) []) (x, normT T)) of
@@ -1992,7 +1996,7 @@ fun allE_prf ctxt (ProofPack (prop, prf, assms)) t =
       let
         val T2 = fastype_of t
         val env = get_the_env_in_run_state ctxt
-        val normty = Envir.norm_type (Envir.type_env env)
+        val normty = EnvDiff.norm_type env
       in
         if T = T2 orelse normty T = normty T2 then
           ProofPack (Term.betapply (bodyabs, t), AllE (prf, t), assms)
@@ -2304,7 +2308,7 @@ fun replay_prf allow_nonground_hyps ctxt = CumulTiming.timing "replay_prf" (fn p
       ||> Variable.restore_body ctxt2
     val var_fixing = vars ~~ fxvar_ns
     val tvar_fixing = tvars ~~ fxTvar_ns
-    val fxenv = Envir.merge (get_the_env_in_run_state ctxt3,
+    val fxenv = Envir.merge (get_the_env_in_run_state ctxt3 |> EnvDiff.get_env,
       Envir.Envir { maxidx = 0, tenv = Vartab.empty,
         tyenv = Vartab.empty |> fold (fn ((ixn, S), fx_n) =>
           Vartab.update_new (ixn, (S, TFree(fx_n, S)))) tvar_fixing }
@@ -2739,7 +2743,7 @@ fun unlift_unifvar_occs allowed_deps t0 ctxt =
                      ^" via "^Syntax.string_of_term ctxt v^" := "^Syntax.string_of_term ctxt v'_abs)
                   in
                     ctxt2 |> Context.proof_map (map_env_in_run_state
-                      (curry Envir.update ((ixn, T), v'_abs)))
+                      (EnvDiff.update ((ixn, T), v'_abs)))
                   end
               end
         | (Abs(n, T, t2), []) => unlift ((n,T) :: boundsTs) t2 ctxt
@@ -3823,10 +3827,9 @@ and chr_constraint_simplification allow_propagation =
       in (fn ctxt_ =>
         let
           val env = get_the_env_in_run_state ctxt_
-          val ty_env = Envir.type_env env
         in
-          forall (curry Envir.lookup env #> (not o is_some)) fix_vars
-          andalso forall (Type.lookup ty_env #> (not o is_some)) fix_tvars
+          forall (EnvDiff.lookup env #> (not o is_some)) fix_vars
+          andalso forall (EnvDiff.lookup_type env #> (not o is_some)) fix_tvars
         end)
       end
 
@@ -3982,9 +3985,12 @@ and chr_constraint_simplification allow_propagation =
           else
             subsuming_cons_aux subs imp (imps0, ch0) imps2' (cons imp2 acc)
       | [] =>
-          (* NB: reversing result is not necessary semantically, but statistically
-             improves performance, sometimes tenfold, which is not related to cache locality *)
-          (cons imp acc (*|> rev*), true)
+          (* TODO(opt): reversing order of hyperpath list on changes is not necessary semantically,
+             but statistically improves performance in transitive hypergraph closure,
+             sometimes 300-400% (which is not related to cache locality).
+             Collect more data on this to validate the effect.
+             But termhg_trancl is very fast already ... *)
+          (cons imp acc (* |> rev *), true)
     fun subsuming_cons subs imp (imps, ch) = 
       subsuming_cons_aux subs imp (imps, ch) imps []
     fun subsuming_merge_into subs imps1 imps2 = (imps2, false)
@@ -4253,7 +4259,7 @@ and chr_constraint_simplification allow_propagation =
         (* NB: determination of existing constraints that have been instantiated now relies on the facts that
              * constraints in the constraint graph are fully normalized 
              * type unification variables are not instantiated during this derivation process *)
-        fun lookup_var ixnT = Envir.lookup (get_the_env_in_run_state ctxt, ixnT)
+        fun lookup_var ixnT = EnvDiff.lookup (get_the_env_in_run_state ctxt) ixnT
 
         (* TODO(opt!!): expensive! Could be realized more efficiently if we use foexact_net
           for constraint_graph with variable instantiation tracking. Or manage table
@@ -4479,9 +4485,9 @@ and chr_constraint_simplification allow_propagation =
                             ^"\n\ninstantiations of them are:\n"
                             ^Pretty.string_of (insts |> map (fn (((ixn, T), t), (ruleapp, _)) => 
                                  Pretty.block [orig_term_pretty (Var (ixn, T)),
-                                 Pretty.brk 1, Pretty.str ":=", Pretty.brk 1, orig_term_pretty t,
-                                 Pretty.brk 2, Pretty.str "from", Pretty.fbrk,
-                                 Pretty.indent 2 (orig_term_pretty ruleapp)])
+                                   Pretty.brk 1, Pretty.str ":=", Pretty.brk 1, orig_term_pretty t,
+                                   Pretty.brk 2, Pretty.str "from", Pretty.fbrk,
+                                   Pretty.indent 2 (orig_term_pretty ruleapp)])
                                |> Pretty.chunks2 |> Pretty.indent 2))
                       end
                     fun local_fail_cont _ _ = raise UnsolvablePrem
@@ -4523,7 +4529,7 @@ and chr_constraint_simplification allow_propagation =
                       |> fold (fn prem_prf => union aconv_norm5 (assms_of_proofp prem_prf)) solved_prems
                       |> subtract aconv_norm5 (these static_new_constraints_opt)
 
-                    val _ =
+                    (*val _ =
                       if is_propagation andalso not (null new_dynamic_constraints) then
                         err_with_trace ctxt5_ ("application of constraint propagation rule\n  "
                           ^Display.string_of_thm ctxt5_ rule
@@ -4531,7 +4537,7 @@ and chr_constraint_simplification allow_propagation =
                           ^commas (map (str_of_normed_term ctxt5_) cs_for_heads)
                           ^"\nresulted in new dynamic constraints\n  "
                           ^commas (map (str_of_normed_term ctxt5_)  new_dynamic_constraints))
-                      else ()
+                      else () *)
                     val ctxt5 = ctxt5_ |> Context.proof_map (
                       map_constraints_in_run_state (K (get_constraints_in_run_state ctxt4))
                       #> map_simpd_constraints_in_run_state (K (get_simpd_constraints_in_run_state ctxt4)))
@@ -4581,10 +4587,9 @@ and chr_constraint_simplification allow_propagation =
                     if is_propagation then
                       (constraint_graph2, ctxt7)
                       |> reg_constraints false (SOME rl_prop)
-                           (concls_prfs |> filter_out (fn (C, _) => C aconv (Data.mk_Trueprop Data.True))
+                           ((concls_prfs |> filter_out (fn (C, _) => C aconv (Data.mk_Trueprop Data.True))
                             |> map (fn (C, imp_prf) => (C, SOME (imp_prf, PropagationCHR))))
-                      (* TODO(feature): allow dynamic constraint generation in propagation rules:
-                           append to concls_prfs:   ...  @ (map (rpair NONE) new_dynamic_constraints) *)
+                           @ map (rpair NONE) new_dynamic_constraints)
                       |> SOME
                     else
                       (constraint_graph2, ctxt7)
@@ -4858,20 +4863,20 @@ and chr_constraint_simplification allow_propagation =
             end)))
         ^"\n}"
       end
-    val _ = 
+    (*val _ = 
       let
         val constraints0_varixns = [] |> fold Term.add_vars constraints0 |> map fst
-        val envdiff = get_the_run_state (Context.Proof ctxt') |> #env |> Envir.term_env |> Vartab.dest
+        val envdiff = get_the_run_state (Context.Proof ctxt') |> #env |> EnvDiff.term_env |> Vartab.dest
           |> filter (fn (ixn, _) => member (op =) constraints0_varixns ixn)
           |> subtract (pairself fst #> (op =))
-               (get_the_run_state (Context.Proof ctxt00) |> #env |> Envir.term_env |> Vartab.dest)
-        (* val _ = tracing ("resulting instantiation is:\n  "
+               (get_the_run_state (Context.Proof ctxt00) |> #env |> EnvDiff.term_env |> Vartab.dest)
+        val _ = tracing ("resulting instantiation is:\n  "
           ^commas (envdiff |> map (fn (ixn, (T, t)) =>
              Syntax.string_of_term ctxt' (Var(ixn,T)) ^ " := "
-             ^ str_of_normed_term ctxt' t))) *)
+             ^ str_of_normed_term ctxt' t)))
         fun src_chr_ty_str SimpCHR = "SimpCHR"
           | src_chr_ty_str PropagationCHR = "PropagationCHR"
-        (* val _ = tracing ("resulting constraint graph is:\n"
+        val _ = tracing ("resulting constraint graph is:\n"
           ^cat_lines (Net.content constraint_graph'
             |> map (fn (C, implied_bys) =>
                  "  "^str_of_normed_term ctxt' C ^"  implied by  "
@@ -4880,8 +4885,8 @@ and chr_constraint_simplification allow_propagation =
                     commas (implied_bys |> map (fn (imp_prf, src_chr_ty) =>
                       str_of_normed_term ctxt' (prop_of_proofp imp_prf)
                       ^"  [from "^src_chr_ty_str src_chr_ty^"]"))))))
-        val _ = tracing (graphviz "ConstraintGraph" constraint_graph') *)
-      in () end
+        val _ = tracing (graphviz "ConstraintGraph" constraint_graph')
+      in () end*)
 
 
     (* TODO(minor opt): because this is normed and deps from calc_simp_deps are normed,
@@ -5309,15 +5314,15 @@ and metarec_structural_unifications prf = CumulTiming.timing "metarec_structural
 
     val _ =
       let
-        val envdiff = env3 |> Envir.term_env |> Vartab.dest
-          |> subtract (pairself fst #> (op =)) (Envir.term_env env |> Vartab.dest)
+        val envdiff = env3 |> EnvDiff.term_env |> Vartab.dest
+          |> subtract (pairself fst #> (op =)) (EnvDiff.term_env env |> Vartab.dest)
       in 
         tracing ("unification pass solved delayed structural unification problems\n  "
         ^commas (solved_delayed_unifs |> (map
-          (Logic.mk_equals #> Envir.norm_term env #> Syntax.string_of_term ctxt)))
+          (Logic.mk_equals #> EnvDiff.norm_term env #> Syntax.string_of_term ctxt)))
         ^"\nand delayed pattern problems\n  "
         ^commas (delayed_unifs2 |> filter snd |> (map
-          (fst #> Logic.mk_equals #> Envir.norm_term env #> Syntax.string_of_term ctxt)))
+          (fst #> Logic.mk_equals #> EnvDiff.norm_term env #> Syntax.string_of_term ctxt)))
         ^"\nresulting in term instantiations:\n  "
         ^commas (envdiff |> map (fn (ixn, (T, t)) =>
            Syntax.string_of_term ctxt (Var(ixn,T)) ^ " := "
@@ -5330,7 +5335,7 @@ and metarec_structural_unifications prf = CumulTiming.timing "metarec_structural
     val {fo_vars, ...} = get_the_run_state (Context.Proof ctxt)
     val ctxt2 = ctxt |> Context.proof_map (map_env_in_run_state (K env3))
       |> fold (fn fo_var => fn ctxt_ =>
-             case Vartab.lookup (Envir.term_env env3) fo_var of
+             case Vartab.lookup (EnvDiff.term_env env3) fo_var of
                SOME (_, t) =>
                  let val _ = tracing ("unlifting unification variables in instantiation "
                     ^"of first order variable:   "
@@ -7271,8 +7276,8 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
     (case try_pat_unify ctxt (t1_lft, t2_lft) env of
       SOME env2 => 
         let
-          (* val envdiff = env2 |> Envir.term_env |> Vartab.dest
-            |> subtract (pairself fst #> (op =)) (Envir.term_env env |> Vartab.dest)
+          (* val envdiff = env2 |> EnvDiff.term_env |> Vartab.dest
+            |> subtract (pairself fst #> (op =)) (EnvDiff.term_env env |> Vartab.dest)
           val _ = tracing ("unify_proc did term instantiation "
             ^commas (envdiff |> map (fn (ixn, (T, t)) =>
                Syntax.string_of_term ctxt (Var(ixn,T)) ^ " := "
@@ -7280,8 +7285,8 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
 
           fun changed_unifprob ((t1_, t2_), solved) =
             not solved
-            andalso ([] |> fold (Term.add_vars o Envir.norm_term env) [t1_, t2_]
-              |> exists (curry Envir.lookup env2 #> is_some))
+            andalso ([] |> fold (Term.add_vars o EnvDiff.norm_term env) [t1_, t2_]
+              |> exists (EnvDiff.lookup env2 #> is_some))
           val changed_delayed_unifs = delayed_unifs |> filter changed_unifprob
           val unchanged_delayed_unifs = delayed_unifs |> filter_out changed_unifprob
 
@@ -7294,7 +7299,7 @@ fun unify_proc ctxt fail_cont (t1_0, [t2_0], _) =
           val (res_prf, ctxt4) = mps_match_on_freshthm_prf Data.unifyI [refl_prf] ctxt3
 
           (* val _ = tracing ("unify_proc: res_prf is "^Syntax.string_of_term ctxt4
-            (Envir.norm_term env3 (prop_of_proofp res_prf))) *)
+            (EnvDiff.norm_term env3 (prop_of_proofp res_prf))) *)
 
           val st4 = get_the_run_state (Context.Proof ctxt4)
         in

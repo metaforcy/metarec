@@ -4,33 +4,30 @@ begin
 
 
 
-
-
-
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
   val (env', _) = 
-    StructUnify.unify @{theory} (B_x, prod) (Envir.empty 1, [])
-  val B_x' = Envir.norm_term env' B_x |> cterm_of @{theory}
-  val prod' = Envir.norm_term env' prod |> cterm_of @{theory}
+    StructUnify.unify true @{theory} (B_x, prod) (EnvDiff.empty 1, [])
+  val B_x' = EnvDiff.norm_term env' B_x |> cterm_of @{theory}
+  val prod' = EnvDiff.norm_term env' prod |> cterm_of @{theory}
 *}
 
 ML {*
   val A1 = @{cpat "?B(x::i)"} |> Thm.term_of
   val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
   val (env', _) = 
-    StructUnify.unify @{theory} (A1, A2) (Envir.empty 1, [])
-  val A1' = Envir.norm_term env' A1 |> cterm_of @{theory}
-  val A2' = Envir.norm_term env' A2 |> cterm_of @{theory}
+    StructUnify.unify true @{theory} (A1, A2) (EnvDiff.empty 1, [])
+  val A1' = EnvDiff.norm_term env' A1 |> cterm_of @{theory}
+  val A2' = EnvDiff.norm_term env' A2 |> cterm_of @{theory}
 *}
 
 ML {*
   val A1 = @{cpat "?B(x::i, x) :: i"} |> Thm.term_of
   val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
-  val env = Envir.empty 1
-  val (env2, _) = StructUnify.unify @{theory} (A1, A2) (env, [])
-  val A1' = Envir.norm_term env2 A1 |> cterm_of @{theory}
+  val env = EnvDiff.empty 1
+  val (env2, _) = StructUnify.unify true @{theory} (A1, A2) (env, [])
+  val A1' = EnvDiff.norm_term env2 A1 |> cterm_of @{theory}
 *}
 
 
@@ -39,13 +36,13 @@ ML {*
   val A2 = @{cpat "PROD x:?C. ?D(x)"} |> Thm.term_of
   val B1 = @{cpat "?D(x :: i) :: i"} |> Thm.term_of
   val B2 = @{cpat "PROD x:?E. ?F(x)"} |> Thm.term_of
-  val env = Envir.empty 1
-  val (env2, _) = StructUnify.unify @{theory} (A1, A2) (env, [])
-  val A2' = Envir.norm_term env2 A2 |> cterm_of @{theory}
-  val B1' = Envir.norm_term env2 B1 |> cterm_of @{theory}
-  val B2' = Envir.norm_term env2 B2 |> cterm_of @{theory}
-  val (env3, _) = StructUnify.unify @{theory} (B1, B2) (env2, [])
-  val A2'' = Envir.norm_term env3 A2 |> cterm_of @{theory}
+  val env = EnvDiff.empty 1
+  val (env2, _) = StructUnify.unify true @{theory} (A1, A2) (env, [])
+  val A2' = EnvDiff.norm_term env2 A2 |> cterm_of @{theory}
+  val B1' = EnvDiff.norm_term env2 B1 |> cterm_of @{theory}
+  val B2' = EnvDiff.norm_term env2 B2 |> cterm_of @{theory}
+  val (env3, _) = StructUnify.unify true @{theory} (B1, B2) (env2, [])
+  val A2'' = EnvDiff.norm_term env3 A2 |> cterm_of @{theory}
 *}
 
 
@@ -1932,6 +1929,11 @@ schematic_lemma "(PRODu k1 x:A. PRODu k2 y:B(x). C(x, y)) <: guniv i"
 
 ML {*
   fun elab ctxt t =
+    CumulTiming.print_block "elab" ["metarec_no_constraintsimp", "chr_constraint_simplification",
+      "termhg_trancl", "metarec_constraint_simp", "metarec_structural_unifications", "replay_prf",
+      "add_assm_terms_internal", "reconsider_instantiated_constraints",
+      "metarec_constraint_simp_instantiated_contraints"]
+    (fn () =>
     exception_trace (fn () =>
       let
         val _ = tracing ("====== starting elaboration of "^Syntax.string_of_term ctxt t
@@ -1949,7 +1951,7 @@ ML {*
             ^"\n  "^Syntax.string_of_term ctxt t')
       in
         th
-      end)
+      end))
 
   
   fun elab_with_expected_error exp_err_match ctxt t =
@@ -2075,62 +2077,45 @@ definition
  [MRjud 1 0]: "universe_inconsistency(x) == False"
 
 
-(* constraint loeser *)
-(* ueber constraint handling rules die die Ableitungsschritte tracen? wir sollten uns auch
-   merken welche Regelanwendung ein constraint erzeugt hat! *)
-(* TODO: forward rules werden nicht fair angewandt, aber haben ja auch keine Simplification-Regeln
-    also egal bzgl. Terminierung? *)
-(* vllt CHRs am einfachsten zu implementieren wenn wir Propagation-Regel als Simplification-Regeln
-   kodieren. !!! Dann kann man das auch als eine Art Multi-Head-Narrowing ansehen !!!
-   Nervig wird dann hier vor allem die staendige Permutation der Metakonjunktionen im Goal so das
-   eine Regel passt. Mit Konversions vermutlich zu nervig, stattdessen mit neuem Subgoal arbeiten
-   das man mit viel conjI, conjE und assumption loest *)
-(* bzgl. Constraint-Minimierung: klassisch bei CHRs soll alle Minimierung ueber Simplification passieren,
-   aber das reicht uns nicht weil ja die Propagierungsresultate die nicht vereinfacht wurden noch
-   rumschwirren. Kann man vllt einfach sagen das man die urspruenglichen Constraints nimmt, ohne die
-   die vereinfacht wurden und zusaetzlich dazu die Vereinfachungsresultate? Aber so kriegt man ja
-   die Redundanzen in den urspruenglichen Constraints nicht eliminiert!!
-
-   Ansonsten: Gerichteten Hyper-Graph (Knoten sind Constraints, Kanten sind von einer
-   Menge von Constraints zu einem dadurch implizierten Menge von Constraints) aufbauen der repraesentiert
-   welche der urspruenglichen Constraints und vereinfachten Constraints
-   einander implizieren (ggf nach Instantiierung?).
-   Zur Minimierung dann eine kleinstmoegliche Menge von Constraints zuruecklassen (die nicht vereinfacht wurden)
-   von denen alle anderen Constraints aus erreichbar sind im Hyper-Graph.
-   Aus starken Zusammenhangskomponenten die nicht anders erreichbar sind nimmt man dann also
-   nur ein Constraint. *)
-(* Gesamt-Algorithmus ist dann wie folgt:
-     * Constraint-Propagierung, d.h. alle relevanten Konsequenzen aus Constraints generieren
-       und die Generierungsrelation als Hypergraph verwalten
-     * dabei Vereinfachung (ggf. Eliminierung oder Gesamt-Fehlschlag) mancher Constraints 
-       (wird als bidirektionale Kante im Hypergraph verwaltet, wobei die Constraints die vereinfacht
-        wurden nicht genutzt werden duerfen; die Vereinfachung kann Unifikation
-       als Seiteneffekt anstossen; ggf. Backtracking ueber solche Regelanwendungen weil sie
-       globale Auswirkungen haben, oder nehmen wir Konfluenz an?)
-     * Wahl einer minimalen Menge von Constraints die die Gesamtmenge erzeugen (modulo den Vereinfachungen) *)
-(* wie bei echten CHRs matchen wir die Regeln bloss und nutzen dann ggf. explizite Unifikation in den Premissen *)
-
+(* NB: we introduce (sometimes) artificial dependencies on univlvl constraints
+   for all univlvl related CHRs because of the following: 
+     univlvl constraint for intermediate univlvl vars are sometimes not derivationally 
+   needed in constraint minimization of initial constraints, because transitivity chains
+   using inequations with intermediate univlvl vars do not need their univlvl constraints,
+   so are correctly left out.
+     Later problem would be that hidden univlvl discharge optimization assumes all univlvl vars
+   have univlvl constraints. This makes derivations generally slightly slower due to processing
+   of useless premises and another possibility would be to include univlvl constraints into
+   the univlvl inequation definition. *)
+ 
 (* relevant for constraint subsumption of  i u<= j *)
-lemma [constraint_propag_rule]: "i u< j ==> i u<= j"
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl)  ;  constraint (j <: univlvl) |] ==>
+    i u< j ==> i u<= j"
   by (rule univ_leq_from_less)
   
 
-lemma [constraint_propag_rule]: "i u< j &&& j u< k ==> i u< k"
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl) ; constraint (j <: univlvl) ; constraint (k <: univlvl) |] ==>
+    i u< j &&& j u< k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans)
 
-lemma [constraint_propag_rule]: "i u< j &&& j u<= k ==> i u< k"
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;  constraint (k <: univlvl) |] ==>
+    i u< j &&& j u<= k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans2)
 
-lemma [constraint_propag_rule]: "i u<= j &&& j u< k ==> i u< k"
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;  constraint (k <: univlvl) |] ==>
+    i u<= j &&& j u< k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
 
 (* NB: we avoid looping on  i u<= i &&& i u<= i ==> i u<= i
    FIXME: was looping just a bug here?
      simp rule for i u<= i should have priority. *)
-lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i u<= j &&& j u<= k ==> i u<= k"
+lemma [constraint_propag_rule]: "
+  [| try (intensionally_inequal (i, j))  ;
+     constraint (i <: univlvl)  ;  constraint (j <: univlvl) ;  constraint (k <: univlvl)  |] ==>
+  i u<= j &&& j u<= k ==> i u<= k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.le_trans)
 
@@ -2172,7 +2157,9 @@ ML {*
     in
       (Cs' |> map (fst #> cert), map (fst #> cert) implied_Cs)
     end
-*}
+  *}
+
+
 
 ML {*
   val res = test_chr_simp @{context}
@@ -2544,7 +2531,6 @@ ML {*  elab @{context} @{term "(PI x:A. PI y:B(x). C # x # y)"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. B(x))"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y))"}  *}
   (* also tests contextual discharge of zf-applications *)
-ML {* Toplevel.profiling := 0 *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:(B # x). C # x # y)"}  *}
 ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y)) # D"}  *}
 ML {*  elab @{context} @{term "(lam x:guniv i. fun f. f # x)"} *}
@@ -2575,14 +2561,7 @@ ML {* elab @{context} @{term "f # x # y === g # x # y"} *}
 
 (* TODO(feature): discharge univlvl-upwards-joining constraints  i u<= k,  j u<= k
    by setting  k := max(i,j)  if k does not occur in resulting judgement  *)
-(* FIXME: univlvl constraint for some intermediate univlvl vars are not derivationally 
-   needed in constraint minimization of initial constraints, so are correctly left out.
-   Problem is that hidden univlvl discharge optimization assumes all univlvl vars
-   have univlvl constraints. Include univlvl constraints into definition of
-   univlvl inequations? Or introduce artificial dependencies on univlvl constraints
-   for all univlvl related CHRs, making derivation generally slower due to processing
-   of useless premises? *)
-ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"} *}
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"}  *}
 
 ML {*  elab_with_expected_error "universe_inconsistency" @{context}
   @{term "lam f : guniv i ~> guniv i. f # (guniv i)"} *}

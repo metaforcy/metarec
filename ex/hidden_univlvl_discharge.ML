@@ -212,7 +212,7 @@ struct
           case non_hiddens of
             non_hidden :: _ =>
               let val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state (
-                 fold (fn hidden => curry Envir.update (Term.dest_Var hidden, non_hidden)) hiddens))
+                 fold (fn hidden => EnvDiff.update (Term.dest_Var hidden, non_hidden)) hiddens))
               in ctxt_2 end
           | [] =>
               let
@@ -250,7 +250,7 @@ struct
                   ^commas (hiddens |> map (Syntax.string_of_term ctxt_))^" := "^
                   Syntax.string_of_term ctxt_ hidden_inst)
                 val ctxt_2 = ctxt_ |> Context.proof_map (MetaRec.map_env_in_run_state (
-                  fold (fn hidden => curry Envir.update (Term.dest_Var hidden, hidden_inst)) hiddens))
+                  fold (fn hidden => EnvDiff.update (Term.dest_Var hidden, hidden_inst)) hiddens))
                 val env_2 = MetaRec.get_the_env_in_run_state ctxt_2
               in
                 ctxt_2
