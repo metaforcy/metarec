@@ -8,43 +8,53 @@ signature VAR_EXACT_NET =
 sig
   type 'a net
 
-  val empty: EnvDiff.env -> 'a net * EnvDiff.env
+  val empty: EnvDiff.env -> (Proof.context -> EnvDiff.env -> term -> 'a list -> 'a list)
+    -> 'a net * EnvDiff.env
   val unregister_diff_slot_of: 'a net -> EnvDiff.env -> EnvDiff.env
+  val with_empty_delayed_unreg: ((EnvDiff.env -> EnvDiff.env) -> 'b -> 'b) -> ('b -> EnvDiff.env) -> 'b
+    -> (Proof.context -> EnvDiff.env -> term -> 'a list -> 'a list)
+    -> ('a net -> 'b -> 'c * 'b) -> ('c * ('b -> 'b)) * 'b
   val with_empty: ((EnvDiff.env -> EnvDiff.env) -> 'b -> 'b) -> ('b -> EnvDiff.env) -> 'b
-    -> ('a net -> 'b -> 'b) -> 'b
+    -> (Proof.context -> EnvDiff.env -> term -> 'a list -> 'a list)
+    -> ('a net -> 'b -> 'c * 'b) -> 'c * 'b
 
-  (* returns indices that are now instantiated, together with their previous partial instantiation *)
-  val normalize: ('a * 'a -> bool) -> 'a net * EnvDiff.env
-    -> (term * term) list * ('a net * EnvDiff.env)
+  (* returns relevant instantiate type and term variables,
+     and indices that are now instantiated, together with their previous partial instantiation *)
+  val normalize: Proof.context -> ('a * 'a -> bool) -> 'a net * EnvDiff.env
+    -> (((indexname * sort) list * (indexname * typ) list) * (term list * term) list)
+       * ('a net * EnvDiff.env)
   val is_normalized: 'a net * EnvDiff.env -> bool
 
   exception INSERT
-  val insert_term: ('a * 'a -> bool) -> term * 'a -> 'a net -> 'a net
-  val insert_term_safe: ('a * 'a -> bool) -> term * 'a -> 'a net -> 'a net
+  (* index term has to be beta normal, not necessarily eta normal; net has to be normal *)
+  val insert_term: EnvDiff.env -> ('a * 'a -> bool) -> term * 'a -> 'a net -> 'a net
+  val insert_term_safe: EnvDiff.env -> ('a * 'a -> bool) -> term * 'a -> 'a net -> 'a net
 
   exception DELETE
-  val delete_term: ('b * 'a -> bool) -> term * 'b -> 'a net -> 'a net
-  val delete_term_safe: ('b * 'a -> bool) -> term * 'b -> 'a net -> 'a net
+  (* index term has to be beta normal, not necessarily eta normal; net has to be normal *)
+  val delete_term: EnvDiff.env -> ('b * 'a -> bool) -> term * 'b -> 'a net -> 'a net
+  val delete_term_safe: EnvDiff.env -> ('b * 'a -> bool) -> term * 'b -> 'a net -> 'a net
 
-  (* these assume env-normal term and include pre-lookup net normalization *)
-  val lookup_term: ('a * 'a -> bool) -> term -> 'a net * EnvDiff.env
+  (* index term has to be beta- and env-normal, not necessarily eta normal;
+     pre-lookup net normalization is included *)
+  val lookup_term: Proof.context -> ('a * 'a -> bool) -> term -> 'a net * EnvDiff.env
     -> 'a list * ('a net * EnvDiff.env)
-  val rev_match_term: ('a * 'a -> bool) -> term -> 'a net * EnvDiff.env
-    -> 'a list * ('a net * EnvDiff.env)
+  val rev_match_term: Proof.context -> ('a * 'a -> bool) -> term -> 'a net * EnvDiff.env
+    -> (term * 'a) list * ('a net * EnvDiff.env)
 
   exception NON_NORMAL_NET
+  (* index term has to be beta- and env-normal, not necessarily eta normal;
+     net has to be normal *)
   val demand_normalized: 'a net * EnvDiff.env -> unit
-  val lookup_term_in_normed_net: ('a * 'a -> bool) -> 'a net * EnvDiff.env -> term
-    -> 'a list
-  val rev_match_term_in_normed_net: ('a * 'a -> bool) -> 'a net * EnvDiff.env -> term
-    -> 'a list
+  val lookup_term_in_normed_net: 'a net * EnvDiff.env -> term -> 'a list
+  val rev_match_term_in_normed_net: 'a net * EnvDiff.env -> term -> (term * 'a) list
 
-  val entries: 'a net -> 'a list
-  val content: 'a net -> 'a list
+  val entries: 'a net -> (term * 'a) list
+  val content: 'a net -> (term * 'a) list
 
-  (* NB: these assume normalized net *)
-  val subtract: ('b * 'a -> bool) -> 'a net -> 'b net -> 'b list
-  val merge: ('a * 'a -> bool) -> 'a net * 'a net -> 'a net
+  (* these functions assume normalized net *)
+  val subtract: EnvDiff.env -> ('b * 'a -> bool) -> 'a net -> 'b net -> (term * 'b) list
+  val merge: EnvDiff.env -> ('a * 'a -> bool) -> 'a net * 'a net -> 'a net
 end;
 
 
@@ -54,28 +64,34 @@ structure VarExactNet : VAR_EXACT_NET = struct
    that contains the unprocessed instantiated unification variables in the diff_slot
    corresponding to the VarExactNet.net *)
 datatype 'a net = VarExactNet of {
-    net: 'a Net.net,
+    net: (term * 'a) Net.net,
     diff_slot_uid: string,
-    (* (non-fixed) indices as they are used in net under fix_index_term preprocessing,
+    (* (non-fixed) indices as they are used in net under prepfix_index_term preprocessing,
        indexed by their occuring type/term unification variable indexnames *)
     indices_with_type_unifvar: term list Vartab.table, 
-    indices_with_term_unifvar: term list Vartab.table
+    indices_with_term_unifvar: term list Vartab.table,
+    merge_entries_on_index_inst: Proof.context -> EnvDiff.env -> term
+      -> 'a list -> 'a list
   }
 
-fun map_net f (VarExactNet { net, diff_slot_uid, indices_with_term_unifvar, indices_with_type_unifvar }) =
+fun map_net f (VarExactNet { net, diff_slot_uid, indices_with_term_unifvar,
+    indices_with_type_unifvar, merge_entries_on_index_inst }) =
   VarExactNet { net = f net, diff_slot_uid = diff_slot_uid,
     indices_with_type_unifvar = indices_with_type_unifvar,
-    indices_with_term_unifvar = indices_with_term_unifvar }
+    indices_with_term_unifvar = indices_with_term_unifvar,
+    merge_entries_on_index_inst = merge_entries_on_index_inst }
 fun map_diff_slot_uid f (VarExactNet { net, diff_slot_uid,
-      indices_with_term_unifvar, indices_with_type_unifvar }) =
+      indices_with_term_unifvar, indices_with_type_unifvar, merge_entries_on_index_inst }) =
   VarExactNet { net = net, diff_slot_uid = f diff_slot_uid,
     indices_with_type_unifvar = indices_with_type_unifvar,
-    indices_with_term_unifvar = indices_with_term_unifvar }
+    indices_with_term_unifvar = indices_with_term_unifvar,
+    merge_entries_on_index_inst = merge_entries_on_index_inst }
 fun map_indices_with_unifvar f g (VarExactNet { net, diff_slot_uid,
-      indices_with_term_unifvar, indices_with_type_unifvar }) =
+      indices_with_term_unifvar, indices_with_type_unifvar, merge_entries_on_index_inst }) =
   VarExactNet { net = net, diff_slot_uid = diff_slot_uid,
     indices_with_type_unifvar = f indices_with_type_unifvar,
-    indices_with_term_unifvar = g indices_with_term_unifvar }
+    indices_with_term_unifvar = g indices_with_term_unifvar,
+    merge_entries_on_index_inst = merge_entries_on_index_inst }
 
 fun get_net (VarExactNet {net, ...}) = net
 fun get_diff_slot_uid (VarExactNet {diff_slot_uid, ...}) =
@@ -84,15 +100,18 @@ fun get_indices_with_term_unifvar (VarExactNet {indices_with_term_unifvar, ...})
   indices_with_term_unifvar
 fun get_indices_with_type_unifvar (VarExactNet {indices_with_type_unifvar, ...}) =
   indices_with_type_unifvar
+fun get_merge_entries_on_index_inst (VarExactNet {merge_entries_on_index_inst, ...}) =
+  merge_entries_on_index_inst 
 
 
-fun empty envdiff =
+fun empty envdiff merge_entries_on_index_inst =
   let
     val enet = VarExactNet {
       net = Net.empty,
       diff_slot_uid = "var_exact_net:"^string_of_int (serial ()),
       indices_with_type_unifvar = Vartab.empty,
-      indices_with_term_unifvar = Vartab.empty }
+      indices_with_term_unifvar = Vartab.empty,
+      merge_entries_on_index_inst = merge_entries_on_index_inst }
     val envdiff2 = envdiff
       |> EnvDiff.register_diff_slot (get_diff_slot_uid enet)
   in
@@ -102,53 +121,57 @@ fun empty envdiff =
 fun unregister_diff_slot_of enet =
   EnvDiff.unregister_diff_slot (get_diff_slot_uid enet)
 
-fun with_empty map_envdiff get_envdiff init0 f =
+fun with_empty_delayed_unreg map_envdiff get_envdiff st0 merge_entries_on_index_inst f =
   let
-    val envdiff0 = get_envdiff init0
-    val (enet, envdiff) = empty envdiff0
-    val init = init0 |> map_envdiff (K envdiff)
-    val res = f enet init
-    val res2 = res |> map_envdiff (unregister_diff_slot_of enet)
-  in res2 end
+    val envdiff0 = get_envdiff st0
+    val (enet, envdiff) = empty envdiff0 merge_entries_on_index_inst 
+    val st = st0 |> map_envdiff (K envdiff)
+    val (res, st2) = f enet st
+    val unregister_slot = map_envdiff (unregister_diff_slot_of enet)
+  in ((res, unregister_slot), st2) end
+
+fun with_empty map_envdiff get_envdiff st0 merge_entries_on_index_inst f =
+  let
+    val ((res, unregister_slot), st2) =
+      with_empty_delayed_unreg map_envdiff get_envdiff st0 merge_entries_on_index_inst f
+  in (res, unregister_slot st2) end
 
 
 
-
-val fix_index_term =
-  Term.map_types (Term.map_atyps (fn TVar((n, _), S) => TFree(n, S) | T => T))
+val prepfix_index_term =
+  Envir.eta_contract
+  #> Term.map_types (Term.map_atyps (fn TVar((n, _), S) => TFree(n, S) | T => T))
   #> Term.map_aterms (fn Var((n, _), T) => Free(n, T) | t => t)
 
 exception NON_NORMAL_NET
 
 
-fun modify_indices_via_occ_unifvars T_op t_op t =
+fun modify_indices_via_occ_unifvars oper t =
   let
     val tvars = Term.add_tvars t []
     val vars = Term.add_vars t []
   in
     map_indices_with_unifvar
-      (fold (fn (ixn, _) => T_op (op aconv) (ixn, t)) tvars)
-      (fold (fn (ixn, _) => t_op (op aconv) (ixn, t)) vars)
+      (fold (fn (ixn, _) => oper (op aconv) (ixn, t)) tvars)
+      (fold (fn (ixn, _) => oper (op aconv) (ixn, t)) vars)
   end
-fun upd_indices_via_occ_unifvars t =
-  modify_indices_via_occ_unifvars Vartab.update_list Vartab.update_list t
+fun ins_indices_via_occ_unifvars t =
+  modify_indices_via_occ_unifvars Vartab.insert_list t
 fun rem_indices_via_occ_unifvars t =
-  modify_indices_via_occ_unifvars Vartab.remove_list Vartab.remove_list t
+  modify_indices_via_occ_unifvars Vartab.remove_list t
 
 
-fun normalize_internal demand_normal eq (enet, envdiff) =
+
+fun index_eq env (t1, t2) = (EnvDiff.norm_term env t1) aconv (EnvDiff.norm_term env t2)
+
+fun normalize_internal demand_normal ctxt_opt eq (enet, envdiff) =
   let
     val ((inst_Tvar_ixns, inst_var_ixns), envdiff2) =
       EnvDiff.get_and_clear_diff_slot (get_diff_slot_uid enet) envdiff
-    val _ =
-      if (null inst_Tvar_ixns andalso null inst_var_ixns) orelse not demand_normal then ()
-      else 
-        raise NON_NORMAL_NET
+    val idx_eq = index_eq envdiff
 
     fun add_index_term index_term = 
-      (* NB: eta contraction just to improve index approx, we keep exact correspondence with indices *)
-      insert (eq_fst (op aconv)) (index_term,
-        EnvDiff.norm_term envdiff2 index_term |> Envir.eta_contract)
+      insert (eq_fst (op aconv)) (index_term, EnvDiff.norm_term envdiff2 index_term)
     val inst_indices = []
       |> fold (fn inst_Tvar_ixn =>
              fold add_index_term (Vartab.lookup (get_indices_with_type_unifvar enet) inst_Tvar_ixn |> these))
@@ -156,30 +179,66 @@ fun normalize_internal demand_normal eq (enet, envdiff) =
       |> fold (fn inst_var_ixn =>
              fold add_index_term (Vartab.lookup (get_indices_with_term_unifvar enet) inst_var_ixn |> these))
            inst_var_ixns
-    val enet2 = enet
-      |> map_indices_with_unifvar (fold Vartab.delete_safe inst_Tvar_ixns)
-           (fold Vartab.delete_safe inst_var_ixns)
-      |> fold (fn (_, inst_t) => upd_indices_via_occ_unifvars inst_t) inst_indices
-      |> map_net (fold (fn (t, inst_t) => fn net =>
-             let
-               val t'_keys = fix_index_term t |> Net.key_of_term
-               val entries = Net.lookup net t'_keys
-             in 
-               net |> fold (fn a =>
-                   Net.delete eq (t'_keys, a)
-                   #> Net.insert_term_safe eq (fix_index_term inst_t, a))
-                 entries
-             end)
-           inst_indices)
   in
-    (inst_indices, (enet2, envdiff2))
+    if null inst_indices then
+      ((([], []), []), (enet, envdiff2))
+    else if demand_normal then
+      raise NON_NORMAL_NET
+    else
+      let
+        val ctxt = case ctxt_opt of
+            SOME ctxt => ctxt
+          | NONE => error ("var exact net normalize: no context given and entry merge necessary")
+
+        val inst_indices_grpd = Library.partition_eq (eq_snd (op aconv)) inst_indices
+          |> map (fn grp => (map fst grp, snd (hd grp)))
+        val _ = tracing ("var exact net normalize: inst_indices_grpd is \n"^
+          cat_lines (inst_indices_grpd |> map (fn (ts, inst_t) =>
+            "  "^commas (ts |> map (Syntax.string_of_term ctxt))^"  instto  "
+              ^Syntax.string_of_term ctxt inst_t)))
+        val enet2 = enet
+          |> map_indices_with_unifvar (fold Vartab.delete_safe inst_Tvar_ixns)
+               (fold Vartab.delete_safe inst_var_ixns)
+          |> fold (fn (_, inst_t) => ins_indices_via_occ_unifvars inst_t) inst_indices_grpd
+          |> map_net (fold (fn (ts, inst_t) => fn net =>
+                 let
+                   val (xss, net2) = net |> fold_map (fn t => fn net_ =>
+                       let
+                         val t'_keys = prepfix_index_term t |> Net.key_of_term
+                         val xs = Net.lookup net_ t'_keys |> filter (fn (t2, _) => idx_eq (t2, t))
+                           |> map snd
+                         (* NB: uses "safe" delete to account for new identification of
+                            previously distinct entries that have same key-approximation *)
+                         val net_2 = net_
+                           |> fold (fn x => Net.delete_safe (eq_pair idx_eq eq) (t'_keys, (t, x))) xs
+                       in (xs, net_2) end)
+                     ts
+                   val xs' = get_merge_entries_on_index_inst enet ctxt envdiff2 inst_t (flat xss)
+                 in
+                   net2 |> fold (fn x' =>
+                       Net.insert_term_safe (eq_pair idx_eq eq) (prepfix_index_term inst_t, (inst_t, x')))
+                     xs'
+                 end)
+               inst_indices_grpd)
+
+        val tvars_tab = Vartab.empty
+          |> fold (fn (t, _) => fold Vartab.update (Term.add_tvars t [])) inst_indices
+        val vars_tab = Vartab.empty
+          |> fold (fn (t, _) => fold Vartab.update (Term.add_vars t [])) inst_indices
+        val rel_inst_Tvars = inst_Tvar_ixns |> map_filter (fn ixn =>
+          Vartab.lookup tvars_tab ixn |> Option.map (fn S => (ixn, S)))
+        val rel_inst_vars = inst_var_ixns |> map_filter (fn ixn =>
+          Vartab.lookup vars_tab ixn |> Option.map (fn T => (ixn, T)))
+      in
+        (((rel_inst_Tvars, rel_inst_vars), inst_indices_grpd), (enet2, envdiff2))
+      end
   end
 
-fun normalize eq enet_envdiff = normalize_internal false eq enet_envdiff
+fun normalize ctxt eq enet_envdiff = normalize_internal false (SOME ctxt) eq enet_envdiff
 fun demand_normalized (enet, envdiff) = 
   let
     fun eq _ = error "enet content equality should be unnecessary"
-    val _ = normalize_internal true eq (enet, envdiff)
+    val _ = normalize_internal true NONE eq (enet, envdiff)
   in () end
 fun is_normalized (enet, envdiff) =
   (let val _ = demand_normalized (enet, envdiff)
@@ -191,88 +250,87 @@ fun is_normalized (enet, envdiff) =
 
 exception INSERT
 
-(* NB: t not necessarily eta normal, but this is customary for better index approx *)
-fun insert_term eq (t, a) enet =
-  let
-    val t' = fix_index_term t
+(* t has to be beta normal *)
+fun insert_term envdiff eq (t, x) enet =
+  let val _ = demand_normalized (enet, envdiff)
   in
     enet
-    |> map_net (fn net => Net.insert_term eq (t', a) net handle Net.INSERT => raise INSERT)
-    |> upd_indices_via_occ_unifvars t
+    |> map_net (fn net =>
+         Net.insert_term (eq_pair (index_eq envdiff) eq) (prepfix_index_term t, (t, x)) net
+         handle Net.INSERT => raise INSERT)
+    |> ins_indices_via_occ_unifvars t
   end
 
-fun insert_term_safe eq (t, a) enet =
-  insert_term eq (t, a) enet handle INSERT => enet
+fun insert_term_safe envdiff eq (t, a) enet =
+  insert_term envdiff eq (t, a) enet handle INSERT => enet
 
 
 
   
 exception DELETE
 
-fun delete_term eq (t, a) enet =
-  let
-    val t' = fix_index_term t
+(* t has to be beta normal *)
+fun delete_term envdiff eq (t, x) enet =
+  let val _ = demand_normalized (enet, envdiff)
   in
     enet
-    |> map_net (fn net => Net.delete_term eq (t', a) net handle Net.DELETE => raise DELETE)
+    |> map_net (fn net =>
+         Net.delete_term (eq_pair (index_eq envdiff) eq) (prepfix_index_term t, (t, x)) net
+         handle Net.DELETE => raise DELETE)
     |> rem_indices_via_occ_unifvars t
   end
 
-fun delete_term_safe eq (t, a) enet =
-  delete_term eq (t, a) enet handle DELETE => enet
+fun delete_term_safe envdiff eq (t, a) enet =
+  delete_term envdiff eq (t, a) enet handle DELETE => enet
 
 
 
-fun lookup_term_internal demand_normal eq t (enet, envdiff) =
+fun lookup_term_internal demand_normal ctxt_opt eq t (enet, envdiff) =
   let
-    val (_, (enet2, envdiff2)) = normalize_internal demand_normal eq (enet, envdiff)
-    val t' = fix_index_term t
-    val entries = Net.lookup (get_net enet2) (Net.key_of_term t') 
-  in (entries, (enet2, envdiff2)) end
+    val (_, (enet2, envdiff2)) = normalize_internal demand_normal ctxt_opt eq (enet, envdiff)
+    val xs = Net.lookup (get_net enet2) (prepfix_index_term t |> Net.key_of_term)
+      |> filter (fn (t2, _) => index_eq envdiff2 (t2, t)) |> map snd
+  in (xs, (enet2, envdiff2)) end
 
-fun lookup_term eq t enet_envdiff = lookup_term_internal false eq t enet_envdiff
-fun lookup_term_in_normed_net eq enet_envdiff t =
-  lookup_term_internal true eq t enet_envdiff |> fst
+fun lookup_term ctxt eq t enet_envdiff = lookup_term_internal false (SOME ctxt) eq t enet_envdiff
+fun lookup_term_in_normed_net enet_envdiff t =
+  let fun eq _ = error "lookup_term_in_normed_net: equality unnecessary"
+  in lookup_term_internal true NONE eq t enet_envdiff |> fst end
 
 
-(* NB: assumes t to be beta-eta normal *)
+(* NB: assumes t to be beta normal *)
 (* Finds entries for indices that match against t. Normal net match operation
    makes little sense for var_exact_nets, just use lookup_term. *)
-fun rev_match_term_internal demand_normal eq t (enet, envdiff) =
+fun rev_match_term_internal demand_normal ctxt_opt eq t (enet, envdiff) =
   let
-    val (_, (enet2, envdiff2)) = normalize_internal demand_normal eq (enet, envdiff)
-    val entries = Net.unify_term (get_net enet2) t
-  in (entries, (enet2, envdiff2)) end
+    val (_, (enet2, envdiff2)) = normalize_internal demand_normal ctxt_opt eq (enet, envdiff)
+    val xs = Net.unify_term (get_net enet2) (Envir.eta_contract t)
+  in (xs, (enet2, envdiff2)) end
 
-fun rev_match_term eq t enet_envdiff = rev_match_term_internal false eq t enet_envdiff
-fun rev_match_term_in_normed_net eq enet_envdiff t =
-  rev_match_term_internal true eq t enet_envdiff |> fst
+fun rev_match_term ctxt eq t enet_envdiff = rev_match_term_internal false (SOME ctxt) eq t enet_envdiff
+fun rev_match_term_in_normed_net enet_envdiff t =
+  let fun eq _ = error "rev_match_term_in_normed_net: equality unnecessary"
+  in rev_match_term_internal true NONE eq t enet_envdiff |> fst end
 
 
 fun entries enet = Net.entries (get_net enet)
+fun content enet = Net.content (get_net enet)
 
 
 (* NB: assumes normalized enet inputs! *)
-fun subtract eq enet1 enet2 =
+fun subtract envdiff eq enet1 enet2 =
   if get_diff_slot_uid enet1 <> get_diff_slot_uid enet2 then
     error "var_exact_net subtract with different origins"
   else
-    Net.subtract eq (get_net enet1) (get_net enet2)
+    content enet2 |> Library.subtract (swap #> eq_pair (index_eq envdiff) eq) (content enet1)
 
 (* NB: assumes normalized enet inputs! *)
-fun merge eq (enet1, enet2) =
+fun merge envdiff eq (enet1, enet2) =
   if get_diff_slot_uid enet1 <> get_diff_slot_uid enet2 then
     error "var_exact_net merge with different origins"
   else
-    enet1
-    |> map_net (fn net1 => Net.merge eq (net1, get_net enet2))
-    |> map_indices_with_unifvar
-         (fn indices_w_type_unifvar1 =>
-           Vartab.merge_list (op aconv) (indices_w_type_unifvar1, get_indices_with_type_unifvar enet2))
-         (fn indices_w_term_unifvar1 =>
-           Vartab.merge_list (op aconv) (indices_w_term_unifvar1, get_indices_with_term_unifvar enet2))
+    enet1 |> fold (insert_term_safe envdiff eq) (content enet2)
 
-fun content enet = Net.content (get_net enet)
 
 
 end

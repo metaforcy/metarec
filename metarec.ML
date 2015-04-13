@@ -78,6 +78,8 @@ fun string_of_thm_in_gctxt gctxt =
   | Context.Theory thy => Display.string_of_thm_global thy
 
 
+fun raw_string_of_term ctxt = Print_Mode.setmp [Pretty.symbolicN]
+  (Syntax.pretty_term ctxt #> Pretty.str_of)
 
 
 
@@ -1323,6 +1325,7 @@ fun aconv_norm_run_state_env ctxt = aconv_norm (norm_with_env_in_run_state ctxt)
 
 
 fun str_of_normed_term ctxt = Syntax.string_of_term ctxt o norm_with_env_in_run_state ctxt
+fun raw_str_of_normed_term ctxt = raw_string_of_term ctxt o norm_with_env_in_run_state ctxt
 
 fun get_running_expl_frules ctxt =
   if can Local_Theory.assert ctxt then
@@ -3882,7 +3885,7 @@ and chr_constraint_simplification allow_propagation =
        We avoid cycles by regarding constraints right before walking the cycle as dependencies of the derivation.
        When merging hyperedges joining towards a constraint we prioritize on derivations that
        did not have to avoid cycles. *)
-    (* TODO(opt): use var_exact_net for calced *)
+    (* TODO(opt): use var_exact_net for calced; norming not necessary anymore *)
     (* NB: sharing calc across intermediate dependency calculations leads to wrong result in general,
        because walked trace differs leading to different cycle detections *)
     fun calc_simp_deps_aux ctxt constraint_graph walked C0 calced =
@@ -3910,13 +3913,14 @@ and chr_constraint_simplification allow_propagation =
           | [] =>
               let
                 val imp_by_prfs =
-                  case Net.match_term constraint_graph C_eta
-                    |> filter (fn (C', _) => eq_C (C', C))
+                  case
+                    VarExactNet.lookup_term_in_normed_net
+                      (constraint_graph, get_the_env_in_run_state ctxt) C
                   of
                     [] => err_with_trace ctxt ("internal error when calculating dependencies: constraint "
                       ^str_of_normed_term ctxt C^" was not found in constraint graph")
                   | C'_and_implied_byss => 
-                      C'_and_implied_byss |> try (hd #> snd) |> these
+                      C'_and_implied_byss |> try hd |> these
                       |> filter (fn (_, src_chr_ty) => src_chr_ty = SimpCHR)
                       |> map fst
 
@@ -4008,15 +4012,15 @@ and chr_constraint_simplification allow_propagation =
     fun impby_subsuming_merge_into ctxt = subsuming_merge_into (impby_subsumes (norm_with_env_in_run_state ctxt)) 
 
 
+    (* NB: since terms of hyperedges are not instantiated anymore, we used var-fixated
+       terms as net indices and during the trancl computation we even employ numerical indices
+       standing for the constraints. *)
+    val prepfix_constraint = Envir.eta_contract #> fix_index_term
 
     (* TODO(opt?): use mutable Arrays instead of Inttabs for prem_idxd, concl_idxd ? *)
     fun termhg_trancl ctxt = CumulTiming.timing "termhg_trancl" (fn constraint_graph =>
       let
         val prems_of = prop_of_proofp #> Logic.strip_imp_prems
-        (* NB: since terms of hyperedges are not instantiated anymore, we used var-fixated
-           terms as net indices and during the derivation we even employ numerical indices
-           standing for the constraints. *)
-        val prep_index_term = Envir.eta_contract #> fix_index_term
 
         fun norm_prf_prems_distinctify imp_prf0 = 
           let
@@ -4030,7 +4034,7 @@ and chr_constraint_simplification allow_propagation =
               imp_prf
           end
 
-        val normed_imp_prfs = Net.content constraint_graph |> maps (fn (_, implied_bys) => 
+        val normed_imp_prfs = VarExactNet.content constraint_graph |> maps (fn (_, implied_bys) => 
             implied_bys |> map (fn (imp_prf, _) => norm_prf_prems_distinctify imp_prf))
           |> sort_distinct (pairself prop_of_proofp #> Term_Ord.fast_term_ord)
         val normed_constraints = normed_imp_prfs 
@@ -4040,10 +4044,10 @@ and chr_constraint_simplification allow_propagation =
         val (num_to_constraint_tab, constraint_num_net) = (Inttab.empty, Net.empty)
           |> fold_index (fn (i, C) =>
                  apfst (Inttab.update_new (i, C))
-                 #> apsnd (Net.insert_term_safe (K false) (prep_index_term C, (C, i))))
+                 #> apsnd (Net.insert_term_safe (K false) (prepfix_constraint C, (C, i))))
                normed_constraints
         fun constraint_to_num C =
-          case Net.match_term constraint_num_net (prep_index_term C)
+          case Net.match_term constraint_num_net (prepfix_constraint C)
             |> filter (fn (C', _) => C' aconv C)
           of
             (_, i) :: _ => i
@@ -4248,52 +4252,53 @@ and chr_constraint_simplification allow_propagation =
                     str_of_normed_term ctxt (prop_of_proofp imp_prf)
                     ^"  trsmaller_bv: "^BitVector.to_string trsmaller_bv)))*)
             in
-              Net.insert_term (K false) (prep_index_term concl, (concl, lazy_imp_prfs))
+              Net.insert_term (K false) (prepfix_constraint concl, (concl, lazy_imp_prfs))
             end)
           res_concl_idxd
       end)
 
+
+    fun triv_cyclic_imp ctxt (imp_prf, _) = 
+      let val (assms, concl) = prop_of_proofp imp_prf 
+        |> norm_with_env_in_run_state ctxt |> Logic.strip_horn 
+      in member (op aconv) assms concl end
+
+
+
     fun reconsider_instantiated_constraints reason_trace =
       CumulTiming.timing "reconsider_instantiated_constraints" (fn (constraint_graph, ctxt) =>
       let
-        (* NB: determination of existing constraints that have been instantiated now relies on the facts that
-             * constraints in the constraint graph are fully normalized 
-             * type unification variables are not instantiated during this derivation process *)
-        fun lookup_var ixnT = EnvDiff.lookup (get_the_env_in_run_state ctxt) ixnT
+        val env = get_the_env_in_run_state ctxt
+        val norm = EnvDiff.norm_term env
+        val (((_, inst_vars), inst_C_grps), (constraint_graph2, env2)) =
+          VarExactNet.normalize ctxt (K true) (constraint_graph, env)
+        val inst_Cs = inst_C_grps |> map snd
 
-        (* TODO(opt!!): expensive! Could be realized more efficiently if we use foexact_net
-          for constraint_graph with variable instantiation tracking. Or manage table
-            unifvar -> constraints containing that unifvar
-          together with efficient env diffing (suggests env with "diff slots" for
-          the various tools, so that they can query new instantiations from thir slot
-          which is cleared after that) *)
-        val inst_old_Cs = constraint_graph |> Net.content
-          |> map_filter (fn (C, _) =>
-               let val var_insts = Term.add_vars C [] |> map_filter (fn v =>
-                 case lookup_var v of
-                   SOME t => SOME (v, t)
-                 | NONE => NONE)
-               in
-                 if null var_insts then NONE
-                 else SOME (C, var_insts)
-               end)
-        val var_insts = [] |> fold (snd #> union (eq_fst (op =))) inst_old_Cs
+        val ctxt2 = ctxt
+          |> Context.proof_map (map_env_in_run_state (K env2))
+          |> ChrInstTracking.map (fold (fn (ixn, T) =>
+                 case EnvDiff.lookup env2 (ixn, T) of
+                   NONE => error ("reconsider_instantiated_constaints: internal error:"
+                     ^" instantiated var not tracked in EnvDiff")
+                 | SOME t =>
+                     (* TODO(refactor): update_new should not be necessary anymore now that
+                          we do an atomic normalization step, because like this the current
+                          reason_trace cannot later be obscurely overwritten by reconsiderations
+                          stemming from propag CHR applications to instantiated constraints? *)
+                     perhaps (try (Vartab.update_new (ixn, (T, (t, reason_trace))))))
+               inst_vars)
 
-        (* NB: assumes there are no distinct vars that differ only in type *)
-        (* NB: until the reg_constraint fold below is fully completed, there are overlaps in inst_old_Cs
-           with different reconsider_instantiated_constraints subcalls via reg_constraint. This is
-           why Vartab.update_new below is essential. *)
-        val ctxt2 = ctxt |> ChrInstTracking.map (
-          fold (fn ((ixn, T), t) =>
-            perhaps (try (Vartab.update_new (ixn, (T, (t, reason_trace)))))) var_insts)
-
-        (* val _ = if null inst_old_Cs then ()
+        (*val _ = if null inst_Cs then ()
           else
             tracing ("the following existing constraints have been instantiated and will be reconsidered:\n"
-              ^commas (inst_old_Cs |> map (fst #> Syntax.string_of_term ctxt))) *)
+              ^"  "^commas (inst_Cs |> map (Syntax.string_of_term ctxt2))
+              ^"\nwere instantiated as follows:\n"
+              ^"  "^space_implode ",   " (inst_C_grps |> map (fn (ts, inst_t) =>
+                commas (ts |> map (Syntax.string_of_term ctxt2))
+                ^" instto "^Syntax.string_of_term ctxt2 inst_t)))*)
       in
-        (constraint_graph, ctxt2)
-        |> reg_constraints true NONE (map (fst #> rpair NONE) inst_old_Cs)
+        (constraint_graph2, ctxt2)
+        |> reg_constraints true NONE (map (rpair NONE) inst_Cs)
       end)
 
 
@@ -4393,12 +4398,13 @@ and chr_constraint_simplification allow_propagation =
               let
                 (* NB: we rely on the fact that the net-indexed term stored in the constraint_graph is
                    always env normalized here due to reconsideration of instantiated constraints. *)
-                (* NB: not Net.match_term, because the matching direction is reversed *)
-                (* TODO(minor opt): if exact_match_chr we could use Net.match_term. But this alone
+                (* NB: not match_term, because the matching direction is reversed *)
+                (* TODO(minor opt): if exact_match_chr we could use match_term. But this alone
                     does not help much in the case of univlvl constraint lookup since variables
                     are also just wildcards in non-unifying net matching. *)
                 val res = 
-                  Net.unify_term constraint_graph (Envir.eta_contract head)
+                  VarExactNet.rev_match_term_in_normed_net
+                    (constraint_graph, get_the_env_in_run_state ctxt2) head
                   |> filter (fn (C', _) => configurated_matches ctxt2 ([head], [C']) |> is_some)
                   |> map fst
                 (* val _ = tracing ("lookup for head "^Syntax.string_of_term ctxt2 head
@@ -4497,7 +4503,7 @@ and chr_constraint_simplification allow_propagation =
                     (* NB: we rely on the fact that the net-indexed term stored in the constraint_graph is
                        always env normalized here due to reconsideration of instantiated constraints. *)
                     val ctxt4_ = ctxt4 |> Context.proof_map (
-                      map_constraints_in_run_state (K (Net.content constraint_graph 
+                      map_constraints_in_run_state (K (VarExactNet.content constraint_graph 
                         |> map (fn (C, _) => (C, ConstraintTrace [], ActiveConstraint))))
                       #> map_simpd_constraints_in_run_state (K []))
                     val (solved_prems, ctxt5_) =
@@ -4638,27 +4644,26 @@ and chr_constraint_simplification allow_propagation =
         val C = norm_with_env_in_run_state ctxt C0
         val C_eta = C |> Envir.eta_contract
 
+        val env = get_the_env_in_run_state ctxt
         val eq_C = aconv_norm (norm_with_env_in_run_state ctxt)
         (* TODO(opt!!): using varexact_net for constraint_graph will save a lot of
             O(n) matching in case of univlvl constraints, because net filtering is not very effective
             in that case *)
-        val ex_C_entries = Net.match_term constraint_graph C_eta
-          |> filter (fn (C', _) => eq_C (C', C))
-        val exists_already = not (null ex_C_entries)
-        val implied_by_alreadys = ex_C_entries |> map snd
+        val implied_by_alreadyss = VarExactNet.lookup_term_in_normed_net
+            (constraint_graph, env) C
+        val exists_already = not (null implied_by_alreadyss)
 
-        (* val _ = tracing ("registering constaint  "^str_of_normed_term ctxt C
+        (* val _ = tracing ("registering constaint  "^Syntax.string_of_term ctxt C0
           ^(case implied_by_opt of
-             SOME implied_by => "\n implied by "^str_of_normed_term ctxt (prop_of_proofp implied_by)
+             SOME (implied_by, _) => "\n implied by "^str_of_normed_term ctxt (prop_of_proofp implied_by)
            | NONE => "\n  implied by nothing")
-          ^"\nex_C_entries are:\n"
-          ^cat_lines (ex_C_entries |> map (fn (C', implied_by_opt_) =>
-            "  * "^str_of_normed_term ctxt C'
-            ^(case implied_by_opt_ of
-                SOME implied_by_ => " implied by "^str_of_normed_term ctxt (prop_of_proofp implied_by_)
-             | NONE => "")))) *)
+          ^"\nimplied_by_alreadyss are:\n"
+          ^cat_lines (implied_by_alreadyss |> map (fn imp_bys =>
+            "  * "^Syntax.string_of_term ctxt C
+              ^"  implied by  "^commas (imp_bys |> map (fn (imp_prf, _) =>
+                str_of_normed_term ctxt (prop_of_proofp imp_prf)))))) *)
         (* val _ =
-          if length ex_C_entries <= 1 orelse force_reconsideration then ()
+          if length implied_by_alreadyss <= 1 orelse force_reconsideration then ()
           else
             error ("reg_constraint: registration of non-instantiated constraint "
               ^str_of_normed_term ctxt C^" and more than one existing constraint graph entry") *)
@@ -4669,7 +4674,7 @@ and chr_constraint_simplification allow_propagation =
           else
             () *)
           (*^"\n  constraint graph contains\n "
-          ^commas (Net.content constraint_graph |> map (fst #> Syntax.string_of_term ctxt))*)
+          ^commas (VarExactNet.content constraint_graph |> map (fst #> Syntax.string_of_term ctxt))*)
 
         fun overwrite_C_entries_with implied_by_opts_ =
           let val _ = () (* tracing ("overwriting entry for constraint "^str_of_normed_term ctxt C
@@ -4679,15 +4684,8 @@ and chr_constraint_simplification allow_propagation =
              | NONE => " without implied-by proof")) *)
           in
             constraint_graph
-            |> fold (fn (C', _) =>
-                   (* NB: deletion from net expects precise term, not an instantiation of it,
-                        so we cannot use C_eta for this.
-                      We use deletion that is tolerant of non-existing C' because there can be serveral
-                      distinct C' with the same key-approximation, which are now identified with C and are
-                      thus all pruned by the first such net deletion *)
-                   Net.delete_term_safe (apsnd fst #> eq_C) (Envir.eta_contract C', C'))
-                 ex_C_entries
-            |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, implied_by_opts_))
+            |> VarExactNet.delete_term_safe env (K true) (C, ())
+            |> VarExactNet.insert_term env (K true) (C, implied_by_opts_)
           end
 
           (* NB: we avoid cluttering the constraint graph with trivially cyclic implied_by entries.
@@ -4697,22 +4695,30 @@ and chr_constraint_simplification allow_propagation =
             merge rule application.
             Note that these entries can become cyclic later because of instantiations
             due to subsequent unifications. We clear them out then. *)
-        fun triv_cyclic_imp (imp_prf, _) = 
-          let val (assms, concl) = prop_of_proofp imp_prf 
-            |> norm_with_env_in_run_state ctxt |> Logic.strip_horn 
-          in member (op aconv) assms concl end
         val implied_by_opt' = case implied_by_opt of 
-            SOME implied_by => if triv_cyclic_imp implied_by then NONE else SOME implied_by
+            SOME implied_by => if triv_cyclic_imp ctxt implied_by then NONE else SOME implied_by
           | NONE => NONE
 
 
           (* NB: in the current implementation we have to cater for the situation in which the net
              for the constraint_graph is not env normalized yet, right after
              reconsider_instantiated_constraints, i.e. with force_reconsideration = true *)
-          (* TODO(refactor): only we switch to var_exact_net for constraint_graph, we do not need to
+          (* TODO(refactor): if we switch to var_exact_net for constraint_graph, we do not need to
              cater for non-env-normalized situation with merge of implied_by lists *)
-        val ex_imps' = [] |> fold (fn imp_bys => impby_subsuming_merge_into ctxt imp_bys #> fst) implied_by_alreadys
-          |> filter_out triv_cyclic_imp
+        val ex_imps' = [] |> fold (fn imp_bys => impby_subsuming_merge_into ctxt imp_bys #> fst) implied_by_alreadyss
+          |> filter_out (triv_cyclic_imp ctxt)
+        val _ =
+          if not exists_already orelse
+            (length implied_by_alreadyss = 1 andalso length ex_imps' = length (hd implied_by_alreadyss))
+          then
+            ()
+          else
+            err_with_trace ctxt ("reg_constraint: missing entry merge in var exact net normalization\n"
+              ^"  "^Syntax.string_of_term ctxt C^" impliedby\n"
+              ^cat_lines (implied_by_alreadyss |> map_index (fn (i, imp_bys) =>
+                "  "^string_of_int i^":  "
+                ^space_implode ",    " (imp_bys
+                  |> map (fn (imp_prf, _) => str_of_normed_term ctxt (prop_of_proofp imp_prf))))))
 
         val constraint_graph' =
           if force_reconsideration then
@@ -4721,8 +4727,7 @@ and chr_constraint_simplification allow_propagation =
             else if not exists_already then
               error "reg_constraint: internal error: force_reconsideration and not exists_already"
             else
-              (* to keep C normalized in net and to achieve absorption after instantiation. *)
-              overwrite_C_entries_with ex_imps')
+              constraint_graph)
           else if exists_already then
             (* NB: if implied_by_opt' = SOME, we register it as an *alternative*
                implied-by-proof, so that calc_simp_deps has alternative path choices in
@@ -4730,22 +4735,22 @@ and chr_constraint_simplification allow_propagation =
             (* TODO(opt): norm propositions of proof_packs as preprocessing? *)
             let
               val _ =
-                if length implied_by_alreadys = 1 then () (* because force_reconsideration = false *)
-                else err_with_trace ctxt "metarec: implied_by_alreadys length assertion failed in constraint propagation"
+                if length implied_by_alreadyss = 1 then () (* because force_reconsideration = false *)
+                else err_with_trace ctxt "metarec: implied_by_alreadyss length assertion failed in constraint propagation"
               val (new_imps, new_imps_ch) = (ex_imps', false)
                 |> (case implied_by_opt' of
                      SOME implied_by_ => impby_subsuming_cons ctxt implied_by_
                    | NONE => I)
             in
-              (* NB: length implied_by_alreadys = 1, so length ex_imps' = length (hd implied_by_alreadys)
-                 implies ex_imps' = (hd implied_by_alreadys)  *)
-              if length ex_imps' = length (hd implied_by_alreadys) andalso not new_imps_ch then
+              (* NB: length implied_by_alreadyss = 1, so length ex_imps' = length (hd implied_by_alreadyss)
+                 implies ex_imps' = (hd implied_by_alreadyss)  *)
+              if length ex_imps' = length (hd implied_by_alreadyss) andalso not new_imps_ch then
                 constraint_graph
               else
                 overwrite_C_entries_with new_imps
             end
           else
-            constraint_graph |> Net.insert_term (pairself fst #> eq_C) (C_eta, (C, the_list implied_by_opt'))
+            constraint_graph |> VarExactNet.insert_term env (K true) (C, the_list implied_by_opt')
       in
         (((C0, C_eta), exists_already), (constraint_graph', ctxt))
       end
@@ -4800,7 +4805,7 @@ and chr_constraint_simplification allow_propagation =
            always env normalized here due to reconsideration of instantiated constraints. *)
         (* TODO(opt): expensive. constraint simproc should provide pattern(s) for the
         constraints it finds interesting *)
-        val Cs = constraint_graph_ |> Net.content |> map fst
+        val Cs = constraint_graph_ |> VarExactNet.content |> map fst
         val (simpth_opt, ctxt_2) = simproc Cs ctxt_
         val simpth_opt = simpth_opt |> 
           (* TODO(correctness): better throw error exception? *)
@@ -4824,30 +4829,53 @@ and chr_constraint_simplification allow_propagation =
       end
 
 
+      (* to keep constraints normalized in constraint graph and to achieve
+         implied_by absorption after instantiation. *)
+       (* TODO(opt): optimize for case where  length implied_byss = 1 *)
+    fun merge_constraint_graph_entries_on_inst ctxt_ env_ C implied_byss =
+      let (* not strictly necessary because ctxt_ only misses diff slot clearing *)
+        val ctxt_2 = ctxt_ |> Context.proof_map (map_env_in_run_state (K env_))
+        val norm = norm_with_env_in_run_state ctxt_2
+        val implied_bys' = []
+          |> fold (fn imp_bys => impby_subsuming_merge_into ctxt_2 imp_bys #> fst) implied_byss
+          |> filter_out (triv_cyclic_imp ctxt_2)
+        val _ = tracing ("merged constraint graph entries of "^raw_string_of_term ctxt_2 C^":\n"
+          ^cat_lines (implied_byss |> map (fn imp_bys =>
+             "  * ["^space_implode ",  " (imp_bys |> map (fn (imp_prf, _) =>
+               raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))^"]"))
+          ^"\nto\n"
+          ^"  "^space_implode ",  " (implied_bys' |> map (fn (imp_prf, _) =>
+               raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))^"]")
+      in
+        [ implied_bys' ]
+      end
      (* constraint store with tracking which other constraints optionally imply this constraint *)
-    val constraint_graph0 = Net.empty : (term * (proof_pack * constraint_rule_ty) list) Net.net
-    val (constraint_graph', ctxt') = (constraint_graph0, ctxt00)
-      |> reg_constraints false NONE (constraints0_ext_impliedby_with_traces |> map fst)
-      |> fold apply_simproc constraint_simprocs
+    val ((constraint_graph', unreg_envdiff_slot), ctxt') =
+      VarExactNet.with_empty_delayed_unreg
+        (Context.proof_map o map_env_in_run_state) get_the_env_in_run_state ctxt00
+        merge_constraint_graph_entries_on_inst
+        (fn constraint_graph0 => fn ctxt00 =>
+           (constraint_graph0, ctxt00)
+           |> reg_constraints false NONE (constraints0_ext_impliedby_with_traces |> map fst)
+           |> fold apply_simproc constraint_simprocs)
     val eq_C = aconv_norm (norm_with_env_in_run_state ctxt')
 
 
       (* looks good with graphviz dot renderer *)
     fun graphviz name CG = 
       let
-        val rawstr_of_normed_term =
-          Print_Mode.setmp [Pretty.symbolicN]
-            (norm_with_env_in_run_state ctxt' #> Syntax.pretty_term ctxt' #> Pretty.str_of)
+        val rawstr_of_normed_term = norm_with_env_in_run_state ctxt'
+          #> raw_string_of_term ctxt'
       in
         "graphviz:\n"
         ^"digraph "^name^" {"
-        ^"\n  node [shape=ellipse]; "^(Net.content CG
+        ^"\n  node [shape=ellipse]; "^(VarExactNet.content CG
           |> map (fn (C, _) => quote (rawstr_of_normed_term C)) |> space_implode "; ")
-        (*^";\n  node [shape=box,height=0.1,width=0.1]; "^(Net.content CG
+        (*^";\n  node [shape=box,height=0.1,width=0.1]; "^(VarExactNet.content CG
           |> maps (fn (_, implied_bys) => implied_bys |> map (fn (prf, src_chr_ty) =>
                quote (rawstr_of_normed_term (prop_of_proofp prf))
                ^"[label="^quote ""(*quote (src_chr_ty_str src_chr_ty)*)^"]")) |> space_implode "; ")*)
-        ^";\n"^cat_lines (Net.content CG |> maps (fn (C, implied_bys) =>
+        ^";\n"^cat_lines (VarExactNet.content CG |> maps (fn (C, implied_bys) =>
           implied_bys |> map_index (fn (i, (prf, src_chr_ty)) =>
             let val prf_str = quote (rawstr_of_normed_term (prop_of_proofp prf))
             in
@@ -4877,7 +4905,7 @@ and chr_constraint_simplification allow_propagation =
         fun src_chr_ty_str SimpCHR = "SimpCHR"
           | src_chr_ty_str PropagationCHR = "PropagationCHR"
         val _ = tracing ("resulting constraint graph is:\n"
-          ^cat_lines (Net.content constraint_graph'
+          ^cat_lines (VarExactNet.content constraint_graph'
             |> map (fn (C, implied_bys) =>
                  "  "^str_of_normed_term ctxt' C ^"  implied by  "
                  ^(if null implied_bys then "nothing"
@@ -4920,9 +4948,10 @@ and chr_constraint_simplification allow_propagation =
                   always env normalized here due to reconsideration of instantiated constraints: C is normalized *)
                val C_eta = Envir.eta_contract C
                val (simp_deps, simp_prf) = calc_simp_deps ctxt' constraint_graph' C
+               val env' = get_the_env_in_run_state ctxt'
              in
                if not (member eq_C simp_deps C) then
-                 Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
+                 VarExactNet.delete_term env' (K true) (C, ())
                else
                  let
                    val (implied_bys', ch_implied_bys) = false |> fold_map (fn (imp_prf, chr_src_ty) => fn ch =>
@@ -4951,11 +4980,11 @@ and chr_constraint_simplification allow_propagation =
                      implied_bys 
                  in
                    ch_implied_bys ?
-                     (Net.delete_term (apsnd fst #> eq_C) (C_eta, C)
-                     #> Net.insert_term (K false) (C_eta, (C, implied_bys')))
+                     (VarExactNet.delete_term env' (K true) (C, ())
+                     #> VarExactNet.insert_term env' (K false) (C, implied_bys'))
                  end
              end)
-           (Net.content constraint_graph')
+           (VarExactNet.content constraint_graph')
 
     (* val _ = tracing (graphviz "ConstraintGraphSimpingBridged" constraint_graph'_simping_bridged) *)
 
@@ -4968,7 +4997,7 @@ and chr_constraint_simplification allow_propagation =
       ^cat_lines (constraints0_simping |> map (fn (C, (simp_deps, _)) =>
          "  "^str_of_normed_term ctxt' C^"  <=simp=  "^commas (map (str_of_normed_term ctxt') simp_deps))))
     val _ = tracing ("trancl_simping_bridged_CG_concls:"
-      ^cat_lines (Net.content trancl_simping_bridged_CG_concls |> map (fn (C, entries) =>
+      ^cat_lines (VarExactNet.content trancl_simping_bridged_CG_concls |> map (fn (C, entries) =>
          "\n  "^str_of_normed_term ctxt' C^"  <=prop=  \n"
          ^cat_lines (entries |> map (fn (prems, lazy_prf, trsmaller_bv) =>
            "    "^commas (prems |> map (str_of_normed_term ctxt'))
@@ -4979,14 +5008,15 @@ and chr_constraint_simplification allow_propagation =
     val constraints1_poss_lazy_imp_prfs = constraints1
       |> map (fn C =>
            let
-             val prepfix_index_term = Envir.eta_contract #> fix_index_term
-
-             val poss_lazy_imp_prfs = Net.match_term trancl_simping_bridged_CG_concls (prepfix_index_term C)
+             val poss_lazy_imp_prfs = Net.match_term trancl_simping_bridged_CG_concls (prepfix_constraint C)
                |> filter (fn (C', _) => C' aconv C) |> try (hd #> snd) |> these
                |> map (fn (prems, lazy_imp_prf, trsmaller_nums) =>
                     let val simp_extendable = prems |> exists (fn prem =>
-                      case Net.match_term constraint_graph'_simping_bridged (Envir.eta_contract prem)
-                        |> filter (fn (C', _) => eq_C (C', prem)) |> try (hd #> snd) |> these
+                      case
+                        VarExactNet.lookup_term_in_normed_net
+                          (constraint_graph'_simping_bridged, get_the_env_in_run_state ctxt')
+                          prem
+                        |> try hd |> these
                       of
                         (_, src_chr_ty) :: _ => src_chr_ty = SimpCHR
                       | _ => false (* prem not a conclusion of a hyperpath *))
@@ -5079,7 +5109,7 @@ and chr_constraint_simplification allow_propagation =
     val implied_constraints_res = implied_constraints
       |> map (fn (C, (_, prf)) => (C, prf (* |> fold_rev (impI_prf ctxt') constraints' *)))
   in
-    ((constraints', implied_constraints_res), ctxt')
+    ((constraints', implied_constraints_res), unreg_envdiff_slot ctxt')
   end)
 
 and metarec_constraint_simp_internal (C0, ConstraintTrace C0_trace) ctxt =
