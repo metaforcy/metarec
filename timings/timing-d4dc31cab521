@@ -1,0 +1,137 @@
+
+selective performance comparison of d4dc31cab521 to bdd34573c514:
+  * structural unifications often sometimes even slightly faster (cumulatively),
+    sometimes 40% slower
+  * never significantly slower (maximal 5% slower)
+  * on large constraint graphs often savings of 11-50%
+    (on small constraint graphs sometimes savings of 5%)
+  * CHR constraint simplification savings sometimes 60%,
+    mostly in 5-15% range
+
+
+ML {*  elab @{context} @{term "<h # f # x, i # g # y>"}  *}
+constraint graph sizes:  16  26  0
+num unifvars in constraint graph:  8  8  0
+
+"elab" cumulative timing point 
+  complete time: 0.887s elapsed time, 0.890s cpu time, 0.010s GC time
+  "metarec_no_constraintsimp": 0.130s elapsed time, 0.130s cpu time, 0.000s GC time
+  "chr_constraint_simplification": 0.151s elapsed time, 0.153s cpu time, 0.000s GC time
+  "termhg_trancl": 0.000s elapsed time, 0.000s cpu time, 0.000s GC time
+  "metarec_constraint_simp": 0.673s elapsed time, 0.677s cpu time, 0.010s GC time
+  "metarec_structural_unifications": 0.042s elapsed time, 0.043s cpu time, 0.000s GC time
+  "replay_prf": 0.039s elapsed time, 0.040s cpu time, 0.000s GC time
+  "add_assm_terms_internal": 0.027s elapsed time, 0.013s cpu time, 0.000s GC time
+  "reconsider_instantiated_constraints": 0.021s elapsed time, 0.017s cpu time, 0.000s GC time
+  "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+   (with constraint graph merge tracing messages)
+   "elab" cumulative timing point 
+     complete time: 0.935s elapsed time, 0.940s cpu time, 0.010s GC time
+     "metarec_no_constraintsimp": 0.130s elapsed time, 0.130s cpu time, 0.000s GC time
+     "chr_constraint_simplification": 0.172s elapsed time, 0.173s cpu time, 0.000s GC time
+     "termhg_trancl": 0.000s elapsed time, 0.000s cpu time, 0.000s GC time
+     "metarec_constraint_simp": 0.715s elapsed time, 0.720s cpu time, 0.010s GC time
+     "metarec_structural_unifications": 0.050s elapsed time, 0.050s cpu time, 0.000s GC time
+     "replay_prf": 0.037s elapsed time, 0.040s cpu time, 0.000s GC time
+     "add_assm_terms_internal": 0.028s elapsed time, 0.020s cpu time, 0.000s GC time
+     "reconsider_instantiated_constraints": 0.035s elapsed time, 0.033s cpu time, 0.000s GC time
+     "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+
+
+
+ML {*  elab @{context} @{term "f # (PI x:A. PI y:(B # x). C # x # y)"}  *}
+constraint graph sizes:   241  25 0
+num unifvars in constraint graph:   10  9  0
+
+"elab" cumulative timing point 
+  complete time: 2.252s elapsed time, 2.273s cpu time, 0.037s GC time
+  "metarec_no_constraintsimp": 0.129s elapsed time, 0.130s cpu time, 0.000s GC time
+  "chr_constraint_simplification": 1.070s elapsed time, 1.090s cpu time, 0.027s GC time
+  "termhg_trancl": 0.002s elapsed time, 0.000s cpu time, 0.000s GC time
+  "metarec_constraint_simp": 1.467s elapsed time, 1.480s cpu time, 0.027s GC time
+  "metarec_structural_unifications": 0.548s elapsed time, 0.557s cpu time, 0.010s GC time
+  "replay_prf": 0.105s elapsed time, 0.107s cpu time, 0.000s GC time
+  "add_assm_terms_internal": 0.026s elapsed time, 0.033s cpu time, 0.000s GC time
+  "reconsider_instantiated_constraints": 0.307s elapsed time, 0.313s cpu time, 0.017s GC time
+  "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+   (with constraint graph merge tracing messages)
+   "elab" cumulative timing point 
+     complete time: 2.568s elapsed time, 2.590s cpu time, 0.037s GC time
+     "metarec_no_constraintsimp": 0.144s elapsed time, 0.143s cpu time, 0.000s GC time
+     "chr_constraint_simplification": 1.273s elapsed time, 1.293s cpu time, 0.027s GC time
+     "termhg_trancl": 0.002s elapsed time, 0.000s cpu time, 0.000s GC time
+     "metarec_constraint_simp": 1.686s elapsed time, 1.700s cpu time, 0.027s GC time
+     "metarec_structural_unifications": 0.629s elapsed time, 0.640s cpu time, 0.010s GC time
+     "replay_prf": 0.105s elapsed time, 0.107s cpu time, 0.000s GC time
+     "add_assm_terms_internal": 0.028s elapsed time, 0.007s cpu time, 0.000s GC time
+     "reconsider_instantiated_constraints": 0.466s elapsed time, 0.470s cpu time, 0.013s GC time
+     "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+
+
+
+ML {*  elab @{context} @{term "f # (PI x:A. PI y:B(x). C(x,y)) # D"}  *}
+constraint graph sizes  158  32  0  0
+num unifvars in constraint graph:   8  9  0  0
+
+"elab" cumulative timing point 
+  complete time: 1.211s elapsed time, 1.220s cpu time, 0.017s GC time
+  "metarec_no_constraintsimp": 0.085s elapsed time, 0.083s cpu time, 0.000s GC time
+  "chr_constraint_simplification": 0.487s elapsed time, 0.497s cpu time, 0.010s GC time
+  "termhg_trancl": 0.001s elapsed time, 0.000s cpu time, 0.000s GC time
+  "metarec_constraint_simp": 0.836s elapsed time, 0.847s cpu time, 0.017s GC time
+  "metarec_structural_unifications": 0.237s elapsed time, 0.237s cpu time, 0.000s GC time
+  "replay_prf": 0.051s elapsed time, 0.050s cpu time, 0.000s GC time
+  "add_assm_terms_internal": 0.021s elapsed time, 0.010s cpu time, 0.000s GC time
+  "reconsider_instantiated_constraints": 0.154s elapsed time, 0.150s cpu time, 0.000s GC time
+  "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+   (with constraint graph merge tracing messages)
+   "elab" cumulative timing point 
+     complete time: 1.798s elapsed time, 1.313s cpu time, 0.017s GC time
+     "metarec_no_constraintsimp": 0.083s elapsed time, 0.083s cpu time, 0.000s GC time
+     "chr_constraint_simplification": 0.610s elapsed time, 0.620s cpu time, 0.017s GC time
+     "termhg_trancl": 0.002s elapsed time, 0.000s cpu time, 0.000s GC time
+     "metarec_constraint_simp": 1.457s elapsed time, 0.973s cpu time, 0.017s GC time
+     "metarec_structural_unifications": 0.205s elapsed time, 0.207s cpu time, 0.000s GC time
+     "replay_prf": 0.050s elapsed time, 0.050s cpu time, 0.000s GC time
+     "add_assm_terms_internal": 0.021s elapsed time, 0.017s cpu time, 0.000s GC time
+     "reconsider_instantiated_constraints": 0.269s elapsed time, 0.277s cpu time, 0.017s GC time
+     "metarec_constraint_simp_instantiated_contraints": no timing (not called?)a
+
+
+
+
+ML {*  elab @{context} @{term "lam f : guniv i ~> guniv i. f # (guniv j)"}  *}
+constraint graph sizes:   221  36   0
+num unifvars in constraint graph:  9  2  0
+
+"elab" cumulative timing point 
+  complete time: 0.671s elapsed time, 0.673s cpu time, 0.007s GC time
+  "metarec_no_constraintsimp": 0.013s elapsed time, 0.017s cpu time, 0.007s GC time
+  "chr_constraint_simplification": 0.361s elapsed time, 0.363s cpu time, 0.000s GC time
+  "termhg_trancl": 0.009s elapsed time, 0.010s cpu time, 0.000s GC time
+  "metarec_constraint_simp": 0.389s elapsed time, 0.393s cpu time, 0.000s GC time
+  "metarec_structural_unifications": 0.252s elapsed time, 0.250s cpu time, 0.000s GC time
+  "replay_prf": 0.014s elapsed time, 0.013s cpu time, 0.000s GC time
+  "add_assm_terms_internal": 0.007s elapsed time, 0.000s cpu time, 0.000s GC time
+  "reconsider_instantiated_constraints": 0.114s elapsed time, 0.117s cpu time, 0.000s GC time
+  "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+   (with constraint graph merge tracing messages)
+   "elab" cumulative timing point 
+     complete time: 0.756s elapsed time, 0.757s cpu time, 0.000s GC time
+     "metarec_no_constraintsimp": 0.009s elapsed time, 0.010s cpu time, 0.000s GC time
+     "chr_constraint_simplification": 0.449s elapsed time, 0.450s cpu time, 0.000s GC time
+     "termhg_trancl": 0.010s elapsed time, 0.010s cpu time, 0.000s GC time
+     "metarec_constraint_simp": 0.477s elapsed time, 0.477s cpu time, 0.000s GC time
+     "metarec_structural_unifications": 0.254s elapsed time, 0.253s cpu time, 0.000s GC time
+     "replay_prf": 0.013s elapsed time, 0.013s cpu time, 0.000s GC time
+     "add_assm_terms_internal": 0.008s elapsed time, 0.010s cpu time, 0.000s GC time
+     "reconsider_instantiated_constraints": 0.188s elapsed time, 0.190s cpu time, 0.000s GC time
+     "metarec_constraint_simp_instantiated_contraints": no timing (not called?)
+
+
