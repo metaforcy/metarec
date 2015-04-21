@@ -1932,6 +1932,11 @@ schematic_lemma "(PRODu k1 x:A. PRODu k2 y:B(x). C(x, y)) <: guniv i"
 
 ML {*
   fun elab ctxt t =
+    CumulTiming.print_block "elab" ["metarec_no_constraintsimp", "chr_constraint_simplification",
+      "termhg_trancl", "metarec_constraint_simp", "metarec_structural_unifications", "replay_prf",
+      "add_assm_terms_internal", "reconsider_instantiated_constraints",
+      "metarec_constraint_simp_instantiated_contraints"]
+    (fn () =>
     exception_trace (fn () =>
       let
         val _ = tracing ("====== starting elaboration of "^Syntax.string_of_term ctxt t
@@ -1949,7 +1954,7 @@ ML {*
             ^"\n  "^Syntax.string_of_term ctxt t')
       in
         th
-      end)
+      end))
 
   
   fun elab_with_expected_error exp_err_match ctxt t =
@@ -2114,23 +2119,30 @@ definition
 lemma [constraint_propag_rule]: "i u< j ==> i u<= j"
   by (rule univ_leq_from_less)
   
-
-lemma [constraint_propag_rule]: "i u< j &&& j u< k ==> i u< k"
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl) ; constraint (j <: univlvl) ; constraint (k <: univlvl) |] ==>
+  i u< j &&& j u< k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans)
 
-lemma [constraint_propag_rule]: "i u< j &&& j u<= k ==> i u< k"
+
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;  constraint (k <: univlvl) |] ==>
+    i u< j &&& j u<= k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans2)
 
-lemma [constraint_propag_rule]: "i u<= j &&& j u< k ==> i u< k"
+ 
+lemma [constraint_propag_rule]: "[| constraint (i <: univlvl)  ;  constraint (j <: univlvl)  ;  constraint (k <: univlvl) |] ==>
+    i u<= j &&& j u< k ==> i u< k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.lt_trans1)
 
 (* NB: we avoid looping on  i u<= i &&& i u<= i ==> i u<= i
    FIXME: was looping just a bug here?
      simp rule for i u<= i should have priority. *)
-lemma [constraint_propag_rule]: "try (intensionally_inequal (i, j)) ==> i u<= j &&& j u<= k ==> i u<= k"
+lemma [constraint_propag_rule]:  "
+  [| try (intensionally_inequal (i, j))  ;
+     constraint (i <: univlvl)  ;  constraint (j <: univlvl) ;  constraint (k <: univlvl)  |] ==>
+  i u<= j &&& j u<= k ==> i u<= k"
   unfolding univ_less_def univ_leq_def
   apply (erule conjunctionE) by (rule Ordinal.le_trans)
 

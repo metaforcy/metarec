@@ -4523,7 +4523,7 @@ and chr_constraint_simplification allow_propagation =
                       |> fold (fn prem_prf => union aconv_norm5 (assms_of_proofp prem_prf)) solved_prems
                       |> subtract aconv_norm5 (these static_new_constraints_opt)
 
-                    val _ =
+                    (* val _ =
                       if is_propagation andalso not (null new_dynamic_constraints) then
                         err_with_trace ctxt5_ ("application of constraint propagation rule\n  "
                           ^Display.string_of_thm ctxt5_ rule
@@ -4531,7 +4531,7 @@ and chr_constraint_simplification allow_propagation =
                           ^commas (map (str_of_normed_term ctxt5_) cs_for_heads)
                           ^"\nresulted in new dynamic constraints\n  "
                           ^commas (map (str_of_normed_term ctxt5_)  new_dynamic_constraints))
-                      else ()
+                      else () *)
                     val ctxt5 = ctxt5_ |> Context.proof_map (
                       map_constraints_in_run_state (K (get_constraints_in_run_state ctxt4))
                       #> map_simpd_constraints_in_run_state (K (get_simpd_constraints_in_run_state ctxt4)))
@@ -4581,10 +4581,9 @@ and chr_constraint_simplification allow_propagation =
                     if is_propagation then
                       (constraint_graph2, ctxt7)
                       |> reg_constraints false (SOME rl_prop)
-                           (concls_prfs |> filter_out (fn (C, _) => C aconv (Data.mk_Trueprop Data.True))
-                            |> map (fn (C, imp_prf) => (C, SOME (imp_prf, PropagationCHR))))
-                      (* TODO(feature): allow dynamic constraint generation in propagation rules:
-                           append to concls_prfs:   ...  @ (map (rpair NONE) new_dynamic_constraints) *)
+                           ((concls_prfs |> filter_out (fn (C, _) => C aconv (Data.mk_Trueprop Data.True))
+                              |> map (fn (C, imp_prf) => (C, SOME (imp_prf, PropagationCHR))))
+                            @ (map (rpair NONE) new_dynamic_constraints))
                       |> SOME
                     else
                       (constraint_graph2, ctxt7)
@@ -4871,6 +4870,13 @@ and chr_constraint_simplification allow_propagation =
              ^ str_of_normed_term ctxt' t))) *)
         fun src_chr_ty_str SimpCHR = "SimpCHR"
           | src_chr_ty_str PropagationCHR = "PropagationCHR"
+        val _ = tracing ("constraint graph size:  "
+          ^string_of_int (length (Net.content constraint_graph' |> maps (fn (C, imp_bys) => imp_bys))))
+        val _ = tracing ("num unifvars in constraint graph:  "
+          ^string_of_int ([] |> fold (fn (_, imp_bys) => fold (fn (imp_by_prf, _) =>
+                Term.add_vars (norm_with_env_in_run_state ctxt' (prop_of_proofp imp_by_prf))) imp_bys)
+              (Net.content constraint_graph')
+            |> length))
         (* val _ = tracing ("resulting constraint graph is:\n"
           ^cat_lines (Net.content constraint_graph'
             |> map (fn (C, implied_bys) =>
