@@ -4829,13 +4829,13 @@ and chr_constraint_simplification allow_propagation =
         val implied_bys' = ([], false)
           |> (fold o fold) (impby_subsuming_cons ctxt_2) implied_byss
           |> fst |> filter_out (triv_cyclic_imp ctxt_2)
-        val _ = tracing ("merged constraint graph entries of "^raw_string_of_term ctxt_2 C^":\n"
+        (* val _ = tracing ("merged constraint graph entries of "^raw_string_of_term ctxt_2 C^":\n"
           ^cat_lines (implied_byss |> map (fn imp_bys =>
              "  * "^space_implode ",  " (imp_bys |> map (fn (imp_prf, _) =>
                raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))))
           ^"\nto\n"
           ^"  "^space_implode ",  " (implied_bys' |> map (fn (imp_prf, _) =>
-             raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf))))
+             raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))) *)
       in
         [ implied_bys' ]
       end
