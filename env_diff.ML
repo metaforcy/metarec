@@ -9,9 +9,9 @@ signature ENV_DIFF = sig
   val get_env: env -> Envir.env
   val get_diff_slots: env -> (indexname list * indexname list) Symtab.table
 
-  val map_env: (Envir.env -> Envir.env) -> env -> env
-  val map_tyenv: (Type.tyenv -> Type.tyenv) -> env -> env
-  val inc_maxidx: env -> env
+  (* val map_env: (Envir.env -> Envir.env) -> env -> env
+  val map_tyenv: (Type.tyenv -> Type.tyenv) -> env -> env *)
+  val inc_maxidx: env -> env 
 
   val is_empty: env -> bool
   val maxidx_of: env -> int

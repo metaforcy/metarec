@@ -1476,14 +1476,6 @@ fun invoke_linear_ctxt_boundary_handlers boundary ctxt =
 
 
 
-fun pattern_fun_to_env_mapper f input env =
-  let
-    val (tyenv2, tenv2) = f input (EnvDiff.type_env env, EnvDiff.term_env env)
-    val env_cont = Envir.Envir { maxidx = EnvDiff.maxidx_of env, tenv = tenv2, tyenv = tyenv2 }
-  in
-    env |> EnvDiff.map_env (K env_cont)
-  end
-
 (* TODO(refactor): use is inlined in some other places *)
 fun envdiff_str ctxt env1 env2 =
   env2 |> EnvDiff.term_env |> fold Vartab.delete (Vartab.keys (EnvDiff.term_env env1))
@@ -4676,16 +4668,14 @@ and chr_constraint_simplification allow_propagation =
           (*^"\n  constraint graph contains\n "
           ^commas (VarExactNet.content constraint_graph |> map (fst #> Syntax.string_of_term ctxt))*)
 
-        fun overwrite_C_entries_with implied_by_opts_ =
-          let val _ = () (* tracing ("overwriting entry for constraint "^str_of_normed_term ctxt C
-            ^(case implied_by_opt_ of
-               SOME implied_by_ => " with implied-by proof "
-                 ^str_of_normed_term ctxt (prop_of_proofp implied_by_)
-             | NONE => " without implied-by proof")) *)
+        fun overwrite_C_entries_with imp_bys2 =
+          let val _ = () (*tracing ("overwriting entry for constraint "^str_of_normed_term ctxt C
+            ^" with \n"^(cat_lines (imp_bys2 |> map (fn (imp_prf, _) => 
+                 "   "^str_of_normed_term ctxt (prop_of_proofp imp_prf)))))*)
           in
             constraint_graph
             |> VarExactNet.delete_term_safe env (K true) (C, ())
-            |> VarExactNet.insert_term env (K true) (C, implied_by_opts_)
+            |> VarExactNet.insert_term env (K true) (C, imp_bys2)
           end
 
           (* NB: we avoid cluttering the constraint graph with trivially cyclic implied_by entries.
@@ -4713,7 +4703,7 @@ and chr_constraint_simplification allow_propagation =
           then
             ()
           else
-            err_with_trace ctxt ("reg_constraint: missing entry merge in var exact net normalization\n"
+            err_with_trace ctxt ("reg_constraint: missing entry merge in var exact net\n"
               ^"  "^Syntax.string_of_term ctxt C^" impliedby\n"
               ^cat_lines (implied_by_alreadyss |> map_index (fn (i, imp_bys) =>
                 "  "^string_of_int i^":  "
@@ -4829,30 +4819,32 @@ and chr_constraint_simplification allow_propagation =
       end
 
 
-      (* to keep constraints normalized in constraint graph and to achieve
+      (* keeps constraints normalized in constraint graph and achieves
          implied_by absorption after instantiation. *)
-       (* TODO(opt): optimize for case where  length implied_byss = 1 *)
+      (* TODO(opt): optimize for case where  length implied_byss = 1 *)
     fun merge_constraint_graph_entries_on_inst ctxt_ env_ C implied_byss =
       let (* not strictly necessary because ctxt_ only misses diff slot clearing *)
         val ctxt_2 = ctxt_ |> Context.proof_map (map_env_in_run_state (K env_))
         val norm = norm_with_env_in_run_state ctxt_2
-        val implied_bys' = []
-          |> fold (fn imp_bys => impby_subsuming_merge_into ctxt_2 imp_bys #> fst) implied_byss
-          |> filter_out (triv_cyclic_imp ctxt_2)
+        val implied_bys' = ([], false)
+          |> (fold o fold) (impby_subsuming_cons ctxt_2) implied_byss
+          |> fst |> filter_out (triv_cyclic_imp ctxt_2)
         val _ = tracing ("merged constraint graph entries of "^raw_string_of_term ctxt_2 C^":\n"
           ^cat_lines (implied_byss |> map (fn imp_bys =>
-             "  * ["^space_implode ",  " (imp_bys |> map (fn (imp_prf, _) =>
-               raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))^"]"))
+             "  * "^space_implode ",  " (imp_bys |> map (fn (imp_prf, _) =>
+               raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))))
           ^"\nto\n"
           ^"  "^space_implode ",  " (implied_bys' |> map (fn (imp_prf, _) =>
-               raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf)))^"]")
+             raw_str_of_normed_term ctxt_2 (prop_of_proofp imp_prf))))
       in
         [ implied_bys' ]
       end
-     (* constraint store with tracking which other constraints optionally imply this constraint *)
+      (* constraint store with tracking which other constraints optionally imply this constraint *)
     val ((constraint_graph', unreg_envdiff_slot), ctxt') =
       VarExactNet.with_empty_delayed_unreg
         (Context.proof_map o map_env_in_run_state) get_the_env_in_run_state ctxt00
+        (fn env => fn imp_bys => [] |> fold (Term.add_tvars o EnvDiff.norm_term env o prop_of_proofp o fst) imp_bys)
+        (fn env => fn imp_bys => [] |> fold (Term.add_vars o EnvDiff.norm_term env o prop_of_proofp o fst) imp_bys)
         merge_constraint_graph_entries_on_inst
         (fn constraint_graph0 => fn ctxt00 =>
            (constraint_graph0, ctxt00)
@@ -4981,7 +4973,7 @@ and chr_constraint_simplification allow_propagation =
                  in
                    ch_implied_bys ?
                      (VarExactNet.delete_term env' (K true) (C, ())
-                     #> VarExactNet.insert_term env' (K false) (C, implied_bys'))
+                     #> VarExactNet.insert_term env' (K true) (C, implied_bys'))
                  end
              end)
            (VarExactNet.content constraint_graph')
