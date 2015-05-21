@@ -267,14 +267,16 @@ fun normalize_internal demand_normal ctxt_opt eq (enet, envdiff) =
                  end)
                inst_rel_indices_grpd
 
-        val tvars_tab = Vartab.empty
-          |> fold (fn (t, _) => fold Vartab.update (Term.add_tvars t [])) inst_rel_indices
-        val vars_tab = Vartab.empty
-          |> fold (fn (t, _) => fold Vartab.update (Term.add_vars t [])) inst_rel_indices
-        val rel_inst_Tvars = inst_Tvar_ixns |> map_filter (fn ixn =>
-          Vartab.lookup tvars_tab ixn |> Option.map (fn S => (ixn, S)))
-        val rel_inst_vars = inst_var_ixns |> map_filter (fn ixn =>
-          Vartab.lookup vars_tab ixn |> Option.map (fn T => (ixn, T)))
+        val rel_inst_Tvars = inst_Tvar_ixns |> map (fn ixn =>
+          case EnvDiff.lookup_type_wosort envdiff2 ixn of
+            SOME (S, _) => (ixn, S)
+          | NONE => error ("var_exact_net normalize: internal error: "
+              ^"uninstantiated type unifvar in diffslot"))
+        val rel_inst_vars = inst_var_ixns |> map (fn ixn =>
+          case EnvDiff.lookup_wotype envdiff2 ixn of
+            SOME (T, _) => (ixn, T)
+          | NONE => error ("var_exact_net normalize: internal error "
+              ^"uninstantiated term unifvar in diffslot"))
 
         fun intersects xs ys = not (null (inter (op =) xs ys))
         val inst_indices_grpd = inst_rel_indices_grpd |> filter (fn (ts, inst_t) =>

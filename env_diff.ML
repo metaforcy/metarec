@@ -9,8 +9,9 @@ signature ENV_DIFF = sig
   val get_env: env -> Envir.env
   val get_diff_slots: env -> (indexname list * indexname list) Symtab.table
 
-  (* val map_env: (Envir.env -> Envir.env) -> env -> env
-  val map_tyenv: (Type.tyenv -> Type.tyenv) -> env -> env *)
+  val unsafe_map_env: (Envir.env -> Envir.env) -> env -> env
+  val unsafe_map_tyenv: (Type.tyenv -> Type.tyenv) -> env -> env
+  val unsafe_map_tenv: (Envir.tenv -> Envir.tenv) -> env -> env
   val inc_maxidx: env -> env 
 
   val is_empty: env -> bool
@@ -23,6 +24,8 @@ signature ENV_DIFF = sig
   val unregister_diff_slot: string -> env -> env
   val get_diff_slot: env -> string -> indexname list * indexname list
   val clear_diff_slot: string -> env -> env
+  val with_diff_slot: string -> (env -> env)
+    -> env -> (indexname list * indexname list) * env
 
   val get_and_clear_diff_slot: string -> env -> (indexname list * indexname list) * env
   val genvars: string -> typ list -> env -> term list * env
@@ -30,7 +33,10 @@ signature ENV_DIFF = sig
 
   val lookup: env -> indexname * typ -> term option
   val lookup': env -> indexname * typ -> term option
+  val lookup_wotype: env -> indexname -> (typ * term) option
+
   val lookup_type: env -> indexname * sort -> typ option
+  val lookup_type_wosort: env -> indexname -> (sort * typ) option
 
   val update: (indexname * typ) * term -> env -> env
   val update_type: (indexname * sort) * typ -> env -> env
@@ -67,15 +73,17 @@ fun empty maxidx = EnvDiff { env = Envir.empty maxidx, diff_slots = Symtab.empty
 fun get_env (EnvDiff {env, ...}) = env
 fun get_diff_slots (EnvDiff {diff_slots, ...}) = diff_slots
 
-fun map_env f (EnvDiff {env, diff_slots}) =
+fun unsafe_map_env f (EnvDiff {env, diff_slots}) =
   EnvDiff {env = f env, diff_slots = diff_slots}
 fun map_diff_slots f (EnvDiff {env, diff_slots}) =
   EnvDiff {env = env, diff_slots = f diff_slots}
 
 
-fun map_tyenv f = map_env (fn (Envir.Envir { maxidx, tenv, tyenv }) =>
+fun unsafe_map_tyenv f = unsafe_map_env (fn (Envir.Envir { maxidx, tenv, tyenv }) =>
   Envir.Envir {maxidx = maxidx, tenv = tenv, tyenv = f tyenv })
-fun map_maxidx f = map_env (fn (Envir.Envir { maxidx, tenv, tyenv }) =>
+fun unsafe_map_tenv f = unsafe_map_env (fn (Envir.Envir { maxidx, tenv, tyenv }) =>
+  Envir.Envir {maxidx = maxidx, tenv = f tenv, tyenv = tyenv })
+fun map_maxidx f = unsafe_map_env (fn (Envir.Envir { maxidx, tenv, tyenv }) =>
   Envir.Envir {maxidx = f maxidx, tenv = tenv, tyenv = tyenv })
 val inc_maxidx = map_maxidx (fn i => i + 1)
 
@@ -102,7 +110,18 @@ fun get_and_clear_diff_slot uid envdiff =
   let val diff_slot = get_diff_slot envdiff uid
   in (diff_slot, clear_diff_slot uid envdiff) end
 
-fun set_env env2 envdiff = map_env (K env2) envdiff
+fun with_diff_slot name f envdiff =
+  let
+    val uid = name ^ string_of_int (serial ())
+    val envdiff2 = envdiff |> register_diff_slot uid |> f
+    val (diff, envdiff3) = get_and_clear_diff_slot uid envdiff2
+      ||> unregister_diff_slot uid
+  in
+    (diff, envdiff3)
+  end
+
+
+fun set_env env2 envdiff = unsafe_map_env (K env2) envdiff
 
 val maxidx_of = Envir.maxidx_of o get_env
 val term_env = Envir.term_env o get_env
@@ -128,14 +147,17 @@ fun genvar n T envdiff =
 
 fun lookup envdiff ixnT = Envir.lookup (get_env envdiff, ixnT)
 fun lookup' envdiff ixnT = Envir.lookup' (term_env envdiff, ixnT)
-fun lookup_type envdiff = Type.lookup (type_env envdiff)
+fun lookup_wotype envdiff ixn = Vartab.lookup (term_env envdiff) ixn
+
+fun lookup_type envdiff ixnS = Type.lookup (type_env envdiff) ixnS
+fun lookup_type_wosort envdiff ixn = Vartab.lookup (type_env envdiff) ixn
 
 (* EnvDiff's raison d'etre *)
 fun update (ixnT_t as ((ixn, _), _)) envdiff = envdiff
-  |> map_env (curry Envir.update ixnT_t)
+  |> unsafe_map_env (curry Envir.update ixnT_t)
   |> map_diff_slots (Symtab.map (K (apsnd (cons ixn))))
 fun update_type ((ixn, S), T) envdiff = envdiff
-  |> map_tyenv (Vartab.update_new (ixn, (S, T)))
+  |> unsafe_map_tyenv (Vartab.update_new (ixn, (S, T)))
   |> map_diff_slots (Symtab.map (K (apfst (cons ixn))))
 
 fun above envdiff i = Envir.above (get_env envdiff) i

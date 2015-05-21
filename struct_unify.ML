@@ -8,6 +8,9 @@ sig
   val unify: bool -> theory -> term * term -> EnvDiff.env * flexflex list -> EnvDiff.env * flexflex list
   val solve_delayed_flexflexs: theory -> flexflex list -> EnvDiff.env -> EnvDiff.env
   val term_eq_of_flexflex: flexflex -> term
+
+  val pattern_unify_envdiff : theory -> term * term -> EnvDiff.env -> EnvDiff.env
+
   exception Unif
   exception NotBetaNormal
   exception Pattern
@@ -458,7 +461,7 @@ and liftvars_over thy binders lev (ss_Ts0, ss_bnds0) term env =
    influence its existence, but would make it independent of occurrence-based order
    of struct_insts.  *)
 (* canonical example: the structural instantiation solution for  ?X(t) == (PROD x:?A. ?B(x))  is
-      ?X := (% t. PROD x:?A'(t). ?B'(x, t))
+      ?X := (% t. PROD x:?A'(t). ?B'(t, x))
       ?A := ?A'(t)   "propagating the dependency on t"
       ?B := ?B'(t)
       ?A', ?B' fresh  *)
@@ -664,6 +667,12 @@ fun eta_long Ts (Abs (s, T, t)) = Abs (s, T, eta_long (T :: Ts) t)
                 (map (incr_boundvars i) ts @ map Bound (i - 1 downto 0))))
           end);
 
+
+
+fun pattern_unify_envdiff thy (t1, t2) env =
+  case unify false thy (t1, t2) (env, []) of
+    (env2, []) => env2
+  | _ => error ("pattern_unify_envdiff: internal error: delayed flexflex pairs")
 
 
 end

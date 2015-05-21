@@ -1606,12 +1606,7 @@ fun try_pat_unify ctxt (t1_0, t2_0) env =
     let
       val thy = Proof_Context.theory_of ctxt
       val env2 = env |> EnvDiff.typ_unify thy (fastype_of t1, fastype_of t2) 
-      val (env3, delayed_flexflex) = StructUnify.unify false thy (t1, t2) (env2, [])
-      val _ =
-        if null delayed_flexflex then ()
-        else
-          error
-            ("try_pat_unify: internal error: pattern unification returned delayed flexflex pairs")
+      val env3 = StructUnify.pattern_unify_envdiff thy (t1, t2) env2
     in
       SOME env3
     end
@@ -1683,7 +1678,13 @@ fun mk_normed_concl_stats ctxt concl =
 fun get_normed_concl_stats ctxt =
   get_linear_ctxt_in_run_state ctxt |> ConclInLinCtxt.get
   |> Option.map (mk_normed_concl_stats ctxt)
-fun put_concl_in_lin_ctxt concl = map_linear_ctxt_in_run_state (ConclInLinCtxt.put (SOME concl) )
+fun put_concl_in_lin_ctxt concl = map_linear_ctxt_in_run_state (ConclInLinCtxt.put (SOME concl))
+fun with_concl_in_lin_ctxt projapp concl f ctxt =
+  let val concl0_opt = ConclInLinCtxt.get (get_linear_ctxt_in_run_state ctxt)
+  in
+    ctxt |> put_concl_in_lin_ctxt concl
+    |> f |> projapp (map_linear_ctxt_in_run_state (ConclInLinCtxt.put concl0_opt))
+  end
 
 
 
@@ -5091,7 +5092,19 @@ and chr_constraint_simplification allow_propagation =
     val implied_constraints = constraints0_deps
       |> map_filter (fn (C, _, (deps, _, prf)) =>
            if member eq_C deps C then NONE
-           else SOME (C, (deps, prf)))
+           else
+             let
+               (* FIXME? does not work? *)
+               val used_facts = deps |> map_filter (fn C2 =>
+                 filter (fn ((C3, impby_opt), _) => is_some impby_opt andalso eq_C (C2, C3))
+                   constraints0_ext_impliedby_with_traces
+                 |> try hd
+                 |> Option.map (fn ((C3, SOME (impby_prf, _)), _) => (C3, impby_prf)))
+               val deps2 = deps |> subtract eq_C (map fst used_facts)
+               val prf2 = prf |> fold (fn (C2, C2_prf) =>
+                   impI_prf ctxt' C2 #> mp_rev_prf ctxt' C2_prf)
+                 used_facts
+             in SOME (C, (deps2, prf2)) end)
 
     (* val _ = tracing ("implied constraints after chr:\n"
       ^cat_lines (implied_constraints |> map (fn (C, (deps, prf)) =>
@@ -5397,8 +5410,9 @@ and metarec_structural_unifications prf = CumulTiming.timing "metarec_structural
 
   (* NB: assumes normalized pobj, iobjs *)
 and metarec_no_constraintsimp failcont ctxt jid = CumulTiming.timing "metarec_no_constraintsimp" (fn (pobj, iobjs) =>
-  metarec_worker true ctxt (SOME failcont) jid (pobj, iobjs)
-  ||> invoke_linear_ctxt_boundary_handlers MetarecBoundary)
+  with_new_rule_trace_level "normal metarec derivation" ctxt (fn ctxt =>
+    metarec_worker true ctxt (SOME failcont) jid (pobj, iobjs)
+    ||> invoke_linear_ctxt_boundary_handlers MetarecBoundary))
 
 (* pobj, iobjs  may not contain any Vars
      (not true anymore, because init_run_state uses current maxidx?)
@@ -5413,8 +5427,7 @@ and metarec_with_failcont failcont ctxt0 jid = CumulTiming.timing "metarec_with_
     val pobj' = normalize_term ctxt pobj
     val iobjs' = map (normalize_term ctxt) iobjs
 
-    val ((prf, oobjs), ctxt2) = with_new_rule_trace_level "normal metarec derivation" ctxt (fn ctxt =>
-        metarec_no_constraintsimp failcont ctxt jid (pobj', iobjs'))
+    val ((prf, oobjs), ctxt2) = metarec_no_constraintsimp failcont ctxt jid (pobj', iobjs')
     (* val _ = tracing ("metarec derivation was successful (but no replay tried yet) with: "
           ^str_of_normed_term ctxt2 (prop_of_proofp prf)) *)
     (* val _ = tracing ("prf for metarec derivation is "
@@ -6167,6 +6180,11 @@ and gen_add_fact local_run expl_frules_opt guaranteed_new_for_expl_frules fact0 
           * frule Anwendung soll nach wie vor mit matching stattfinden,
             also das explizit machen statt OF nutzen
           * Fakten-Check hier und in add_assm anpassen *)
+
+    (* NB: exactrule marker is dropped from facts once they enter frule propagation.
+       This works because facts are fixed during frule propagation
+         and add_assm_terms_internal marks facts generated from exactrule facts as
+         exactrule facts. *)
     val fact_w_exactrule_marker = normalize ctxt fact0
     val fact = fact_w_exactrule_marker |> remove_exact_rule_marker_cv
 

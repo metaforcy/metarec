@@ -3,6 +3,10 @@ structure ZFUnifyData =
 struct
 
   exception UnificationFailed of string
+  exception SynthFail of Proof.context * string
+
+  val env_from_ctxt = MetaRec.get_the_env_in_run_state
+  fun map_env_in_ctxt f = Context.proof_map (MetaRec.map_env_in_run_state f)
 
   fun meta_unify ctxt (t1, t2) env =
     (case MetaRec.try_pat_unify ctxt (t1, t2) env of
@@ -13,11 +17,11 @@ struct
       error ("ZF.meta_unify: "^msg)
       (*raise UnificationFailed msg*)
 
-  fun onorm ctxt env t0 =
+  fun onorm ctxt t0 =
     let
       exception NormFail of string
       fun fail_cont ctxt_ msg = raise NormFail msg
-      val t = Envir.norm_term env t0
+      val t = MetaRec.norm_with_env_in_run_state ctxt t0
     in
       let
         val ((_, [t']), _) = MetaRec.metarec_no_constraintsimp fail_cont ctxt
@@ -28,68 +32,94 @@ struct
     end
 
   (* NB: assumes otypable term *)
-  fun unsafe_onorm ctxt env t0 =
+  fun unsafe_onorm ctxt t0 =
     let
-      val t = Envir.norm_term env t0
+      val t = MetaRec.norm_with_env_in_run_state ctxt t0
       val rew = @{cpat "(lam x:?A. ?t(x)) ` ?a == ?t(?a)"}
         |> Thm.term_of |> Logic.dest_equals
     in
       Pattern.rewrite_term (Proof_Context.theory_of ctxt) [rew] [] t
     end
 
-  fun synth_otyp ctxt env t =
+  fun synth_otyp ctxt t0 =
     let
-      val _ = tracing ("synth_otyp on "^Syntax.string_of_term ctxt (Envir.norm_term env t))
+      val t = MetaRec.norm_with_env_in_run_state ctxt t0
+      val _ = tracing ("synth_otyp on "^Syntax.string_of_term ctxt t)
       val jud = 
         if fastype_of t = @{typ "i"}
         then "UniverseLevelInference.synthty_const_jud"
         else "UniverseLevelInference.metasynthty_const_jud"
-      exception SynthFail
-      fun fail_cont _ _ = raise SynthFail
-    in
-      case (MetaRec.metarec_no_constraintsimp fail_cont ctxt jud (t, []) |> SOME
-          handle SynthFail => NONE)
-      of
-        SOME ((_, [oT]), ctxt2) =>
-          (* FIXME: what about delayed_unifs and constraints in runstate of ctxt2?
-             change architecture to runstate-Propagation instead
-             of just env-Propagation? *)
-          SOME oT 
-      | NONE => NONE
-     end
+      fun fail_cont ctxt2 msg = raise SynthFail (ctxt2, msg)
 
-  (* FIXME: this assumes consistent variable generation, so at least we need
-       to run constraint simplification, esp. typing constraint merge rule,
-       on the constraints generated from previous synth_otyp calls *)
-  fun refines_into_otyp ctxt env oT1 oT2 =
+      val ((prf, [oT]), ctxt2) = MetaRec.metarec_no_constraintsimp fail_cont ctxt jud (t, [])
+
+      fun check_generated fail ctxt_ = 
+        let
+          val (new_Cs, _) = MetaRec.factor_constraints_in_run_state_wrt ctxt ctxt_
+          val delayed_unifs = MetaRec.get_delayed_unifs_in_run_state ctxt_
+        in
+          if null new_Cs andalso null delayed_unifs then
+            true
+          else if fail then
+            MetaRec.err_with_trace ctxt_ ("ZF.synth_otyp: generated new delayed unifications or constraints"
+              ^" during synthesis of otype\n"
+              ^MetaRec.str_of_normed_term ctxt_ oT ^" for "^MetaRec.str_of_normed_term ctxt_ t
+              ^"\nnew constraints: "^commas (new_Cs |> map (#1 #> MetaRec.str_of_normed_term ctxt_))
+              ^"\ndelayed unifs: "^commas (delayed_unifs
+                |> map (fst #> Logic.mk_equals #> MetaRec.str_of_normed_term ctxt_)))
+          else
+            false
+        end
+    in
+      if check_generated false ctxt2 then
+        oT
+      else
+        (* FIXME: abort right away once constraint generation in type synthesis can be avoided reliably *)
+        let
+          val ctxt3 = ctxt2 |> MetaRec.with_concl_in_lin_ctxt I (MetaRec.prop_of_proofp prf)
+            (MetaRec.metarec_constraint_simp prf #> snd)
+          val _ = check_generated true ctxt3
+        in MetaRec.norm_with_env_in_run_state ctxt3 oT end
+    end
+
+  (* NB: constraint simplification necessary for consistent typing constraints for
+     variables generated in unification*)
+  fun refine_into_otyp oT1_0 oT2_0 ctxt =
     let
+      val (oT1, oT2) = (oT1_0, oT2_0) |> pairself (onorm ctxt)
       exception RefineFail
       fun fail_cont _ _ = raise RefineFail
-      fun env_abeconv t1 t2 =
-        Pattern.aeconv (onorm ctxt env t1, onorm ctxt env t2)
     in
-      if fastype_of oT1 <> fastype_of oT2 then
-        false
+      if fastype_of oT1 <> fastype_of oT2 
+        orelse fastype_of oT1 <> @{typ "i"}
+      then 
+        NONE
+      else if Pattern.aeconv (oT1, oT2) then
+        SOME ctxt
       else
-        env_abeconv oT1 oT2
-      (* FIXME? refining via subunify. can generate new constraints! *)
-      (* else if fastype_of oT1 <> @{typ "i"} then *)
-        (* case (MetaRec.metarec_no_constraintsimp fail_cont ctxt "UniverseLevelInference.subunify"
+        case (MetaRec.metarec_no_constraintsimp fail_cont ctxt "UniverseLevelInference.subunify"
           (oT1, [oT2]) |> SOME
           handle RefineFail => NONE)
         of
-           (* FIXME: what about delayed_unifs and constraints ? *)
-           SOME ((_, [oT]), (delayed_unifs, constraints)) => true
-         | NONE => false *)
+          SOME ((prf, [oT]), ctxt2) =>
+            let
+              (* FIXME: avoid hidden univlvl discharge because ConclStat not availabe to
+                 characterize hidden univlvl vars *)
+              (* FIXME?: doing structural unifications useful here? *)
+              val (_, ctxt3) = MetaRec.metarec_constraint_simp prf ctxt2
+            in
+              SOME ctxt3
+            end
+        | NONE => NONE
      end
           
 
-  fun is_top_otyp ctxt env t0 =
-    case onorm ctxt env t0 of
+  fun is_top_otyp ctxt t0 =
+    case onorm ctxt t0 of
       Const(@{const_name guniv}, _) $ _ => true
     | t => (case fastype_of t of
         Type("fun", [aT, _]) =>
-          t aconv (Term.lambda (Free("x", aT)) @{term Trueprop(True)})
+          t aconv (Term.lambda (Free("x", aT)) @{term "Trueprop(True)"})
       | _ => false)
         
 
@@ -144,23 +174,21 @@ struct
 
 
 
-  fun dest_oapp (Const(@{const_name "ZF.apply"}, _) $ t1 $ t2) =
-        SOME (t1, t2)
+  fun dest_oapp (Const(@{const_name "ZF.apply"}, _) $ t1 $ t2) = SOME (t1, t2)
     | dest_oapp _ = NONE
 
-  fun dest_opi (Const(@{const_name "ZF.Pi"}, _) $ A $ body) =
-        SOME (A, body)
+  fun dest_opi (Const(@{const_name "ZF.Pi"}, _) $ A $ body) = SOME (A, body)
     | dest_opi _ = NONE
 
   fun dest_mpi (Const(@{const_name "UniverseLevelInference.mPi"}, _) $ P $ body) =
-      let
-        val argty_opt = case P of
-            Abs(_, _, Const(@{const_name "Trueprop"}, _) $ Const(@{const_name "True"}, _)) =>
-              NONE
-          | _ => SOME P
-       in
+        let
+          val argty_opt = case P of
+              Abs(_, _, Const(@{const_name "Trueprop"}, _) $ Const(@{const_name "True"}, _)) =>
+                NONE
+            | _ => SOME P
+        in
           SOME (argty_opt, body)
-       end
+        end
     | dest_mpi _ = NONE
 
 

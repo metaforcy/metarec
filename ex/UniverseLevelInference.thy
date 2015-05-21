@@ -368,8 +368,8 @@ definition
 
 syntax
   "_PRODu"     :: "[i, pttrn, i, i] => i"  ("(3PRODu _ _:_./ _)" 10)
-  "_mlam" :: "[i, pttrn, i] => i" ("(3mlam _:_./ _)" 10)
-  "_lamu" :: "[i, i, pttrn, i] => i" ("(3lamu _ _:_./ _)" 10)
+  "_mlam" :: "[pttrn, i, i] => i" ("(3mlam _:_./ _)" 10)
+  "_lamu" :: "[i, pttrn, i, i] => i" ("(3lamu _ _:_./ _)" [100, 100, 100, 30] 10)
 translations
   "PRODu k x:A. B" == "CONST univannot_prod_synhlp(k, A, %x. B)"
   "mlam x:A. t" == "CONST annot_metalam(A, % x. t)"
@@ -388,7 +388,7 @@ term "PRODu i _:A. B"
 
 term "mlam x:A. t(x)"
 term "lamu k x:A. t(x)"
-
+ML {* @{cpat "lamu k x:(?A). t(x)"} *}
 
 
 lemma produ_on_good_args: "k : univlvl ==> A : guniv k ==> (!! x. x:A ==> B(x) : guniv k) ==>
@@ -3294,23 +3294,45 @@ ML {*
 
       val _ = tracing ("============== begin object unification ==================")
 
-      val env2 = Timing.timeit (fn () =>
-        MetaRec.get_the_env_in_run_state ctxt
-        |> ZF_Unify.obj_unify ctxt (t1, t2))
-      val [t1', t2'] = [t1, t2] |> map (Envir.norm_term env2)
+      val ctxt2 = Timing.timeit (fn () =>
+        ctxt |> ZF_Unify.obj_unify (t1, t2))
+      val env2 = MetaRec.get_the_env_in_run_state ctxt2
+      val [t1', t2'] = [t1, t2] |> map (EnvDiff.norm_term env2)
     in
       (t1', t2')
     end
 *}
 
 
+ML {*
+  val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},
+        @{cpat "exactrule (?x synthty (?A ->[?i] ?A))"}, @{cpat "exactrule (?y synthty (?A ->[?i] ?A ->[?i] ?A))"}]
+      |> map Thm.term_of
+  val ts = [@{cpat "(lamu ?i z:?A. ?x ` z)"}] |> map Thm.term_of
+  val ctxt0 = @{context}
+    |> Variable.add_fixes_direct ([] |> fold Term.add_free_names ts)
+    |> fold Variable.declare_term ts
+  val ctxt = ctxt0
+    |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
+    |> MetaRec.add_assm_terms_internal assms
+  val otyp = ZFUnifyData.synth_otyp ctxt (hd ts) |> cterm_of @{theory}
+     handle ZFUnifyData.SynthFail (ctxt2, msg) => MetaRec.err_with_trace ctxt2 msg
+*}
 
+(* FIXME: implicit frule propagation of exactrule (_ synthty _) assumptions to exactrule (_ <: _)
+   assumptions does not work?! (should already work)
+   Also these assumptions are not regarded as constraints here
+   because no constraint simp happens. Just change deepexconstraint or constraint_gen_proc
+   to try direct assumption/fact lookup?
+     Overall effect here is that synthesis of otypes generates new constraints
+   that are trivially solvable but are unnecessary in the first place. *)
 ML {*
   let 
     val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},
-        @{cpat "exactrule (?x synthty (?A -> ?A))"}, @{cpat "exactrule (?y synthty (?A -> ?A -> ?A))"}]
+        @{cpat "exactrule (?i <: univlvl)"}, @{cpat "exactrule (?A <: (guniv ?i))"},
+        @{cpat "exactrule (?x synthty (?A ->[?i] ?A))"}, @{cpat "exactrule (?y synthty (?A ->[?i] ?A ->[?i] ?A))"}]
       |> map Thm.term_of
-    val t1 = @{cpat "(lamu ?i w:?A. lamu ?i z:?A. ?x ` z)"} |> Thm.term_of
+    val t1 = @{cpat "(lamu ?i w:?A. (lamu ?i z:?A. (?x ` z)))"} |> Thm.term_of
     val t2 = @{cpat "?y :: i"} |> Thm.term_of
   in
     test_obj_unify @{context} assms t1 t2 |> pairself (cterm_of @{theory})
