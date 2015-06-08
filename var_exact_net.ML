@@ -35,12 +35,14 @@ sig
   val is_normalized: 'a net * EnvDiff.env -> bool
 
   exception INSERT
-  (* index term has to be beta normal, not necessarily eta normal; net has to be normal *)
+  (* index term has to be beta- and env-normal, not necessarily eta-normal;
+     net has to be normal *)
   val insert_term: EnvDiff.env -> ('a * 'a -> bool) -> term * 'a -> 'a net -> 'a net
   val insert_term_safe: EnvDiff.env -> ('a * 'a -> bool) -> term * 'a -> 'a net -> 'a net
 
   exception DELETE
-  (* index term has to be beta normal, not necessarily eta normal; net has to be normal *)
+  (* index term has to be beta- and env-normal, not necessarily eta-normal;
+     net has to be normal *)
   val delete_term: EnvDiff.env -> ('b * 'a -> bool) -> term * 'b -> 'a net -> 'a net
   val delete_term_safe: EnvDiff.env -> ('b * 'a -> bool) -> term * 'b -> 'a net -> 'a net
 
@@ -303,7 +305,7 @@ fun is_normalized (enet, envdiff) =
 
 exception INSERT
 
-(* t has to be beta normal *)
+(* t has to be beta- and env-normal *)
 fun insert_term envdiff eq (t, x) enet =
   let val _ = demand_normalized (enet, envdiff)
   in
@@ -336,7 +338,7 @@ fun lookup_term_in_normed_net enet_envdiff t =
   
 exception DELETE
 
-(* t has to be beta normal *)
+(* t has to be beta- and env-normal *)
 fun delete_term envdiff eq (t, x0) enet =
   let
     val xs = lookup_term_in_normed_net (enet, envdiff) t

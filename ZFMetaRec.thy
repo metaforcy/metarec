@@ -143,7 +143,7 @@ ML {*
            which are converted to fully-dest_metaex'd *open* terms.
          constraint_to_pats maps an active constraint to the patterns that have
            been matched against it (as (C, pat) entries in net that differ in pat).
-         fix_necessary_tab says which memoized pattern results depend on a metarec fix. *)
+         fix_necessary_tab maps a metarec fix to the memoized pattern results that depend on it. *)
       type T = { memo_net: (term * term) Net.net,
         constraint_to_pats: (term * term) Net.net,
         fix_necessary_tab: term list Symtab.table }
@@ -341,7 +341,10 @@ ML {*
                         (* NB: we have lifted the metaex-varified conjuncts of pat_fxd over local_frees because
                            in the presence of local_frees we hope for a matching constraint with the same
                            quantified local_frees in matching order. *)
-                        case MetaRec.pattern_match_envctxt ctxt_ (pat_fxd_vard_lifted_conj, prep_match C) of
+                        case MetaRec.pattern_match_envctxt ctxt_ (pat_fxd_vard_lifted_conj, prep_match C) 
+                          (*handle DecompPattern.Special _ => MetaRec.err_with_trace ctxt_ ("ex_constraint_proc:"
+                            ^"shared variables in pattern and object term while matching")*)
+                        of
                           NONE => NONE
                         | SOME ctxt_2 =>
                             let

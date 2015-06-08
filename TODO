@@ -42,8 +42,152 @@
 
 
 
-
 (* TODO(opt):
+
+     * Avoid use of Variable.dest_fixes in rel_local_fixes etc. and remember
+       outer fixes and metarec fixes ourselves. Cf. comment in rel_local_frees.
+
+     * Fakten als proof_packs statt thms, Fakten dann iA non-ground,
+       Fakten-Propagierung auf proof_packs umstellen
+       um add_assm_terms_internal stark zu vereinfachen.
+
+     * Simplify constraints right when they are issued in constraint_gen_proc
+       to make them much *smaller*. Already tried this in the past: the resulting
+       indirect recursion of constraint_gen_proc via the generation of simpler
+       constraints is a bit involved, since simplification rule sets signify
+       non-progress by regenerating the non-simplifiable constraint which
+       constraint_gen_proc would naively try to simplify again resulting in non-termination.  
+       (metarec_constraint_simp_internal relies on the presence of the assumption
+       of the constraint in the proof of its simplification to recognize its
+       non-simplification, so once we avoid non-termination this should work)
+         Simple solution: manage simping_constraint_gen_proc flag that avoids
+       constraint simplification in constraint_gen_proc if it is false.
+       Potential problem is that this avoids nested simplification opportunities,
+       but they should be rare depending on the simplification judgement design
+       by the user.
+         Full solution: manage simping_constraints stack and check for arising
+       cyclic simplification situations before simplifying a constraint
+       (or before deciding to simplify a new constraints in constraint_gen_proc). 
+       This might also be the better solution to ensure termination of the
+       simplification of instantiated constraints?
+
+     * Completely avoid rule-freshening by using rule-app-local environments for
+       matching variables and *shallowly* normalizing instantiated
+       matching variables away in all cases (which completely removes them
+       because of ensured groundness of matching variables).
+         Rule matching then uses 2 environments, namely the matching var
+       env which is extended and used for normalizing the pattern term
+       and the globally threaded env for opportunistic normalization
+       of the object term. 
+         Was matching with shared variables in pattern and object terms just
+       a defensive move by me, not realizing that due to freshening of
+       rules, current matching variables could never occur in object terms anyway?
+       Does occur in exconstraint matching somehow, but did not occur in
+       nonfreedata animation.
+         Rule-freshening itself is not that expensive due to smallness of rule
+       and ease of maxidx access but adding freshened matching variables to
+       the globally threaded env quickly results in *huge* env badly impacting
+       normalization performance.
+       Delaying rule-freshening is currently problematic regarding variable
+       distinctification because we want to avoid deep variable instantiations?
+
+     * Use var_exact_net for *active* constraints that is normalized and its contained constraints
+       simplified in constraint_gen_proc and exconstraint calls to enable fast constraint lookup
+       and avoid exconstraint memoization etc. (var_exact_net content merge is trivial:
+       just adopt some entry of the set of entries that coincide in their constraints)
+       We then need an explicit flag that avoids all simplifications of instantiated constraints
+       in order to avoid non-termination resulting from exconstraint calls during simplification
+       of instantiated constraints, instead of temporarily marking all constraints as simplified
+       during simplification of instantiated constraints.
+         Managing a constraint stack that retains simplified constraints in parallel remains important
+       to allow factorization of constraints in a context in old ones and newly generated ones
+       after CHR applications and to adapt ConstraintTrace of constraints generated in constraint
+       simplifications. But we just cons onto this stack and do not need further operations
+       or absorption or normalization of it, delegating them to the var_exact_net instead.
+         Upon simplification active constraints are removed from the var_exact_net and
+       moved to a list instead. (currently we just add the simplification proof
+       to simpd_constraints and set the activity status of the constraint
+       to SimplifiedConstraint; note that ConstraintTraces of simplified constraints
+       are never looked at and the management of their proofs is only necessary in
+       order to discharge assumptions corresponding to them after the derivation is complete;
+       the absorption of newly generated constraints with existing already *simplified* constraints
+       in constraint_gen_proc remains important as long as we do not simplify constraints
+       right during their generation in constraint_gen_proc)
+         Check whether the exconstraint result consistency even under intermittent
+       relevant instantiations that is a consequence of exconstraint memoization
+       is actually useful (usages of exconstraint results would have to be
+       modulo constrainat simplification to account for later instantiations enabling
+       further constraint simplifications, at least in extreme cases?).
+
+     * Normalisierungen sparen wo moeglich. V.a. in metarec Ableitung, aber
+       nicht in constraint Vereinfachung ueber CHRs weil Constraints fast immer
+       kleine Terme sind die viel instantiiert werden und wir var_exact_net
+       sowieso immer ausnormalisieren.
+       Genauer:
+       * top_metastruct_norm Funktion die obere !! xs. As ==> try(J ins outs)
+         Struktur fuer solve_prems normalisiert wobei As, ins, outs nicht
+         normalisiert werden.
+       * Annahmen muessen vor der Kontexterweiterungs-Verarbeitung explizit voll
+         ausnormalisiert werden weil direkte und lokale Regeln als normalisiert
+         angenommen werden, insbesondere in ihren input-pos-Patterns die beim
+         matchen gegen die Regel auch nicht weiter normalisiert werden.
+       * pattern_matches_envctxt und decompose_pattern_match_envctxt muessen mit
+         head_norm arbeiten und trotzdem deep variable Instantiierungen vermeiden.
+         (done, nurnoch object-term norming in gen_pattern_match_envctxt muss weg)
+       * Netzlookup (genauer Item_Net2.retrieve_match) das nur inkrementell
+         betaeta- und env-normalisiert soweit noetig.
+         Ausserdem optionales inkrementelles Varfixing im lookup-term um
+         exactrules Behandlung nachzuvollziehen.
+       * Bei Premissen-Discharge(impI), -Vereinigung(mp), -Eigenvariable-Check(allI)
+         in proof_packs Konstruktoren wirkt staendig Normalisierung extrem teuer.
+         Stattdessen Normalisierungs-sparende Hilfssuchfunktionen nutzen,
+         zB rekursives aconv_mod_norm nutzen das nur
+         soviel head_norm durchfuehrt bis Ungleichheit festgestellt.
+       * Unbedingt schnelle Varianten der proof_packs Konstruktoren anbieten die kein
+         LCF-style cross-checking betreiben, was ja sowieso nur dem debugging dient!
+         Proposition und Premissen werden dann richtig lazy verwaltet (also mit expliziten
+         verzoegerten unions und removes in Premissenliste und verzoegerten allI-Abstraktionen
+         in Proposition) und Normalisierung findet nur beim Abrufen der Premissen (bzw. wenn
+         verzoegerter Premissen-Berechnungs-Term gross wird um speicherfreundlich zu sein)
+         und bei Kopf-Teilen der Proposition statt.
+         Abruf der Beweis-Premissen ist sowieso relativ selten:
+         kommt vor in replay_prf, nach CHR Anwendungen zu implied_by proof Berechnung,
+         a constraint simp cyclicity check in metarec_constraint_simp_internal,
+         Berechnung der rekursiven simp_deps fuer constraints0_simping und
+         assm_disch in entstandenen simp_prfs (einfach vermeidbar), 
+         sonst nur in tracing.
+         Abstraktions-verzoegerten Allquantor in Propositionen nutzen und in
+         erweitertem head_norm/norm/top_metastruct_norm(!) wieder entfernen. Wesentlich wird dann bei
+         strip_all entsprechendes head_norm durchzufuehren.
+       * Outside LCF-style cross-checking, prop_of_proofp is only used if result is small:
+         it is only used in rule propositions (esp. in metarec_worker),
+         in CHR related implication calculations,
+         discharge of simplified constraints in metarec_constraint_simp,
+         registration of derivation conclusion for hidden_univlvl_discharge
+         in metarec_with_failcont,
+         absorption of new constraints with existing local rules in constraint_gen_proc.
+           This means we could delay its normalization outside LCF-style cross-checking
+         mode, only head_norming its outer structure on proof_pack constructors while just
+         assuming the constructor applications are valid. Actually allE_prf, mp_prf
+         suggest that head_norming is not even necessary because rules are always
+         normalized and outer structure is created by allI, impI.
+           This works without explicit substitutions if we do not want to normalize Term.betapply
+         in allE_prf, because free-abstracting universal quantifiers can be eliminated with
+         via Term_Subst.instantiate. We only need such a strange quantifier
+         because the proposition of the discharged instantiated proof of the rule
+         after a metarec_worker call is done is not normalized, because the freshened
+         matching variables of the rule are not lifted over fixes for performance reasons.
+       * Normalising judgement outputs and the proposition of the
+         discharged instantiated proof of the rule after a metarec_worker call
+         is complete might be important for performance if terms are not huge.
+         Normalizing judgement outputs avoid the constant lookups for instantiated
+         (freshened) matching variables.
+         Normalizing the proposition of the discharged instantiated proof of the rule
+         avoids having to normalize the proof proposition or use a free-abstracting
+         universal quantifier in allI_prf.
+       * In Regel merken ob die sekundaeren Input-Positionen des Judgements alle Patterns sind
+         statt staendig zu pruefen.
+       * Zusammenhaengende Folgen von AllEs, mps, impIs, AllIs buendeln statt einzeln zu folden?
 
 
      * kann man vllt drum herum kommen die zertifizierten Instantiierungen immer
@@ -75,8 +219,19 @@
     Einordnung: Term-DAG-Optimierung entspricht sharing bzgl Termstruktur,
        Skeleton Optimierung entspricht sharing in Regeln?
        Wird die Skeleton-Optimierung die ich unten beschreibe einfacher wenn
-       man die Term-DAGs Optimierung in Betracht zieht: nurnoch propagierung
+       man die Term-DAGs Optimierung in Betracht zieht: nurnoch Propagierung
        von Resultaeten ueber lokales Backtracking hinweg?
+
+       Term-DAG/Hashconsing Optimierung auch fuer beschleunigte
+       Gleichheitspruefungen interessant, v.a. bei Typsynthese elaborierter
+       Terme wo keine Unifvar instantiiert werden.
+
+
+    !! WICHTIG bei Term-DAG-Optimierung und Skeleton-Optimierung etc.
+    ist das so optimiert ausgefuehrte Judgements wenigstens quasi-*pure* sind,
+    d.h. das bei selbem Input unabhaengig vom Ausfuehrungszustand aequivalente
+    (v.a. sinnvoll unifizierbarere) Outputs entstehen. Sollte selbst bei
+    Elaboration der Fall sein. Schwierig automatisch zu pruefen.
 
 
 

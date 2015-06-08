@@ -59,6 +59,14 @@ signature ENV_DIFF = sig
   (* can raise Type.TYPE_MATCH *)
   val typ_unify: theory -> typ * typ -> env -> env
 
+
+  val betaeta_head_norm: Envir.env -> term -> term
+
+  (* only normalizing around instantiation sites of variables, not normalizing in the instantiation sites,
+     but beta outside instantiation sites can affect instantiation via substitution of course *)
+  val shallow_norm_type: env -> typ -> typ
+  val shallow_norm_term: env -> term -> term
+
 end
 
 
@@ -287,5 +295,182 @@ fun typ_unify thy TU =
   in unif TU end;
 
 
+
+
+
+
+
+
+
+
+
+
+exception Bound0Dependent
+
+(* NB: assumes head-normal t (i.e. not of the form
+   (% xs. (% z. ..) $ a $ ..) modulo variable instantiation);
+   instantiated variables are only chased if one of their arguments depends on  Bound 0 *)
+fun decr_normopt env lev t =
+  let
+    fun full_commit f x = Same.commit f x handle Bound0Dependent => x
+
+    fun decr_bnd lev i =
+      if i = lev then raise Bound0Dependent
+      else if i > lev then Bound (i - 1)
+      else raise Same.SAME
+
+    fun decr lev (Abs (a, T, body)) =
+          Abs (a, T, decr (lev + 1) body)
+      | decr lev t =
+          let
+            val (h, ts) = Term.strip_comb t
+            val recfun = decr lev o Envir.head_norm env
+
+            val ts'_calc_opt = ts |> map (fn t => (t, Same.capture recfun t)) |> SOME
+              handle Bound0Dependent => NONE
+            val args_dependent = not (is_some ts'_calc_opt)
+            fun ts'_committed () =
+              (case ts'_calc_opt of SOME ts'_calc => ts'_calc
+               | NONE => error "decr_normopt: internal error")
+              |> map (fn (t, t'_opt) => the_default t t'_opt)
+            fun ts'_fully_committed () = ts |> map (full_commit recfun)
+            fun form_comb_with_same_head () =
+              if args_dependent then raise Bound0Dependent
+              else
+                let val ts' =
+                  (case ts'_calc_opt of SOME ts'_calc => ts'_calc
+                   | NONE => error "decr_normopt: internal error")
+                  |> map (fn (_, t'_opt) => case t'_opt of SOME t' => t' | NONE => raise Same.SAME)
+                in Term.list_comb (h, ts') end
+          in
+            case h of
+              Var (ixn, T) =>
+                if args_dependent then
+                  case Envir.lookup (env, (ixn, T)) of
+                    SOME u => Same.commit (decr lev)
+                      (Envir.head_norm env (Term.betapplys (u, ts'_fully_committed ())))
+                  | NONE => raise Bound0Dependent
+                else
+                  form_comb_with_same_head ()
+            | Bound i =>
+                if args_dependent then raise Bound0Dependent
+                else
+                  Term.list_comb (decr_bnd lev i, ts'_committed ())
+                  handle Same.SAME => form_comb_with_same_head ()
+            | _ => (* NB: t is head-normal, so h cannot be an abstraction *)
+                form_comb_with_same_head ()
+          end
+  in
+    SOME (Same.commit (decr lev) t)
+    handle Bound0Dependent => NONE
+  end
+
+
+datatype head_norm_ty = NormUnderAbs | NoNormUnderAbs
+
+(* NB: if under_abs = NoNormUnderAbs, (% x. ..) is regarded as toplevel-normal,
+   unlike Envir.head_norm *)
+fun head_norm_same under_abs env =
+  let
+    fun norm (Var v) =
+        (case Envir.lookup (env, v) of
+          SOME u => Same.commit norm u
+        | NONE => raise Same.SAME)
+      | norm (Abs (a, T, body)) =
+          (case under_abs of
+            NormUnderAbs => Abs (a, T, norm body)
+          | NoNormUnderAbs => raise Same.SAME)
+      | norm (Abs (_, _, body) $ t) = Same.commit norm (subst_bound (t, body))
+      | norm (f $ t) =
+          (case norm f of
+            Abs (_, _, body) => Same.commit norm (subst_bound (t, body))
+          | nf => nf $ t)
+      | norm _ = raise Same.SAME;
+  in norm end;
+
+
+fun betaeta_head_norm_same env t =
+  let
+    fun eta_step_same t2 =
+      let
+        fun eta_headnormed_body body' =
+          case body' of
+            f $ arg =>
+              (case head_norm_same NoNormUnderAbs env arg of
+                Bound 0 =>
+                  (case decr_normopt env 0 f of
+                    SOME f' => f'
+                  | NONE => raise Same.SAME)
+              | _ => raise Same.SAME)
+          | _ => raise Same.SAME
+      in
+        case t2 of
+          Abs (x, T, body) =>
+            Same.commit eta_headnormed_body (betaeta_head_norm_same env body)
+            handle Same.SAME => eta_headnormed_body body
+        | _ => raise Same.SAME
+      end
+   in
+     Same.commit eta_step_same (head_norm_same NoNormUnderAbs env t)
+     handle Same.SAME => eta_step_same t
+   end
+fun betaeta_head_norm env t = Same.commit (betaeta_head_norm_same env) t
+
+
+
+
+
+
+
+fun shallow_norm_type_same env : typ Same.operation =
+  let
+    fun norm (Type (a, Ts)) = Type (a, Same.map norm Ts)
+      | norm (TFree _) = raise Same.SAME
+      | norm (TVar v) =
+          (case lookup_type env v of
+            SOME U => U  (* NB: no deep normalizing! *)
+          | NONE => raise Same.SAME);
+  in norm end;
+
+fun shallow_norm_type env = Same.commit (shallow_norm_type_same env)
+
+
+
+fun shallow_norm_term_same env : term Same.operation =
+  let
+    val normT = shallow_norm_type_same env;
+
+    fun norm_spine (h, ts) : term = case h of
+        Const (a, T) =>
+          (Term.list_comb (Const (a, normT T), map (Same.commit norm) ts)
+          handle Same.SAME => Term.list_comb (Const (a, T), Same.map norm ts))
+      | Free (a, T) =>
+          (Term.list_comb (Free (a, normT T), map (Same.commit norm) ts)
+          handle Same.SAME => Term.list_comb (Free (a, T), Same.map norm ts))
+      | Var (xi, T) =>
+          (case lookup env (xi, T) of
+            SOME u =>
+              (* NB: no deep normalizing!
+                 If u is an abstraction, surrounding applications can trigger
+                 beta reduction of course which then substitute into it. *)
+              Term.betapplys (u, map (Same.commit norm) ts)
+          | NONE => Var (xi, normT T))
+      | Abs (a, T, body) =>
+          (case ts of
+            [] => 
+              (Abs (a, normT T, Same.commit norm body)
+              handle Same.SAME => Abs (a, T, norm body))
+          | t1 :: ts2 =>
+              let val (h', ts') = Term.strip_comb (Term.subst_bound (t1, body))
+              in
+                norm_spine (h', ts' @ ts2)
+                handle Same.SAME => Term.list_comb (h', ts' @ ts2)
+              end)
+
+    and norm t = norm_spine (Term.strip_comb t)
+
+  in norm end;
+
+fun shallow_norm_term env = Same.commit (shallow_norm_term_same env)
 
 end

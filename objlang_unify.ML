@@ -20,11 +20,14 @@
          (instantiated generic) unification  ?  *)
 
 
-(* FIXME: we have to be able to represent universe level annotations on olam, opi binders.
-  Make information on olam, opi binders polymorphic instead of term-valued and allow
-  coercion of this information to mlam, mpi binder information. *)
 signature ObjLangUnifyData =
 sig
+
+  type otyp_ann
+  type mtyp_ann
+  val otyp_to_mtyp_ann : otyp_ann -> mtyp_ann
+  (* val otyp_ann_term : otyp_ann -> term
+  val mtyp_ann_term : otyp_ann -> term *)
 
   exception UnificationFailed of string
   exception SynthFail of Proof.context * string
@@ -49,19 +52,19 @@ sig
      oPis or mPis as types *)
   val mk_typ_assm : term -> term -> term
   val mk_oapp : term -> term -> term
-  val mk_olam : term * term -> term -> term
+  val mk_olam : term * otyp_ann -> term -> term
   (* meta abstraction, potentially annotated with otype for bound *)
-  val mk_mlam : term * term option -> term -> term 
-  val mk_opi : term * term -> term -> term
+  val mk_mlam : term * mtyp_ann option -> term -> term 
+  val mk_opi : term * otyp_ann -> term -> term
   (* NB: mk_mpi is expected to convert an object-level type (for body or binder)
      to a meta-level type as needed *)
-  val mk_mpi : term * term option -> term -> term
+  val mk_mpi : term * mtyp_ann option -> term -> term
 
   val dest_oapp : term -> (term * term) option
   (* val dest_olam : term -> (term * term) option
   val dest_mlam : term -> (term option * term) option *)
-  val dest_opi : term -> (term * term) option
-  val dest_mpi : term -> (term option * term) option
+  val dest_opi : term -> (otyp_ann * term) option
+  val dest_mpi : term -> (mtyp_ann option * term) option
 
 
 
@@ -168,7 +171,8 @@ fun metafy_oapps ctxt0 term (metafy_tab, env) =
         val v'_T = telescope_Ts mpi_telescope ---> telescope_Ts rel_pi_telescope
           ---> body_type vT
         val v'_oT = v_oT_stripped
-          |> fold_rev Data.mk_mpi (mpi_telescope @ map (apsnd SOME) pi_telescope)
+          |> fold_rev Data.mk_mpi (mpi_telescope
+               @ map (apsnd (SOME o Data.otyp_to_mtyp_ann)) pi_telescope)
         val (v' as Var(ixn', _), env2) = EnvDiff.genvar vn v'_T env
         val inst = list_comb (v', map fst mpi_telescope @ map fst rel_pi_telescope)
           |> fold_rev Data.mk_olam rel_pi_telescope
@@ -262,7 +266,8 @@ fun obj_unify (t1_0, t2_0) ctxt =
                    val env_ = Data.env_from_ctxt ctxt_
                    val reabs_v = list_comb (Var v, map fst mpi_telescope)
                      |> fold (fn (x, _) => fn t_ => Data.mk_oapp t_ x) pi_telescope
-                     |> fold_rev Data.mk_mlam (mpi_telescope @ map (apsnd SOME) pi_telescope)
+                     |> fold_rev Data.mk_mlam (mpi_telescope
+                          @ map (apsnd (SOME o Data.otyp_to_mtyp_ann)) pi_telescope)
                      |> EnvDiff.norm_term env_
                  in
                    ctxt_ |> Data.map_env_in_ctxt (EnvDiff.update (v', reabs_v))

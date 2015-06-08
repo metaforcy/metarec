@@ -354,9 +354,20 @@ lemma guniv_subD2: "[|  guniv i <= guniv j  ;  i : univlvl  ;  j : univlvl  |] =
 
 
 definition
-  "univannot_prod == (lam k:univlvl. lam A:guniv k. lam B:A->guniv k.  (PROD x:A. B ` x))"
-abbreviation
-  "univannot_prod_synhlp (k, A, B) == univannot_prod ` k ` A ` (lam x:A. B(x))"
+  "univannot_prod_fun == (lam k:univlvl. lam A:guniv k. lam B:A->guniv k.  (PROD x:A. B ` x))"
+definition
+  "univannot_prod (k, A, B) == univannot_prod_fun ` k ` A ` (lam x:A. B(x))"
+
+lemma univannot_prod_def3: "univannot_prod(k, A, B) == (lam k:univlvl. lam A:guniv k. lam B:A->guniv k.  (PROD x:A. B ` x))
+  ` k ` A ` (lam x:A. B(x))"
+  by (simp add: univannot_prod_def univannot_prod_fun_def)
+
+lemma univannot_prod_def2: "k : univlvl ==> A : guniv k ==> (!! x. x : A ==> B(x) : guniv k) ==>
+  univannot_prod (k, A, B) == (PROD x:A. B (x))"
+  apply (subgoal_tac "(lam x:A. B(x)) : A -> guniv k")
+  apply (simp add: univannot_prod_def univannot_prod_fun_def cong: Pi_cong)
+  by typecheck
+  
 
 definition
   annot_metalam :: "i => (i => 'a::{}) => (i => 'a)" where
@@ -371,7 +382,7 @@ syntax
   "_mlam" :: "[pttrn, i, i] => i" ("(3mlam _:_./ _)" 10)
   "_lamu" :: "[i, pttrn, i, i] => i" ("(3lamu _ _:_./ _)" [100, 100, 100, 30] 10)
 translations
-  "PRODu k x:A. B" == "CONST univannot_prod_synhlp(k, A, %x. B)"
+  "PRODu k x:A. B" == "CONST univannot_prod(k, A, %x. B)"
   "mlam x:A. t" == "CONST annot_metalam(A, % x. t)"
   "lamu k x:A. t" == "CONST univannot_lam(k, A, % x. t)"
 
@@ -396,7 +407,7 @@ lemma produ_on_good_args: "k : univlvl ==> A : guniv k ==> (!! x. x:A ==> B(x) :
   apply (subgoal_tac "(lam x:A. B(x)) : A -> guniv k")
   defer 1
   apply (typecheck, assumption)
-  unfolding univannot_prod_def
+  unfolding univannot_prod_def3
   by (simp cong: Pi_cong)
 
 
@@ -411,15 +422,15 @@ proof -
 qed
 
 lemma produ_triv_on_bad_lvl: "k \<notin> univlvl ==> (PRODu k x:A. B(x)) = 0"
-  apply (simp add: univannot_prod_def)
+  apply (simp add: univannot_prod_def3)
   by (simp add: apply_def)
 
 lemma produ_triv_on_bad_dom: "A \<notin> (guniv k) ==> (PRODu k x:A. B(x)) = 0"
-  apply (simp add: univannot_prod_def produ_triv_on_bad_lvl)
+  apply (simp add: univannot_prod_def3 produ_triv_on_bad_lvl)
   by (simp add: apply_def)
 
 lemma produ_triv_on_bad_cod: "\<not> (ALL x:A. B(x) : guniv k) ==> (PRODu k x:A. B(x)) = 0"
-  apply (simp add: univannot_prod_def produ_triv_on_bad_lvl produ_triv_on_bad_dom)
+  apply (simp add: univannot_prod_def3 produ_triv_on_bad_lvl produ_triv_on_bad_dom)
   apply (simp add: apply_def)
   by (auto intro: lam_type_rev)
 
@@ -432,7 +443,7 @@ lemma nontriv_produ_means_good_args: "(PRODu k x:A. B(x)) ~= 0 ==> k : univlvl &
 lemma produ_in_guniv: "
     k : univlvl ==>
   (PRODu k x:A. B(x)) : guniv k"
-  unfolding univannot_prod_def
+  unfolding univannot_prod_def3
   apply (cases "A : guniv k", cases "(lam x:A. B(x)) : A -> guniv k")
   apply simp
   apply (rule prod_in_guniv) apply (auto elim: univlvlE)
@@ -838,7 +849,7 @@ lemma [impl_frule]: "x synthty A ==> nonempty(A)"
 lemma [MR]: "[|
     !! x. x synthty A ==> nonempty (B(x)) |] ==>
   nonempty (PRODu k x:A. B(x))"
-  unfolding nonempty_altdef univannot_prod_def synthty_const_def
+  unfolding nonempty_altdef univannot_prod_def3 synthty_const_def
   by (rule AC.AC_Pi)
 
 lemma [MR]: "
@@ -1204,6 +1215,12 @@ lemma [MR]: "[|
   deepexconstraint (?? P. x <:: P) (x <:: P)"
   by (simp add: deepexconstraint_const_def ex_constraint_const_def)
 
+(* eases type synthesis of elaborated terms by using existing univlvls via unknown_univlvl_constraint *)
+lemma [MR]: "[|
+    try (x synthty A)  |] ==>
+  deepexconstraint (?? A. x <: A) (x <: A)"
+  by (simp add: synthty_const_def deepexconstraint_const_def try_const_def constraint_typing_def)
+
 (* TODO(correctness): general MPI treatment necessary? *)
 lemma [MR]: "[|
     deepexconstraint (?? A. f <:: A) (f <:: (MssPI x:A. B(x)))  ;
@@ -1331,7 +1348,14 @@ lemma [elabMR_unchecked]: "[|
   apply (elim conjE)
   apply (erule produ_piE, assumption, blast, blast, blast, blast, assumption+)
   by (auto intro: apply_type)
-
+(* generated synthesis rule (still quite involved because we need to discharge k:univlvl, A:guniv k, B:A->(guniv k)
+   in order to make t1':(PRODu k x:A. B(x)) usable):
+   \<lbrakk>  t1' synthty (PRODu k x:A. B(x));   unknown_univ_constraint_for(A, i);
+      \<And>x. x synthty A \<Longrightarrow> unknown_univ_constraint_for(B(x), j);
+      k synthty univlvl;   constraint i u<= k;   constraint j u<= k;
+      t2' synthty A2;   subunify A2 A  \<rbrakk> \<Longrightarrow>
+    (t1' ` t2') synthty B(t2')  *)
+  
 
 
 (* TODO: unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
@@ -1374,7 +1398,12 @@ lemma [MR_unchecked]: "[|
     synthty_const_def primunify_const_def)
   apply (subst produ_pi_simp[of i j k A' B], assumption+)
   by (rule lam_type) 
-
+(* generated synthesis rule:
+  \<lbrakk> k synthty univlvl;   A synthty (guniv i);   i synthty univlvl;
+    \<And> x. x synthty A \<Longrightarrow> ?t'(x) synthty B(x);
+    \<And> x. x synthty A \<Longrightarrow> B(x) synthty (guniv j);
+    j synthty univlvl;   constraint i u<= k;   constraint j u<= k\<rbrakk> ==>
+  (lamu k x:A. t'(x)) synthty (PRODu k x:A. B(x)) *)
 
 
 (* unchecked because freshunifvar assums lead to moding-inconsistent facts in wellformedness checking *)
@@ -2131,10 +2160,18 @@ lemma [constraint_simp_rule]: "[| primunify i j  ;  constraint (i <: univlvl)  ;
   by (simp add: primunify_const_def constraint_const_def constraint_typing_def)+
 
   (* FIXME: actually a specialization of the rule above for j := i,
-     so should be unecessary, in particular because only first matching simp CHR
-     is executed on a constraint combination? *)
+     so should be unecessary as a simp CHR, in particular because
+     only first matching simp CHR is executed on a constraint combination? *)
   (* TODO(opt): we could make this rule no_re_eval_on_head_reconsideration *)
 lemma [constraint_simp_rule]: "constraint (i <: univlvl) ==> i u<= i"
+  unfolding univ_less_def univ_leq_def univlvl_def
+  by (simp add: constraint_const_def constraint_typing_def)
+
+
+
+
+
+lemma [MR]: "i <: univlvl ==> i u<= i"
   unfolding univ_less_def univ_leq_def univlvl_def
   by (simp add: constraint_const_def constraint_typing_def)
 
@@ -2936,14 +2973,33 @@ lemma [elabMR_unchecked]: "[|
   apply (subst produ_on_good_args, assumption+)
   by (rule groups_lawsD)
 
-lemma [constraint_simp_rule no_re_eval_on_head_reconsideration]: "[|
+
+definition
+  dict_refine (infixl "dictrefine" 50) where
+  [MRjud 2 0]: "dict_refine(d,C) == d dictof C"
+
+lemma [MR]: "
+    constraint (d dictof groups(A)) ==>
+  d dictrefine groups(A)"
+  by (simp add: primunify_const_def constraint_const_def dict_refine_def)
+
+(* NB: we do not simply put this in the constraint_simp_rule in order to collate
+   chains of its application into a single simp CHR application thereby avoiding
+   the generation of intermediate dictof constraints *)
+(* unchecked to workaround freshFOunifvar "fact inconsistency" *)
+lemma [MR_unchecked]: "[|
     freshFOunifvar dA  ;  freshFOunifvar dB  ;
     primunify d (prod_group(A,B,dA,dB))  ;
-    constraint (dA dictof groups(A))  ;
-    constraint (dB dictof groups(B))  |] ==>
-  d dictof groups(A * B)"
-  apply (simp add: primunify_const_def constraint_const_def)
+    dA dictrefine groups(A)  ;
+    dB dictrefine groups(B)  |] ==>
+  d dictrefine groups(A * B)"
+  apply (simp add: primunify_const_def constraint_const_def dict_refine_def)
   by (rule prod_group_in_groups)
+
+lemma [constraint_simp_rule no_re_eval_on_head_reconsideration]: "
+    d dictrefine groups(A * B) ==>
+  d dictof groups(A * B)"
+  by (simp add: primunify_const_def constraint_const_def dict_refine_def)
 
 lemma group_to_monoid_propag[constraint_propag_rule]:
     "d dictof groups(A) ==> monoid_of_group(d) dictof monoids(A)"
@@ -3306,26 +3362,21 @@ ML {*
 
 ML {*
   val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},
-        @{cpat "exactrule (?x synthty (?A ->[?i] ?A))"}, @{cpat "exactrule (?y synthty (?A ->[?i] ?A ->[?i] ?A))"}]
+        @{cpat "exactrule (?x synthty (?A ->[?i] ?A))"}, @{cpat "exactrule (?y synthty (?A ->[?i] ?A ->[?i] ?A))"},
+        @{cpat "Trueprop (z synthty ?A)"}]
       |> map Thm.term_of
-  val ts = [@{cpat "(lamu ?i z:?A. ?x ` z)"}] |> map Thm.term_of
+  val ts = [@{cpat "?x ` z :: i"}, @{cpat "(lamu ?i z:?A. ?x ` z)"}]
+    |> map Thm.term_of
   val ctxt0 = @{context}
     |> Variable.add_fixes_direct ([] |> fold Term.add_free_names ts)
     |> fold Variable.declare_term ts
   val ctxt = ctxt0
     |> Context.proof_map (MetaRec.set_run_state (MetaRec.init_run_state ctxt0))
     |> MetaRec.add_assm_terms_internal assms
-  val otyp = ZFUnifyData.synth_otyp ctxt (hd ts) |> cterm_of @{theory}
+  val otyps = ts |> map (ZFUnifyData.synth_otyp ctxt #> cterm_of @{theory})
      handle ZFUnifyData.SynthFail (ctxt2, msg) => MetaRec.err_with_trace ctxt2 msg
 *}
 
-(* FIXME: implicit frule propagation of exactrule (_ synthty _) assumptions to exactrule (_ <: _)
-   assumptions does not work?! (should already work)
-   Also these assumptions are not regarded as constraints here
-   because no constraint simp happens. Just change deepexconstraint or constraint_gen_proc
-   to try direct assumption/fact lookup?
-     Overall effect here is that synthesis of otypes generates new constraints
-   that are trivially solvable but are unnecessary in the first place. *)
 ML {*
   let 
     val assms = [@{cpat "exactrule (?i synthty univlvl)"}, @{cpat "exactrule (?A synthty (guniv ?i))"},

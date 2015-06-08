@@ -3,6 +3,9 @@ signature DECOMP_PATTERN =
 sig
   val decompose_match_w_shared_vars: theory -> term * term -> EnvDiff.env -> EnvDiff.env
   val match_w_shared_vars: theory -> term * term -> EnvDiff.env -> EnvDiff.env
+
+  exception NotBetaNormal
+  exception NonDistinctVars of term * term
 end;
 
 structure DecompPattern: DECOMP_PATTERN =
@@ -10,6 +13,7 @@ struct
 
 
 exception NotBetaNormal
+exception NonDistinctVars of term * term
 
 fun string_of_term thy env binders t =
   Syntax.string_of_term_global thy
@@ -63,6 +67,10 @@ fun ints_of []             = []
       in if member (op =) is i then raise Pattern.Pattern else i::is end
   | ints_of _              = raise Pattern.Pattern;
 
+(* TODO(opt): head norming arguments of unifvars in patterns is
+   unnecessary because we do not normalize pattern at all here.
+   But since we check that they are bounds, deep variable bindings
+   cannot happen and this does not constitute a bug. *)
 fun ints_of' env ts = ints_of (map (EnvDiff.head_norm env) ts);
 
 
@@ -109,7 +117,7 @@ fun match_bind binders (ixn,T) is t env =
 
 
 
-
+(* unused *)
 fun first_order_match_w_shared_vars thy =
   let
     fun mtch k env (pat, obj0) =
@@ -192,7 +200,13 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
                     SOME is => (case EnvDiff.lookup' env (ixn, T) of
                         NONE => env |> match_bind binders (ixn,T) is obj
                       | SOME u =>
-                          if Pattern.aeconv (obj, red u is []) then env
+                          (* Need for normalization here should hardly arise in practice
+                             but it avoids failure (?A := g(?B) =/= g(b)) of
+                                f(?A) :match f(g(?B))
+                                ?A :match g(b) 
+                                with previous instantiation is ?B := b *)
+                          if Pattern.aeconv ((obj, red u is []) |> pairself (EnvDiff.norm_term env))
+                          then env
                           else raise Pattern.MATCH)
                   | NONE => (case pat of
                         (* pat is non-pattern, so we degrade to local first-order matching *)
@@ -205,12 +219,13 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
                               |> fold (mtch binders) ([pat1, pat2] ~~ [obj1, obj2])
                             end
                         | _ => raise Pattern.MATCH)
-                      | _ => error "gen_match_w_shared_vars: internal error: expected pattern application")
+                      | _ => error ("gen_match_w_shared_vars: internal error: pattern arguments are "
+                        ^"non-bounds but no pattern application found"))
                  end
             in
               case oh of
                 Var(ixn2,_) =>
-                  if ixn = ixn2 then rigrig1 env
+                  if ixn = ixn2 then rigrig1 env (*raise NonDistinctVars (pat, obj)*)
                   else varmatch ()
               | _ => varmatch ()
             end

@@ -2,6 +2,10 @@
 structure ZFUnifyData =
 struct
 
+  type otyp_ann = term * term
+  type mtyp_ann = term
+  val otyp_to_mtyp_ann = snd
+
   exception UnificationFailed of string
   exception SynthFail of Proof.context * string
 
@@ -70,17 +74,8 @@ struct
           else
             false
         end
-    in
-      if check_generated false ctxt2 then
-        oT
-      else
-        (* FIXME: abort right away once constraint generation in type synthesis can be avoided reliably *)
-        let
-          val ctxt3 = ctxt2 |> MetaRec.with_concl_in_lin_ctxt I (MetaRec.prop_of_proofp prf)
-            (MetaRec.metarec_constraint_simp prf #> snd)
-          val _ = check_generated true ctxt3
-        in MetaRec.norm_with_env_in_run_state ctxt3 oT end
-    end
+      val _ = check_generated true ctxt2
+    in oT end
 
   (* NB: constraint simplification necessary for consistent typing constraints for
      variables generated in unification*)
@@ -133,14 +128,14 @@ struct
         $ x $ typ
 
   fun mk_oapp t1 t2 = @{term "op `"} $ t1 $ t2
-  fun mk_olam (x, oT) body = @{term "Lambda"} $ oT $ Term.lambda x body
+  fun mk_olam (x, (k, oT)) body = @{term "univannot_lam"} $ k $ oT $ Term.lambda x body
   (* FIXME?: case of meta type oT_opt missing? *)
   fun mk_mlam (x, oT_opt) body = case oT_opt of
       SOME oT => @{term "annot_metalam"} $ oT $ Term.lambda x body
     | NONE => Term.lambda x body
 
-  fun mk_opi (x, A) body =
-    @{term "ZF.Pi"} $ A $ Term.lambda x body
+  fun mk_opi (x, (k, A)) body =
+    @{term "UniverseLevelInference.univannot_prod"} $ k $ A $ Term.lambda x body
 
   fun mk_mpi (x, Aopt) body =
     let
@@ -177,7 +172,7 @@ struct
   fun dest_oapp (Const(@{const_name "ZF.apply"}, _) $ t1 $ t2) = SOME (t1, t2)
     | dest_oapp _ = NONE
 
-  fun dest_opi (Const(@{const_name "ZF.Pi"}, _) $ A $ body) = SOME (A, body)
+  fun dest_opi (Const(@{const_name "UniverseLevelInference.univannot_prod"}, _) $ k $ A $ body) = SOME ((k, A), body)
     | dest_opi _ = NONE
 
   fun dest_mpi (Const(@{const_name "UniverseLevelInference.mPi"}, _) $ P $ body) =

@@ -547,6 +547,9 @@ end
                      MetaRec.err_with_trace ctxt ("collectHOLfacts proc: internal error: not a fact in fact table")
                    else ()
               in
+                (* later FIXME: once decompose_pattern_match_envctxt expects variable distinct
+                   pattern and object term and once non-ground facts are allowed
+                   this might constitute an (unlikely?) error *) 
                 case MetaRec.decompose_pattern_match_envctxt ctxt (pat, factconcl) of
                   SOME ctxt2 =>
                     (iobjs_pat @ oobjs_pat, iobjs2 @ oobjs2)
