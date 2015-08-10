@@ -183,7 +183,7 @@ val fix_headvar =
     fun fix_headvar_aux t =
       case t of
         Var ((n, idx), T) => Free (n, T)
-      | t1 $ t2 => fix_headvar t1 $ t2
+      | t1 $ t2 => fix_headvar_aux t1 $ t2
       | _ => raise Same.SAME
   in
     Same.commit fix_headvar_aux
@@ -207,7 +207,8 @@ fun matching env_opt fixvars unif t0 net nets =
     fun rands _ (Leaf _, nets) = nets
       | rands t2 (Net{comb,atoms,...}, nets) =
           case t2 of
-            f $ arg => fold_rev (matching unif arg) (rands f (comb,[])) nets
+            f $ arg => fold_rev (matching env_opt fixvars unif arg)
+              (rands f (comb,[])) nets
           | Const(c,_) => look1 (atoms, c) nets
           | Free(c,_)  => look1 (atoms, c) nets
           | Bound i    => look1 (atoms, Name.bound i) nets

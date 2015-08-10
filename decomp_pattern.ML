@@ -1,11 +1,22 @@
 
 signature DECOMP_PATTERN =
 sig
+  (* for all functions below: no deep pattern matching, so only
+     object term is regarded modulo normalization
+     and pattern term is assumed to be beta normal *)
+
+  (* to increase performance env is stratified in pattern and object env;
+     only pattern env is extended;
+     same unifvars in pattern and object are regarded to have different identities *)
+  val decompose_match: theory -> term * term -> EnvDiff.env * EnvDiff.env -> EnvDiff.env
+  val match: theory -> term * term -> EnvDiff.env * EnvDiff.env -> EnvDiff.env
+
+  (* common env that is extended; pattern and object term share their unifvars;
+     includes occurs check *)
   val decompose_match_w_shared_vars: theory -> term * term -> EnvDiff.env -> EnvDiff.env
   val match_w_shared_vars: theory -> term * term -> EnvDiff.env -> EnvDiff.env
 
   exception NotBetaNormal
-  exception NonDistinctVars of term * term
 end;
 
 structure DecompPattern: DECOMP_PATTERN =
@@ -13,7 +24,6 @@ struct
 
 
 exception NotBetaNormal
-exception NonDistinctVars of term * term
 
 fun string_of_term thy env binders t =
   Syntax.string_of_term_global thy
@@ -67,11 +77,6 @@ fun ints_of []             = []
       in if member (op =) is i then raise Pattern.Pattern else i::is end
   | ints_of _              = raise Pattern.Pattern;
 
-(* TODO(opt): head norming arguments of unifvars in patterns is
-   unnecessary because we do not normalize pattern at all here.
-   But since we check that they are bounds, deep variable bindings
-   cannot happen and this does not constitute a bug. *)
-fun ints_of' env ts = ints_of (map (EnvDiff.head_norm env) ts);
 
 
 fun app (s,(i::is)) = app (s$Bound(i),is)
@@ -147,75 +152,99 @@ fun first_order_match_w_shared_vars thy =
 
 
 
-(* matching were variables with same identity in pat and obj are regarded as shared
-  NB: no deep variable bindings, as this would correspond to unification, so we only norm the object *)
-fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
+(* If with_shared_vars = true this is matching were variables with same identity in pat and
+   obj are regarded as shared and pat_env = obj_env (esp. pat_env0 = obj_env0).
+     NB: no deep variable bindings, as this would correspond to unification,
+   so only the object term is regarded modulo normalization
+   and pat is assumed to be beta normal.
+     Success under with_shared_vars = false means that pat and obj and now equal under
+   the resulting pat_env and the original obj_env0:
+     norm obj_env0 (norm pat_env pat)  aconv  norm obj_env0 obj.
+   Success under with_shared_vars = true means that pat and obj and now equal under
+   the resulting obj_env. *)
+fun gen_match with_shared_vars is_decompose_match thy (pattern, object) (pat_env0, obj_env0) =
   let
-    (* Pre: pat and obj have same type *)
-    fun mtch binders (pat, obj0) env =
+    fun get_obj_env pat_env = if with_shared_vars then pat_env else obj_env0
+
+    (* Pre: pat and obj have same type under pat_env, obj_env *)
+    fun mtch binders (pat, obj0) pat_env =
       let 
-        (* NB: we normalize in order to regard common variables in object and pattern as shared.
-           Only object is normalized to avoid deep matching, which would correspond to unification. *)
-        val obj = obj0 |> EnvDiff.head_norm env
+        (* NB: pattern is not normalized to avoid deep matching,
+           which would correspond to unification. *)
+        val obj = obj0 |> EnvDiff.head_norm (get_obj_env pat_env)
       in
         case pat of
           Abs(ns,Ts,ts) =>
             (case obj of
-               Abs(nt,Tt,tt) => mtch ((nt,Tt)::binders) (ts, tt) env
+               Abs(nt,Tt,tt) => mtch ((nt,Tt)::binders) (ts, tt) pat_env
             | _ =>
               if is_decompose_match then raise Pattern.MATCH
               else
-                let val Tt = EnvDiff.subst_type env Ts
-                in mtch ((ns,Tt)::binders) (ts, incr obj $ Bound 0) env end)
+                let val Tt = EnvDiff.subst_type pat_env Ts
+                in mtch ((ns,Tt)::binders) (ts, incr obj $ Bound 0) pat_env end)
         | _ => (case obj of
-                  Abs(nt,Tt,tt) =>
-                    mtch ((nt,Tt)::binders) (incr pat $ Bound 0, tt) env
-               | _ => cases binders env pat obj)
+                 Abs(nt,Tt,tt) =>
+                   mtch ((nt,Tt)::binders) (incr pat $ Bound 0, tt) pat_env
+               | _ => cases binders (pat, obj) pat_env)
       end
 
-    and cases binders env pat obj =
+    and cases binders (pat, obj) pat_env =
       let
         val (ph,pargs) = strip_comb pat
         val (oh,oargs) = strip_comb obj
-        fun rigrig1 env_ = fold (mtch binders) (pargs~~oargs) env_
+        fun rigrig1 pat_env_ = fold (mtch binders) (pargs~~oargs) pat_env_
           handle ListPair.UnequalLengths => raise Pattern.MATCH
         fun rigrig2 ((a,Ta), (b,Tb)) =
           if a <> b then raise Pattern.MATCH
-          else env |> typ_match thy (Ta, Tb) |> rigrig1
+          else pat_env |> typ_match thy (Ta, Tb) |> rigrig1
       in
         case ph of
-          Var(ixn,T) =>
+          Var(ixn, T) =>
             let
               fun varmatch () = 
                 let
                   val _ =
-                    if occurs env ixn obj then
-                      (ocheck_fail_matching thy (ixn,obj,binders,env);
+                    if with_shared_vars andalso occurs (get_obj_env pat_env) ixn obj then
+                      (ocheck_fail_matching thy (ixn, obj, binders, get_obj_env pat_env);
                       raise Pattern.MATCH)
                     else ()
                 in 
                   case (SOME (ints_of pargs)
                     handle Pattern.Pattern => NONE)
                   of
-                    SOME is => (case EnvDiff.lookup' env (ixn, T) of
-                        NONE => env |> match_bind binders (ixn,T) is obj
+                    SOME is => (case EnvDiff.lookup' pat_env (ixn, T) of
+                        NONE =>
+                            (* NB: leaving out a binding for Var(ixn, T) if oh = Var(ixn2, T2)
+                               with ixn = ixn2 and T = T2 (modulo resp. normalizations) is not possible
+                               because Var(ixn, T) would then be regarded unbound and free
+                               for further any pattern matches while actually we want
+                               later matches against in to result in equality check against Var(ixn2, T). *)
+                          pat_env |> match_bind binders (ixn,T) is obj
                       | SOME u =>
                           (* Need for normalization here should hardly arise in practice
                              but it avoids failure (?A := g(?B) =/= g(b)) of
                                 f(?A) :match f(g(?B))
                                 ?A :match g(b) 
                                 with previous instantiation is ?B := b *)
-                          if Pattern.aeconv ((obj, red u is []) |> pairself (EnvDiff.norm_term env))
-                          then env
+                          if Pattern.aeconv ((obj, red u is [])
+                             |> pairself (EnvDiff.norm_term (get_obj_env pat_env)))
+                          then pat_env
                           else raise Pattern.MATCH)
                   | NONE => (case pat of
                         (* pat is non-pattern, so we degrade to local first-order matching *)
                         pat1 $ pat2 => (case obj of
                           obj1 $ obj2 =>
-                            let val typ_of = curry fastype_of1 (map snd binders)
+                            let 
+                              (* NB: in the case where pat1 = Bound i we actually
+                                 use the registered binder type, which is always from the
+                                 binder type of the object term. typ_match success then
+                                 depends on the equality of those types under the obj_env,
+                                 so we normalize both of them. *)
+                              fun obj_normed_typ_of t = fastype_of1 (map snd binders, t)
+                                |> EnvDiff.norm_type (get_obj_env pat_env)
                             in
-                              env
-                              |> typ_match thy (typ_of pat1, typ_of obj1)
+                              pat_env
+                              |> typ_match thy ((pat1, obj1) |> pairself obj_normed_typ_of)
                               |> fold (mtch binders) ([pat1, pat2] ~~ [obj1, obj2])
                             end
                         | _ => raise Pattern.MATCH)
@@ -224,8 +253,10 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
                  end
             in
               case oh of
-                Var(ixn2,_) =>
-                  if ixn = ixn2 then rigrig1 env (*raise NonDistinctVars (pat, obj)*)
+                Var(ixn2, T2) =>
+                  if with_shared_vars andalso ixn = ixn2
+                    andalso EnvDiff.norm_type pat_env T = EnvDiff.norm_type (get_obj_env pat_env) T2
+                  then rigrig1 pat_env
                   else varmatch ()
               | _ => varmatch ()
             end
@@ -234,7 +265,7 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
           | (Free f,Free g)   => rigrig2 (f,g)
           | (Bound i,Bound j) =>
               if i<>j then raise Pattern.MATCH
-              else rigrig1 env
+              else rigrig1 pat_env
           (* NB: if the term were beta-normal here, i.e. just an abstraction without arguments,
              we would have already descended into the abstraction in mtch *)
           | (Abs _, _)        => raise NotBetaNormal
@@ -243,13 +274,14 @@ fun gen_match_w_shared_vars is_decompose_match thy (po as (pat,obj)) env0 =
       end;
 
   in
-    env0
-    |> typ_match thy (fastype_of pat, fastype_of obj)
-    |> mtch [] po
+    pat_env0
+    |> typ_match thy (fastype_of pattern, fastype_of object |> EnvDiff.norm_type (get_obj_env pat_env0))
+    |> mtch [] (pattern, object)
   end;
 
 
-val match_w_shared_vars = gen_match_w_shared_vars false
+fun match_w_shared_vars thy po env = gen_match true false thy po (env, env)
+val match = gen_match false false
 
 
 (* same as match_w_shared_var, except: no eta expansion of object.
@@ -266,7 +298,8 @@ val match_w_shared_vars = gen_match_w_shared_vars false
      E.g.    f does not match (% x. ?t(x))
              but (% x. f(x)) does via ?t:=f
 *)
-val decompose_match_w_shared_vars = gen_match_w_shared_vars true
+fun decompose_match_w_shared_vars thy po env = gen_match true true thy po (env, env)
+val decompose_match = gen_match false true
 
 
 

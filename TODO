@@ -51,26 +51,6 @@
        Fakten-Propagierung auf proof_packs umstellen
        um add_assm_terms_internal stark zu vereinfachen.
 
-     * Simplify constraints right when they are issued in constraint_gen_proc
-       to make them much *smaller*. Already tried this in the past: the resulting
-       indirect recursion of constraint_gen_proc via the generation of simpler
-       constraints is a bit involved, since simplification rule sets signify
-       non-progress by regenerating the non-simplifiable constraint which
-       constraint_gen_proc would naively try to simplify again resulting in non-termination.  
-       (metarec_constraint_simp_internal relies on the presence of the assumption
-       of the constraint in the proof of its simplification to recognize its
-       non-simplification, so once we avoid non-termination this should work)
-         Simple solution: manage simping_constraint_gen_proc flag that avoids
-       constraint simplification in constraint_gen_proc if it is false.
-       Potential problem is that this avoids nested simplification opportunities,
-       but they should be rare depending on the simplification judgement design
-       by the user.
-         Full solution: manage simping_constraints stack and check for arising
-       cyclic simplification situations before simplifying a constraint
-       (or before deciding to simplify a new constraints in constraint_gen_proc). 
-       This might also be the better solution to ensure termination of the
-       simplification of instantiated constraints?
-
      * Completely avoid rule-freshening by using rule-app-local environments for
        matching variables and *shallowly* normalizing instantiated
        matching variables away in all cases (which completely removes them
@@ -79,11 +59,16 @@
        env which is extended and used for normalizing the pattern term
        and the globally threaded env for opportunistic normalization
        of the object term. 
+         If debugging=true, check that matching variables (unifvars in the original rule)
+       are actually gone in assumptions, subcall inputs and outputs.
+       This can only be the case if matching variable groundness has been unsafely
+       overridden via MR_unchecked rules.
          Was matching with shared variables in pattern and object terms just
        a defensive move by me, not realizing that due to freshening of
        rules, current matching variables could never occur in object terms anyway?
-       Does occur in exconstraint matching somehow, but did not occur in
-       nonfreedata animation.
+       Not yet: occurs in output pattern matching in solve_prems due to full
+       normalization of premise and in mp_match_prf.
+       Include debugging check for now?
          Rule-freshening itself is not that expensive due to smallness of rule
        and ease of maxidx access but adding freshened matching variables to
        the globally threaded env quickly results in *huge* env badly impacting
@@ -119,21 +104,19 @@
        modulo constrainat simplification to account for later instantiations enabling
        further constraint simplifications, at least in extreme cases?).
 
+
      * Normalisierungen sparen wo moeglich. V.a. in metarec Ableitung, aber
        nicht in constraint Vereinfachung ueber CHRs weil Constraints fast immer
        kleine Terme sind die viel instantiiert werden und wir var_exact_net
        sowieso immer ausnormalisieren.
        Genauer:
        * top_metastruct_norm Funktion die obere !! xs. As ==> try(J ins outs)
-         Struktur fuer solve_prems normalisiert wobei As, ins, outs nicht
+         Struktur fuer solve_prems normalisiert wobei ins, outs nicht
          normalisiert werden.
        * Annahmen muessen vor der Kontexterweiterungs-Verarbeitung explizit voll
          ausnormalisiert werden weil direkte und lokale Regeln als normalisiert
          angenommen werden, insbesondere in ihren input-pos-Patterns die beim
          matchen gegen die Regel auch nicht weiter normalisiert werden.
-       * pattern_matches_envctxt und decompose_pattern_match_envctxt muessen mit
-         head_norm arbeiten und trotzdem deep variable Instantiierungen vermeiden.
-         (done, nurnoch object-term norming in gen_pattern_match_envctxt muss weg)
        * Netzlookup (genauer Item_Net2.retrieve_match) das nur inkrementell
          betaeta- und env-normalisiert soweit noetig.
          Ausserdem optionales inkrementelles Varfixing im lookup-term um
@@ -190,12 +173,6 @@
        * Zusammenhaengende Folgen von AllEs, mps, impIs, AllIs buendeln statt einzeln zu folden?
 
 
-     * kann man vllt drum herum kommen die zertifizierten Instantiierungen immer
-       voll auszurollen und stattdessen mit Thm.instantiate_cterm arbeiten?
-       Aber letzten Endes brauchen wir ja fuer die voll ausgerollte Instantiierung
-       der angewandten Regel. Vllt sowieso nicht so schlimm weil die Patterns
-       beim matchen selten gross sind? Und wenn sie gross sind dann sind das nur
-       syntaktische Gleichheitsueberpruefungen?
 
      * zu Input term in primaerer Position einen maximal-gesharetem Term-DAG verwalten
        und parallel in ihn absteigen bei Anwendung von _strukturellen Regeln_
@@ -213,8 +190,6 @@
 
        Pure/term_sharing.ML stellt maximales sharing syntaktisch
        gleicher Subterme her.
-
-
 
     Einordnung: Term-DAG-Optimierung entspricht sharing bzgl Termstruktur,
        Skeleton Optimierung entspricht sharing in Regeln?
@@ -377,6 +352,9 @@
            (Dazu ggf synthprocs anpassen, v.a. unify_proc)
            Dann ist nur bei Applikationen von Matching-Variablen
            Normalisierungsaufwand notwendig.
+       * Moeglichst typesafe Code-Generierungs-Kombinatoren nutzen,
+         cf. BER MetaOCaml Diskussionen von Oleg und meine Versuche
+         in Template Haskell.
 *)
 
 

@@ -4,6 +4,7 @@ begin
 
 
 
+
 ML {*
   val B_x = @{cpat "% z::i. ?B(x::i, z, f(z)) :: i"} |> Thm.term_of
   val prod = @{cpat "% z::i. PROD x:?C(f(z)). ?D(x, z)"} |> Thm.term_of
@@ -1913,7 +1914,7 @@ schematic_lemma "(PRODu k1 x:A. PRODu k2 y:B(x). C(x, y)) <: guniv i"
                 case typ_constraint_ctxt_discharger rel_fixes C2 ctxt3 of
                   SOME subres => subres
                 | NONE => ((C2, MetaRec.assumption_prf C2), ctxt3)
-              val (prf_res, ctxt5) = MetaRec.mps_match_on_freshthm_prf @{thm constraint_typ_apply}
+              val (prf_res, ctxt5) = MetaRec.mps_match_on_thm_prf @{thm constraint_typ_apply}
                 [MetaRec.assumption_prf assm, prf3] ctxt4
             in
               SOME ((C3, prf_res), ctxt5)
@@ -2379,6 +2380,18 @@ lemma uless_usucc_lhs_simp[constraint_simp_rule]: "
   apply (erule conjE)
   by (rule usucc_less_from_interm)
 
+
+(* FIXME? do we not want constraint_simp_rules corresponding to uleq_umax{1,2}[_direct[_usucc]] ???
+   esp. to simplify trivial constaints such as   ?i u< ... umax usucc(?i) umax ...   right away *)
+(* FIXME: constraint simplification rule   i u<= i  should have priority over all others, esp. to
+   avoid overly complex simplifications such as
+      ... ==> i1 u<= i1 umax i2
+      ... ==>  i2 u<= i1 umax i2
+      [|  i1 u<= i1 umax i2  ;  i2 u<= i1 umax i2  |]  ==>  i1 umax i2 u<= i1 umax i2
+    *)
+(* FIXME: constraint simplification rules should completely recursively simplify the constraint
+   they act on based on metarec calls to corresponding judgements, instead of emitting potentially
+   intermediate constraints that in turn have to be simplified. *)
 
 
 ML {*
@@ -3330,8 +3343,8 @@ end
 
 
 
-use "../objlang_unify.ML"
-use "zf_unify.ML"
+ML_file "../objlang_unify.ML"
+ML_file "zf_unify.ML"
 
 
 ML {* elab @{context} (@{cpat "guniv ?i"} |> Thm.term_of) *}

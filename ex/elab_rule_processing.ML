@@ -52,9 +52,10 @@ struct
     fun opt_inv_elab_hhf ctxt prop =
       let
         (* TODO(opt, refactor): use Variable.focus for parameter fixation *)
-        val (param_fresh_ns, ctxt2) = ctxt |> Variable.variant_fixes
-          (map fst (Logic.strip_params prop))
-        val (params, body) = MetaRec.strip_alls param_fresh_ns prop
+        val params_raw = Term.strip_all_vars prop
+        val (param_fresh_ns, ctxt2) = ctxt |> Variable.variant_fixes (map fst params_raw)
+        val params = param_fresh_ns ~~ (map snd params_raw) |> map Free
+        val body = prop |> Term.strip_all_body |> curry Term.subst_bounds (rev params) 
         val (prems, concl) = Logic.strip_horn body
         val prems' = prems |> map_filter (opt_inv_elab_hhf ctxt2)
       in

@@ -60,13 +60,23 @@ signature ENV_DIFF = sig
   val typ_unify: theory -> typ * typ -> env -> env
 
 
+  exception Bound0Dependent of int
+  datatype head_norm_ty = NormUnderAbs | NoNormUnderAbs
+  val decr_bnd : int -> int -> term
+  val decr_normopt : Envir.env -> int -> term -> term option
+  val head_norm_same: head_norm_ty -> Envir.env -> term -> term
   val betaeta_head_norm: Envir.env -> term -> term
 
   (* only normalizing around instantiation sites of variables, not normalizing in the instantiation sites,
      but beta outside instantiation sites can affect instantiation via substitution of course *)
-  val shallow_norm_type: env -> typ -> typ
-  val shallow_norm_term: env -> term -> term
+  val shallow_norm_type: env -> (typ -> typ) -> typ -> typ
+  val shallow_norm_term: env -> ((typ -> typ) * (term -> term)) -> term -> term
+  val shallow_norm_term_deepenv: env -> env -> term -> term
 
+  val norm_context_structure : (term -> term) * ((typ -> typ) * (term -> term))
+    -> term -> term
+
+  val rename_abs_headnorming : env -> term -> term -> term -> term option
 end
 
 
@@ -161,9 +171,21 @@ fun lookup_type envdiff ixnS = Type.lookup (type_env envdiff) ixnS
 fun lookup_type_wosort envdiff ixn = Vartab.lookup (type_env envdiff) ixn
 
 (* EnvDiff's raison d'etre *)
-fun update (ixnT_t as ((ixn, _), _)) envdiff = envdiff
-  |> unsafe_map_env (curry Envir.update ixnT_t)
-  |> map_diff_slots (Symtab.map (K (apsnd (cons ixn))))
+fun update (ixnT_t as ((ixn, T), _)) envdiff =
+  let
+    val _ = ()
+      (*case Vartab.lookup (term_env envdiff) ixn of
+        SOME (T2, t) => error ("EnvDiff.update: variable "
+          ^Syntax.string_of_term @{context} (Var (ixn, T))
+          ^(if Type.eq_type (type_env envdiff) (T, T2) then ""
+            else " (with differring types "^commas ([T,T2] |> map (Syntax.string_of_typ @{context}))^")")
+          ^" already bound to "^Syntax.string_of_term @{context} t)
+      | NONE => ()*)
+  in
+    envdiff
+    |> unsafe_map_env (curry Envir.update ixnT_t)
+    |> map_diff_slots (Symtab.map (K (apsnd (cons ixn))))
+  end
 fun update_type ((ixn, S), T) envdiff = envdiff
   |> unsafe_map_tyenv (Vartab.update_new (ixn, (S, T)))
   |> map_diff_slots (Symtab.map (K (apfst (cons ixn))))
@@ -305,64 +327,91 @@ fun typ_unify thy TU =
 
 
 
-exception Bound0Dependent
+(* !! NB polyML compiler bug workaround: when handling exceptions with no
+   (or unit) arguments, other exceptions with no (or unit) arguments are
+   also handled so we avoid conflict with handling of Same.SAME and
+   add useless int argument to Bound0Dependent exception!! *)
+exception Bound0Dependent of int
 
-(* NB: assumes head-normal t (i.e. not of the form
+fun decr_bnd lev i =
+  let val _ = () (*tracing ("decr_bnd with level "^string_of_int lev^" on Bound "^string_of_int i)*)
+  in
+  if i = lev then
+    let val _ = () (*tracing ("raising Bound0Dependent")*)
+    in raise Bound0Dependent 0 end
+  else if i > lev then Bound (i - 1)
+  else raise Same.SAME
+  end
+
+(* NB: assumes head-normal term0 (i.e. not of the form
    (% xs. (% z. ..) $ a $ ..) modulo variable instantiation);
    instantiated variables are only chased if one of their arguments depends on  Bound 0 *)
-fun decr_normopt env lev t =
+fun decr_normopt env lev term0 =
   let
-    fun full_commit f x = Same.commit f x handle Bound0Dependent => x
+    fun full_commit f x = Same.commit f x handle Bound0Dependent _ => x
 
-    fun decr_bnd lev i =
-      if i = lev then raise Bound0Dependent
-      else if i > lev then Bound (i - 1)
-      else raise Same.SAME
 
     fun decr lev (Abs (a, T, body)) =
           Abs (a, T, decr (lev + 1) body)
-      | decr lev t =
+      | decr lev term =
           let
-            val (h, ts) = Term.strip_comb t
+            val (head, args) = Term.strip_comb term
             val recfun = decr lev o Envir.head_norm env
 
-            val ts'_calc_opt = ts |> map (fn t => (t, Same.capture recfun t)) |> SOME
-              handle Bound0Dependent => NONE
-            val args_dependent = not (is_some ts'_calc_opt)
-            fun ts'_committed () =
-              (case ts'_calc_opt of SOME ts'_calc => ts'_calc
+            (*val _ = tracing ("decr: app split argument: "
+              ^PolyML.makestring (*Syntax.string_of_term @{context}*) head^" $ "
+              ^commas (args |> map (PolyML.makestring (*Syntax.string_of_term @{context}*))))*)
+
+            val args'_calc_opt = args |> map (fn t => (t, Same.capture recfun t)) |> SOME
+              handle Bound0Dependent _ => NONE
+            val args_dependent = not (is_some args'_calc_opt)
+            fun args'_committed () =
+              (case args'_calc_opt of
+                 SOME args'_calc => args'_calc
                | NONE => error "decr_normopt: internal error")
               |> map (fn (t, t'_opt) => the_default t t'_opt)
-            fun ts'_fully_committed () = ts |> map (full_commit recfun)
+            fun args'_fully_committed () = args |> map (full_commit recfun)
             fun form_comb_with_same_head () =
-              if args_dependent then raise Bound0Dependent
+              if args_dependent then raise Bound0Dependent 0
               else
-                let val ts' =
-                  (case ts'_calc_opt of SOME ts'_calc => ts'_calc
+                let val args' =
+                  (case args'_calc_opt of
+                     SOME args'_calc => args'_calc
                    | NONE => error "decr_normopt: internal error")
                   |> map (fn (_, t'_opt) => case t'_opt of SOME t' => t' | NONE => raise Same.SAME)
-                in Term.list_comb (h, ts') end
+                in Term.list_comb (head, args') end
           in
-            case h of
+            case head of
               Var (ixn, T) =>
                 if args_dependent then
                   case Envir.lookup (env, (ixn, T)) of
                     SOME u => Same.commit (decr lev)
-                      (Envir.head_norm env (Term.betapplys (u, ts'_fully_committed ())))
-                  | NONE => raise Bound0Dependent
+                      (Envir.head_norm env (Term.betapplys (u, args'_fully_committed ())))
+                  | NONE => raise Bound0Dependent 0
                 else
                   form_comb_with_same_head ()
             | Bound i =>
-                if args_dependent then raise Bound0Dependent
+                if args_dependent then raise Bound0Dependent 0
                 else
-                  Term.list_comb (decr_bnd lev i, ts'_committed ())
+                  ((Term.list_comb (decr_bnd lev i, args'_committed ()))
                   handle Same.SAME => form_comb_with_same_head ()
-            | _ => (* NB: t is head-normal, so h cannot be an abstraction *)
+                    (*| ex as Bound0Dependent _ =>
+                        let val _ = tracing ("Bound0Dependent raised after decr_bnd in decr")
+                        in raise ex end*))
+            | Abs _ =>
+                (* NB: term is head-normal (assumed for input term, otherwise ensured),
+                   so head cannot be an abstraction *)
+                error ("decr_normopt: term not head normal")
+            | _ => 
                 form_comb_with_same_head ()
           end
+    val res = Same.commit (decr lev) term0 |> SOME
+      handle Bound0Dependent _ => NONE
+    (*val _ = tracing ("decr_normopt: returning "^(case res of
+        SOME t => "SOME  "^PolyML.makestring (*Syntax.string_of_term @{context}*) t
+      | NONE => "NONE")) *)
   in
-    SOME (Same.commit (decr lev) t)
-    handle Bound0Dependent => NONE
+    res
   end
 
 
@@ -391,28 +440,70 @@ fun head_norm_same under_abs env =
 
 fun betaeta_head_norm_same env t =
   let
+    val _ = () (*tracing ("betaeta_head_norm_same on "^PolyML.makestring (*Syntax.string_of_term @{context}*) t)*)
     fun eta_step_same t2 =
       let
+        val _ = () (*tracing ("eta_step_same on "^PolyML.makestring (*Syntax.string_of_term @{context}*) t2)*)
         fun eta_headnormed_body body' =
+          let
+            val _ = () (*tracing ("eta_headnormed_body on "^PolyML.makestring body')*)
+          in
           case body' of
             f $ arg =>
-              (case head_norm_same NoNormUnderAbs env arg of
+              let
+                val _ = () (*tracing ("eta_step_same: norming argument "
+                  ^PolyML.makestring (*Syntax.string_of_term @{context}*) arg)*)
+                val arg_normed = Same.commit (head_norm_same NoNormUnderAbs env) arg
+                val _ = () (*tracing ("eta_step_same: normed argument to "
+                  ^PolyML.makestring (*Syntax.string_of_term @{context}*) arg_normed)*)
+              in
+              (case arg_normed of
                 Bound 0 =>
-                  (case decr_normopt env 0 f of
-                    SOME f' => f'
+                  let
+                    val decr_res = decr_normopt env 0 f
+                    val _ = () (*tracing ("eta_step_same: decr_normopt returned "
+                      ^PolyML.makestring (*Syntax.string_of_term @{context}*) f) *)
+                  in
+                  (case decr_res of
+                    SOME f' => 
+                      let val _ = ()(*tracing ("eta_step_same: eta reduction to "
+                         ^PolyML.makestring (*Syntax.string_of_term @{context}*) f')*)
+                      in f' end
                   | NONE => raise Same.SAME)
+                  end
               | _ => raise Same.SAME)
+              end
           | _ => raise Same.SAME
+          end
       in
         case t2 of
           Abs (x, T, body) =>
-            Same.commit eta_headnormed_body (betaeta_head_norm_same env body)
-            handle Same.SAME => eta_headnormed_body body
+            let
+              val body2_opt = Same.capture (betaeta_head_norm_same env) body
+              val body_eta_opt = Same.capture eta_headnormed_body (the_default body body2_opt)
+            in
+              case body2_opt of
+                NONE => (case body_eta_opt of
+                    NONE => raise Same.SAME
+                  | SOME body_eta => body_eta)
+              | SOME body2 => (case body_eta_opt of
+                    NONE => Abs (x, T, body2)
+                  | SOME body2_eta => body2_eta)
+            end
         | _ => raise Same.SAME
       end
+
+     val res = 
+       Same.commit eta_step_same (head_norm_same NoNormUnderAbs env t) |> SOME
+       handle Same.SAME => Same.capture eta_step_same t
+     (* val _ = tracing ("betaeta_head_norm_same: returning "^
+       (case res of
+         SOME x => PolyML.makestring (*Syntax.string_of_term @{context}*) x
+       | NONE => "raised SAME")) *)
    in
-     Same.commit eta_step_same (head_norm_same NoNormUnderAbs env t)
-     handle Same.SAME => eta_step_same t
+     case res of 
+       SOME x => x
+     | NONE => raise Same.SAME
    end
 fun betaeta_head_norm env t = Same.commit (betaeta_head_norm_same env) t
 
@@ -421,56 +512,175 @@ fun betaeta_head_norm env t = Same.commit (betaeta_head_norm_same env) t
 
 
 
+  (* pat0 expected to be beta-normal and env-normal as far as interesting here;
+     term0 is assumed to superficially match pat0 (modulo env-normalization) and is not required
+     to be env- or beta-normal. *)
+fun match_bvs_headnorming env pat0 term0 =
+  let
+    fun match_bvs p t al =
+      case (p, t) of
+        (Abs(x, _, p_body), Abs(y, _, t_body)) =>
+          match_bvs p_body t_body 
+            (if x="" orelse y="" then al else (x,y) :: al)
+      | (p_f $ p_arg, t_f $ t_arg) =>
+          match_bvs p_f t_f (match_bvs p_arg (head_norm env t_arg) al)
+      | _ => al
+  in
+    match_bvs pat0 (head_norm env term0) []
+  end
 
-fun shallow_norm_type_same env : typ Same.operation =
+(* adapted from Pure/term.ML:rename_abs *)
+fun rename_abs_headnorming env pat0 term0 t =
+  let
+    val ren = match_bvs_headnorming env pat0 term0
+    fun ren_abs (Abs (x, T, b)) =
+          Abs (the_default x (AList.lookup (op =) ren x), T, ren_abs b)
+      | ren_abs (f $ t) = ren_abs f $ ren_abs t
+      | ren_abs t = t
+  in
+    if null ren then NONE
+    else SOME (ren_abs t)
+  end
+
+
+fun shallow_norm_type_same env deep_norm : typ Same.operation =
   let
     fun norm (Type (a, Ts)) = Type (a, Same.map norm Ts)
       | norm (TFree _) = raise Same.SAME
       | norm (TVar v) =
           (case lookup_type env v of
-            SOME U => U  (* NB: no deep normalizing! *)
+            SOME U => deep_norm U (* NB: deep normalization factored out! *)
           | NONE => raise Same.SAME);
   in norm end;
 
-fun shallow_norm_type env = Same.commit (shallow_norm_type_same env)
+fun shallow_norm_type env deep_norm = Same.commit (shallow_norm_type_same env deep_norm)
 
 
 
-fun shallow_norm_term_same env : term Same.operation =
+fun shallow_norm_term_same env (deep_normT, deep_norm) : term Same.operation =
   let
-    val normT = shallow_norm_type_same env;
+    val normT = shallow_norm_type_same env deep_normT;
 
-    fun norm_spine (h, ts) : term = case h of
+
+    fun norm_spine (h, args) : term = case h of
         Const (a, T) =>
-          (Term.list_comb (Const (a, normT T), map (Same.commit norm) ts)
-          handle Same.SAME => Term.list_comb (Const (a, T), Same.map norm ts))
+          (Term.list_comb (Const (a, normT T), map (Same.commit norm) args)
+           handle Same.SAME => Term.list_comb (Const (a, T), Same.map norm args))
       | Free (a, T) =>
-          (Term.list_comb (Free (a, normT T), map (Same.commit norm) ts)
-          handle Same.SAME => Term.list_comb (Free (a, T), Same.map norm ts))
+          (Term.list_comb (Free (a, normT T), map (Same.commit norm) args)
+           handle Same.SAME => Term.list_comb (Free (a, T), Same.map norm args))
       | Var (xi, T) =>
           (case lookup env (xi, T) of
             SOME u =>
-              (* NB: no deep normalizing!
-                 If u is an abstraction, surrounding applications can trigger
-                 beta reduction of course which then substitute into it. *)
-              Term.betapplys (u, map (Same.commit norm) ts)
-          | NONE => Var (xi, normT T))
+              (* NB: deep normalization factored out! *)
+              (* we even avoid beta-reductions here, creating the possibility that
+                 deep_norm retains  (% xs. u) $ args  as an explicit substitution to save work. *)
+              deep_norm (Library.foldl (op $) (u, map (Same.commit norm) args))
+          | NONE =>
+              (Term.list_comb (Var (xi, normT T), map (Same.commit norm) args)
+               handle Same.SAME => Term.list_comb (Var (xi, T), Same.map norm args)))
+      | Bound i => Bound i
       | Abs (a, T, body) =>
-          (case ts of
+          (case args of
             [] => 
               (Abs (a, normT T, Same.commit norm body)
               handle Same.SAME => Abs (a, T, norm body))
-          | t1 :: ts2 =>
-              let val (h', ts') = Term.strip_comb (Term.subst_bound (t1, body))
+          | t1 :: args2 =>
+              let val (h', args') = Term.strip_comb (Term.subst_bound (t1, body))
               in
-                norm_spine (h', ts' @ ts2)
-                handle Same.SAME => Term.list_comb (h', ts' @ ts2)
+                norm_spine (h', args' @ args2)
+                handle Same.SAME => Term.list_comb (h', args' @ args2)
               end)
 
     and norm t = norm_spine (Term.strip_comb t)
 
-  in norm end;
+  in fn t =>
+    let 
+      (*val _ = tracing ("shallow_norm_term: on "^Syntax.string_of_term @{context} t)*)
+      val t' = norm t
+      (*val _ = tracing ("shallow_norm_term: norming "^Syntax.string_of_term @{context} t
+        ^"  to   "^Syntax.string_of_term @{context} t')*)
+    in t' end
+  end;
 
-fun shallow_norm_term env = Same.commit (shallow_norm_term_same env)
+fun shallow_norm_term env deep_norms =
+  Same.commit (shallow_norm_term_same env deep_norms)
+fun shallow_norm_term_deepenv env deep_env =
+  Same.commit (shallow_norm_term_same env (norm_type deep_env, norm_term deep_env))
+
+
+fun strip_alls_headnorming headnorm P =
+  case headnorm P of
+    Const("all", _) $ Abs(a, T, P2) =>
+      strip_alls_headnorming headnorm P2 |> apfst (cons (a, T))
+  | P' => ([], P')
+
+fun strip_imps_headnorming headnorm P =
+  case headnorm P of
+    Const ("==>", _) $ A $ P2 =>
+      strip_imps_headnorming headnorm P2 |> apfst (cons A)
+  | P' => ([], P')
+    
+    
+
+(* norms Ts, As and headnorm P in (!! xs : Ts. As(xs) ==> P(xs)) *)
+fun norm_context_structure (headnorm, (normT, norm)) prop =
+  let
+    val (xs, P0) = strip_alls_headnorming headnorm prop
+    val (As, P) = strip_imps_headnorming headnorm P0
+  in
+    Logic.list_implies (map norm As, headnorm P)
+    |> curry Logic.list_all (map (apsnd normT) xs)
+  end
+
+
+
+
+
+
+
+
+(* testing *)
+(*
+(* to workaround on-the-fly beta reduction when using @{term ..} expressions;
+   NB: later Syntax.string_of_term calls expect argument to be beta normal?! *)
+definition
+  appmark :: "('a :: {} => 'b :: {}) => 'a => 'b" (infixl "$$" 100) where 
+  "appmark(f,x) == f(x)"
+ML {*
+  fun rm_appmark t =
+    case t of
+      Abs(x, T, body) => Abs(x, T, rm_appmark body)
+    | Const(@{const_name "appmark"}, _) $ t1 $ t2 => rm_appmark (t1 $ t2)
+    | t1 $ t2 => rm_appmark t1 $ rm_appmark t2
+    | a => a
+  fun int_of_string str = read_int (raw_explode str) |> fst
+  fun bndfree_map t =
+    t |> map_aterms (fn a => case a of
+        Free(n, _) =>
+          (case try (unprefix "Bnd") n |> Option.map int_of_string of
+            SOME i => Bound i
+          | NONE => a)
+      | _ => a)
+*}
+
+ 
+ML {*
+  val _ = tracing "======="
+  val env0 = (Envir.empty 0)
+  val bhn = EnvDiff.betaeta_head_norm env0
+  val t = @{term "% x. (% z. f(% y. z(y))) $$ x"} |> rm_appmark
+  (*val t2 = t |> Same.commit (EnvDiff.head_norm_same EnvDiff.NoNormUnderAbs env0)
+  val t3 = (Free("f", @{typ "'a => 'b"})) |> EnvDiff.decr_normopt env0 0*)
+  val (r1, r2) = t
+    |> (fn t => (bhn t, t |> Envir.beta_norm |> Envir.eta_contract))
+  *}
+
+ML {*
+  val t = @{term "% x. f $$ (g $$ x $$ z) $$ (g $$ x $$ Bnd1) $$ x"} |> rm_appmark |> bndfree_map;
+  EnvDiff.decr_normopt env0 0 t;
+*}
+*)
+
 
 end

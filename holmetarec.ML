@@ -490,7 +490,7 @@ end
 
 
   (* TODO: did this survive the porting, esp. the 'a set change? not tested yet? *)
-  fun collectHOLfacts_proc ctxt (pat0_ct, [], _) =
+  (*fun collectHOLfacts_proc ctxt (pat0_ct, [], _) =
     let
       val thy = Proof_Context.theory_of ctxt
       val pat0 = pat0_ct |> Thm.term_of |> Envir.beta_norm
@@ -567,7 +567,7 @@ end
       val res = res0 OF [assm]
     in
       (res0 OF [assm], [Js_ct])
-    end
+    end*)
 
 
 
@@ -583,7 +583,7 @@ end
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.onfailerr_const_jud" "onfailerr_proc" onfailerr_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.simpto_const_jud" "simpto_proc" (simpto_proc false)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.powersimpto_const_jud" "powersimpto_proc" (simpto_proc true)
-      #> MetaRec.add_syn_proc "HOLMetaRecSyntax.collectHOLfacts_int_jud" "collectHOLfacts_internal_proc" collectHOLfacts_proc
+      (*#> MetaRec.add_syn_proc "HOLMetaRecSyntax.collectHOLfacts_int_jud" "collectHOLfacts_internal_proc" collectHOLfacts_proc*)
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.scopify_name_jud" "scopify_name_proc" scopify_name_proc
       #> MetaRec.add_syn_proc "HOLMetaRecSyntax.gen_fresh_jud" "gen_fresh_proc" gen_fresh_proc)
 
